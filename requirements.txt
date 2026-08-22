@@ -3,3 +3,4 @@ coinbase-advanced-py==1.8.2
 cryptography==45.0.6
 python-multipart==0.0.20
 
+key-value>=0.1.0
