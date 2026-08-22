@@ -9,3 +9,4 @@ USER mcpuser
 EXPOSE 8080
 CMD ["python", "-m", "app.server"]
 
+# Cache bust: Sat Aug 22 23:51:33 UTC 2026
