@@ -22,7 +22,6 @@ auth = GitHubProvider(
     client_id=os.environ["GITHUB_CLIENT_ID"],
     client_secret=os.environ["GITHUB_CLIENT_SECRET"],
     base_url=BASE_URL,
-    jwt_signing_key=os.environ["JWT_SIGNING_KEY"],
     client_storage=DiskStore(directory=os.path.join(os.getenv("DATA_DIR", "/app/data"), "oauth")),
 )
 mcp = FastMCP("Primus Coinbase $25 Pilot", auth=auth, instructions="Private $25 spot pilot. Never invent tickets or credentials. Call preflight before submit. Write tools are high-impact and server-validated.")
@@ -89,3 +88,4 @@ def emergency_pause(reason: str) -> dict:
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+
