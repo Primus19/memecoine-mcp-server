@@ -35,7 +35,12 @@ def calendar_evidence(symbol: str) -> dict:
     currencies = set(symbol.split("_")); distances = []
     for event in payload.get("events", []):
         if str(event.get("currency", "")).upper() in currencies and str(event.get("impact", "")).upper() == "HIGH":
-            distances.append(abs(int(event.get("minutes_until", 0))))
+            minutes = int(event.get("minutes_until", 0))
+            before = max(0, int(event.get("blackout_before_minutes", 0)))
+            after = max(0, int(event.get("blackout_after_minutes", 0)))
+            if -after <= minutes <= before: distances.append(0)
+            elif minutes > before: distances.append(minutes - before)
+            else: distances.append(abs(minutes + after))
     return {"minutes": min(distances) if distances else 10080, "verified": True, "source": source}
 
 
