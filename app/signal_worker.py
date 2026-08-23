@@ -30,6 +30,11 @@ def candidate_digest(candidate: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def terminal_http_status(status: int) -> bool:
+    """Only deterministic caller errors are deduplicated; server errors retry."""
+    return 400 <= status < 500
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         if self.path != "/health":
@@ -127,16 +132,18 @@ class SignalWorker:
             digest = candidate_digest(candidate)
             if digest in self.seen:
                 continue
-            self.seen[digest] = time.time()
             try:
                 result = self.request_json(
                     f"{self.executor_url}/api/auto-candidate",
                     token=self.executor_token,
                     payload=candidate,
                 )
+                self.seen[digest] = time.time()
                 forwarded.append({"digest": digest, "status": "accepted", "result": result})
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode(errors="replace")[:2000]
+                if terminal_http_status(exc.code):
+                    self.seen[digest] = time.time()
                 forwarded.append({"digest": digest, "status": "rejected", "http_status": exc.code, "detail": detail})
         result = {"mode": health["mode"], "feed_candidates": len(fresh), "forwarded": forwarded}
         self.write_status(ok=True, **result)

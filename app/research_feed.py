@@ -116,7 +116,9 @@ class ResearchFeed:
         breadth = sum(v > 0 for v in day) / len(day) if day else 0
         medians = {"1h": statistics.median(one) if one else 0, "24h": statistics.median(day) if day else 0, "7d": statistics.median(week) if week else 0}
         rising = len(liquid) >= 5 and breadth >= .60 and all(value > 0 for value in medians.values())
-        return {"classification": "RISING" if rising else "MIXED", "sample_size": len(liquid), "positive_24h_breadth": breadth, "median_changes": medians}
+        falling = len(liquid) >= 5 and breadth <= .40 and medians["1h"] < 0 and medians["24h"] < 0
+        classification = "RISING" if rising else "FALLING" if falling else "MIXED"
+        return {"classification": classification, "sample_size": len(liquid), "positive_24h_breadth": breadth, "median_changes": medians}
 
     @staticmethod
     def valid_evidence(evidence: dict[str, Any], product_id: str, at: datetime) -> tuple[bool, list[str]]:
@@ -186,7 +188,8 @@ class ResearchFeed:
             "identity_verified": True, "no_safety_veto": True,
             "notional_usdc": self.notional, "max_loss_usdc": self.max_loss,
             "reference_price": price, "limit_price": price * 1.0035,
-            "stop_price": price * .92, "target_price": price * 1.15,
+            "stop_price": price * .92, "target_1_price": price * 1.15,
+            "target_price": price * 1.30, "trail_activation_pct": 12, "trail_pct": 8,
             "thesis": str(evidence.get("thesis") or "Fresh verified catalyst with positive liquid-market momentum"),
             "invalidation": str(evidence.get("invalidation") or "Safety veto, catalyst invalidation, spread/slippage failure, or momentum reversal"),
             "evidence_urls": list(dict.fromkeys(sources)), "source_timestamp": at.isoformat(), "expiry_seconds": 90,

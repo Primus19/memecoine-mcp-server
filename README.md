@@ -145,6 +145,33 @@ executor without changing the worker. The worker is a low-latency transport,
 not a substitute for a genuine always-on research feed. If the feed is missing,
 stale, malformed, or unavailable, it fails closed and forwards nothing.
 
+## Continuous position supervisor
+
+Run `python -m app.position_worker` as a separate Railway background service.
+It polls the authoritative executor every 5-60 seconds, reconciles Coinbase
+fills, records the +15% milestone, ratchets an 8% trailing exit after +12%, and
+submits a managed exit on a FALLING regime. The Coinbase-attached hard stop and
++30% target remain live at the venue if the supervisor or Railway is offline.
+Before a managed exit, the executor cancels open sell orders and uses only the
+then-available base balance, preventing an intentional oversell.
+
+Required supervisor variables:
+
+```text
+POSITION_SUPERVISOR_ENABLED=true
+POSITION_SUPERVISION_INTERVAL_SECONDS=15
+EXECUTOR_BASE_URL=https://memecoin-mcp-server-production.up.railway.app
+REST_API_TOKEN=<same executor bearer token>
+RESEARCH_FEED_URL=https://memecoin-research-feed-production.up.railway.app
+SIGNAL_FEED_BEARER_TOKEN=<same research-feed bearer token>
+```
+
+Use start command `python -m app.position_worker`. It exposes `/health` for
+Railway but does not need a public domain. Every entry fill, target milestone,
+managed exit, close, error, pause and model review is written to the executor's
+append-only event feed returned by `pilot_status`. The connected ChatGPT Gmail
+task must use `pilot_status` as the live-pilot source of truth in every report.
+
 ## Continuous research-feed producer
 
 Run `python -m app.research_feed` as a third Railway service from this same

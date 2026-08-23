@@ -147,6 +147,15 @@ class Exchange:
         base = product_id.split("-", 1)[0]
         return sum(float(field(a.available_balance, "value") or field(a.available_balance, "amount") or 0) + float(field(a.hold, "value") or field(a.hold, "amount") or 0) for a in self.accounts() if a.currency == base)
 
+    def available_base_balance(self, product_id: str) -> float:
+        base = product_id.split("-", 1)[0]
+        return sum(float(field(a.available_balance, "value") or field(a.available_balance, "amount") or 0) for a in self.accounts() if a.currency == base)
+
+    def cancel_open_sell_orders(self, product_id: str) -> dict:
+        response = self.client.get("/api/v3/brokerage/orders/historical/batch", params={"product_ids": [product_id], "order_status": ["OPEN", "PENDING", "QUEUED"], "order_side": "SELL", "limit": 100})
+        order_ids = [str(field(order, "order_id", "")) for order in field(response, "orders", []) if field(order, "order_id", "")]
+        return {"order_ids": order_ids, "response": as_dict(self.client.cancel_orders(order_ids=order_ids)) if order_ids else {}}
+
     def fills(self, product_id: str, opened_at: str) -> list[dict]:
         response = self.client.get_fills(product_ids=[product_id], limit=100)
         cutoff = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))

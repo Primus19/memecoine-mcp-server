@@ -11,6 +11,7 @@ from .auth_config import OAUTH_CALLBACK_PATH, load_or_create_signing_key, oauth_
 from .decision import build_recommendation,canonical_hash
 from .enrichment import enrich_with_coinbase
 from .exchange import Exchange
+from .lifecycle import supervision_levels
 from .risk import TicketRejected,validate_ticket
 from .store import Store
 
@@ -55,9 +56,35 @@ def reconcile():
         pnl=summary["sell_value_usdc"]-summary["buy_cost_usdc"];ret=100*pnl/summary["buy_cost_usdc"] if summary["buy_cost_usdc"] else 0
         closed=store.record_closed_trade(position["ticket_id"],pnl,ret);review=store.model_review("trade_close","trade:"+position["ticket_id"]);store.update_equity_controls(pf["usdc_total"])
         return {"open_position":None,"closed_trade":closed,"fill_summary":summary,"model_review":review,"controls":controls}
-    status="FILLED" if summary["buy_qty"]>0 else "SUBMITTED";store.update_position(position["ticket_id"],status)
+    status=position["status"] if position["status"]=="EXIT_SUBMITTED" else ("FILLED" if summary["buy_qty"]>0 else "SUBMITTED")
+    if position["status"]=="SUBMITTED" and status=="FILLED":store.event("ENTRY_FILLED",{"order_id":position.get("order_id"),"fill_summary":summary},position["ticket_id"])
+    store.update_position(position["ticket_id"],status)
     unrealized=summary["sell_value_usdc"]+mark_value-summary["buy_cost_usdc"]
     return {"open_position":{**position,"status":status,"mark_price":product["price"],"mark_value_usdc":mark_value,"net_unrealized_pnl_usdc":unrealized,"fills":summary},"usdc_total":pf["usdc_total"],"controls":controls}
+
+def supervise(regime=""):
+    state=reconcile();position=state.get("open_position")
+    if not position:return {"status":"IDLE","state":state}
+    if position.get("status")=="EXIT_SUBMITTED":
+        exit_id=store.setting("exit_order:"+position["ticket_id"])
+        if exit_id:
+            exit_status=str(exchange().get_order(exit_id).get("status","")).upper()
+            if exit_status not in {"CANCELLED","FAILED","EXPIRED"}:return {"status":"AWAITING_EXIT_FILL","exit_order_id":exit_id,"exit_order_status":exit_status,"state":state}
+        store.update_position(position["ticket_id"],"FILLED")
+    record=store.recommendation(position["ticket_id"]);ticket=record["payload"]
+    mark=float(position["mark_price"]);fills=position.get("fills") or {};entry=float(fills.get("buy_cost_usdc") or 0)/float(fills.get("buy_qty") or 1) if float(fills.get("buy_qty") or 0)>0 else float(position["entry_price"]);ticket_id=position["ticket_id"]
+    high_key="high_water:"+ticket_id;levels=supervision_levels(ticket,entry=entry,mark=mark,high_water=float(store.setting(high_key,str(entry)) or entry),regime=str(regime));high=levels["high_water_price"];trail_active=levels["trail_active"];trail_stop=levels["effective_stop_price"];store.set_setting(high_key,high)
+    target_1=float(ticket.get("target_1_price") or 0);milestone_key="target_1_seen:"+ticket_id
+    if target_1 and mark>=target_1 and store.setting(milestone_key)!="1":
+        store.set_setting(milestone_key,"1");store.event("TARGET_1_REACHED",{"mark_price":mark,"target_1_price":target_1},ticket_id)
+    reason=levels["exit_reason"]
+    if not reason:return {"status":"MONITORING","mark_price":mark,"high_water_price":high,"trail_active":trail_active,"effective_stop_price":trail_stop,"state":state}
+    ex=exchange();cancel=ex.cancel_open_sell_orders(position["product_id"]);time.sleep(1);size=ex.available_base_balance(position["product_id"])
+    if size<=0:return {"status":"EXIT_WAITING_FOR_CANCEL","reason":reason,"cancel":cancel,"state":reconcile()}
+    sale=ex.market_sell(position["product_id"],size,"managed-exit-"+str(uuid.uuid4()));exit_id=order_id(sale)
+    if not exit_id:raise RuntimeError("Coinbase did not return an exit order id")
+    store.set_setting("exit_order:"+ticket_id,exit_id);store.update_position(ticket_id,"EXIT_SUBMITTED");store.event("MANAGED_EXIT_SUBMITTED",{"reason":reason,"base_size":size,"effective_stop_price":trail_stop,"cancel":str(cancel),"sale":str(sale),"exit_order_id":exit_id},ticket_id)
+    return {"status":"EXIT_SUBMITTED","reason":reason,"base_size":size,"exit_order_id":exit_id,"state":reconcile()}
 
 def issue(candidate):
     if store.paused():raise RuntimeError("live pilot is paused")
@@ -207,5 +234,14 @@ async def rest_auto_candidate(request):
     try:return JSONResponse(auto_process(await request.json()))
     except (TicketRejected,ValueError,TypeError,KeyError) as exc:return JSONResponse({"error":"ticket_rejected","detail":str(exc)},status_code=422)
     except Exception as exc:return JSONResponse({"error":str(exc)},status_code=500)
+
+@mcp.custom_route("/api/position-supervision",methods=["POST"])
+async def rest_position_supervision(request):
+    if not rest_authorized(request):return unauthorized()
+    try:
+        payload=await request.json();return JSONResponse(supervise(str(payload.get("regime", ""))))
+    except Exception as exc:
+        store.event("POSITION_SUPERVISION_ERROR",{"error":type(exc).__name__,"detail":str(exc)[:500]})
+        return JSONResponse({"error":str(exc)},status_code=500)
 
 if __name__=="__main__":mcp.run(transport="http",host="0.0.0.0",port=int(os.getenv("PORT","8080")))
