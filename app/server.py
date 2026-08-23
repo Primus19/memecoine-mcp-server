@@ -8,6 +8,7 @@ from fastmcp.server.auth.providers.github import GitHubProvider
 from key_value.aio.stores.disk import DiskStore
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
+from starlette.exceptions import HTTPException
 
 from .exchange import Exchange
 from .risk import TicketRejected, validate_ticket
@@ -84,6 +85,55 @@ def execute_validated_ticket(ticket: dict) -> dict:
 def emergency_pause(reason: str) -> dict:
     """Immediately block new live submissions. Existing Coinbase bracket orders remain on exchange."""
     store.event("PAUSED", {"reason":reason}); return {"paused":True, "reason":reason}
+
+
+# REST endpoints for ChatGPT integration
+@mcp.custom_route("/api/pilot-status", methods=["GET"])
+async def rest_pilot_status(_: Request):
+    """REST endpoint for pilot_status tool."""
+    try:
+        result = pilot_status()
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/preflight", methods=["GET"])
+async def rest_preflight(_: Request):
+    """REST endpoint for preflight_coinbase tool."""
+    try:
+        result = preflight_coinbase()
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/execute-ticket", methods=["POST"])
+async def rest_execute_ticket(request: Request):
+    """REST endpoint for execute_validated_ticket tool."""
+    try:
+        body = await request.json()
+        ticket = body.get("ticket", {})
+        result = execute_validated_ticket(ticket)
+        return JSONResponse(result)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/emergency-pause", methods=["POST"])
+async def rest_emergency_pause(request: Request):
+    """REST endpoint for emergency_pause tool."""
+    try:
+        body = await request.json()
+        reason = body.get("reason", "Manual emergency pause")
+        result = emergency_pause(reason)
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 if __name__ == "__main__":
