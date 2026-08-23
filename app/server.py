@@ -1,5 +1,6 @@
 from __future__ import annotations
 import hashlib,hmac,html,os,time,uuid
+from dataclasses import asdict
 from datetime import datetime,timezone
 from importlib.metadata import version as package_version
 from fastmcp import FastMCP
@@ -12,6 +13,7 @@ from .decision import build_recommendation,canonical_hash
 from .enrichment import enrich_with_coinbase
 from .exchange import Exchange
 from .lifecycle import supervision_levels
+from .policy import OpportunityPolicy
 from .risk import TicketRejected,validate_ticket
 from .store import Store
 
@@ -176,7 +178,7 @@ def unauthorized():return JSONResponse({"error":"unauthorized"},status_code=401,
 
 @mcp.custom_route("/health",methods=["GET"])
 async def health(_):
-    return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED","schema_version":"3.2","preauthorized_auto_execution":PREAUTHORIZED_AUTO_EXECUTION,"expected_tool_count":9,"oauth":{"provider":"github","base_url":BASE_URL,"callback_url":oauth_callback_url(BASE_URL),"persistent_client_storage":os.path.abspath(OAUTH_STORAGE_DIR).startswith("/app/data/"),"jwt_signing_key_configured":True,"jwt_signing_key_source":JWT_SIGNING_KEY_SOURCE,"fastmcp_version":package_version("fastmcp")}})
+    return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED","schema_version":"3.3","preauthorized_auto_execution":PREAUTHORIZED_AUTO_EXECUTION,"expected_tool_count":9,"opportunity_policy":{"version":"1.0",**asdict(OpportunityPolicy.from_env())},"oauth":{"provider":"github","base_url":BASE_URL,"callback_url":oauth_callback_url(BASE_URL),"persistent_client_storage":os.path.abspath(OAUTH_STORAGE_DIR).startswith("/app/data/"),"jwt_signing_key_configured":True,"jwt_signing_key_source":JWT_SIGNING_KEY_SOURCE,"fastmcp_version":package_version("fastmcp")}})
 @mcp.custom_route("/setup",methods=["GET","POST"])
 async def setup(request):
     if not hmac.compare_digest(request.query_params.get("token",""),SETUP_TOKEN):return HTMLResponse("Not found",status_code=404)
