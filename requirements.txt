@@ -4,7 +4,6 @@ python-multipart==0.0.26
 requests==2.34.2
 PyJWT==2.13.0
 backoff==2.2.1
-websockets>=13.0,<14.0
 
 py-key-value-aio[disk]>=0.1.0
 
