@@ -107,7 +107,7 @@ For unattended operation, a trusted signal worker may call `POST /api/auto-candi
 
 The fast path is disabled unless both live environment variables are armed. It does not weaken the Model 3.1 gates. Each candidate must be based on market data no more than two minutes old, and execution independently requires a live spread and modeled slippage of at most 50 bps, entry drift of at most 35 bps, a best ask at or below the frozen entry ceiling, one-position maximum, and the existing $2.50 loss cap. The order is previewed before submission and carries an attached stop/target bracket.
 
-Some ChatGPT clients cache an older MCP tool list. Set `PREAUTHORIZED_AUTO_EXECUTION=true` to make the existing `issue_model_3_1_recommendation` tool invoke the exact same atomic fast path as `process_preauthorized_candidate`. This compatibility mode does not bypass any validation. With `LIVE_TRADING=false`, it performs a dry run only. `/health` reports schema version 3.2 and whether compatibility mode is enabled without exposing secrets.
+Some ChatGPT clients cache an older MCP tool list. Set `PREAUTHORIZED_AUTO_EXECUTION=true` to make the existing `issue_model_3_1_recommendation` tool invoke the exact same atomic fast path as `process_preauthorized_candidate`. This compatibility mode does not bypass any validation. With `LIVE_TRADING=false`, it performs a dry run only. `/health` reports schema version 3.3, the frozen opportunity-policy defaults, and whether compatibility mode is enabled without exposing secrets.
 
 The caller no longer supplies authoritative Coinbase execution facts. Before a
 candidate is accepted, the server fetches the Coinbase product and order book
@@ -116,6 +116,65 @@ and overwrites `identity_verified`, `spot_available`, `spread_bps` and
 Research still must supply fresh, auditable regime, momentum, market-cap,
 volume, news, social, tokenomics and safety evidence; missing research evidence
 is never converted into a passing score.
+
+## Opportunity policy 1.0
+
+Model 3.1 component weights remain unchanged. A separately versioned,
+human-directed opportunity policy controls whether a clean research candidate
+may advance to the executor. The exact policy is frozen into every ticket and
+therefore covered by the recommendation hash.
+
+The default policy now:
+
+- permits a strong candidate in a MIXED regime while continuing to reject a
+  FALLING regime;
+- uses a 78-point minimum;
+- awards zero news points when no catalyst is verified instead of suppressing
+  an otherwise clean established asset;
+- keeps any verified negative-news veto hard;
+- uses $25M market cap, $5M volume and 3%-150% turnover opportunity floors;
+- keeps the 15% daily momentum chase ceiling.
+
+This does **not** relax exact identity, clean contract safety, Coinbase spot
+availability, USDC-only execution, live spread/slippage, source freshness,
+entry drift, one-position maximum, capital limits, the $2.50 loss cap, attached
+exit protection, or circuit breakers. Set `LIVE_REQUIRE_NEWS_CATALYST=true` to
+restore the event-driven catalyst requirement without changing code.
+
+## Paper-only multi-asset engines
+
+`python -m app.asset_worker` consumes normalized, source-linked snapshots and
+runs three independent paper sleeves:
+
+- `FOREX_TREND`: aligned 1h/24h trend, liquid session, spread and economic-event
+  distance checks;
+- `EQUITY_MOMENTUM`: positive 1h/24h momentum, relative volume, VWAP, halt and
+  broad-market checks;
+- defined-risk options: call-debit and put-debit spreads only, with verified
+  legs, minimum open interest, IV context, expiry and whole-contract sizing
+  from the verified maximum loss per complete spread (including multiplier and
+  estimated fees).
+
+The worker writes an append-only JSONL ledger. It has no broker adapter and
+cannot submit a live forex, equity or option order in this release. This is
+intentional: each sleeve must first collect forward paper results and later use
+a broker-specific preflight, preview, idempotency and reconciliation adapter.
+
+Enable paper sleeves independently:
+
+```text
+MULTI_ASSET_WORKER_ENABLED=true
+MULTI_ASSET_FEED_URL=https://your-normalized-feed.example/snapshots
+FOREX_ENGINE_ENABLED=true
+EQUITY_ENGINE_ENABLED=true
+OPTION_ENGINE_ENABLED=true
+MULTI_ASSET_LEDGER_PATH=/app/data/multi_asset.jsonl
+```
+
+The feed returns `{"snapshots": [...]}`. Every snapshot must contain a fresh
+`observed_at`, at least one HTTPS source, `tradable=true`, a reference price,
+spread, stop distance, maximum loss, thesis and invalidation. Asset-specific
+fields are validated before a proposal can become a paper fill.
 
 ## Continuous signal worker
 
