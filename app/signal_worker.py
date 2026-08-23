@@ -21,6 +21,9 @@ def source_age_seconds(candidate: dict[str, Any], now: datetime | None = None) -
 
 
 def candidate_digest(candidate: dict[str, Any]) -> str:
+    signal_id = str(candidate.get("signal_id", "")).strip()
+    if signal_id:
+        return hashlib.sha256(("signal-id:" + signal_id).encode()).hexdigest()
     raw = json.dumps(candidate, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode()).hexdigest()
 
