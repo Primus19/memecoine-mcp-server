@@ -1,21 +1,24 @@
 from __future__ import annotations
 import hashlib,hmac,html,os,uuid
 from datetime import datetime,timezone
+from importlib.metadata import version as package_version
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.github import GitHubProvider
 from key_value.aio.stores.disk import DiskStore
 from starlette.requests import Request
 from starlette.responses import HTMLResponse,JSONResponse
+from .auth_config import OAUTH_CALLBACK_PATH, oauth_callback_url, validate_public_base_url
 from .decision import build_recommendation,canonical_hash
 from .exchange import Exchange
 from .risk import TicketRejected,validate_ticket
 from .store import Store
 
-BASE_URL=os.environ["PUBLIC_BASE_URL"].rstrip("/");SETUP_TOKEN=os.environ["SETUP_TOKEN"];REST_API_TOKEN=os.getenv("REST_API_TOKEN","")
+BASE_URL=validate_public_base_url(os.environ["PUBLIC_BASE_URL"]);SETUP_TOKEN=os.environ["SETUP_TOKEN"];REST_API_TOKEN=os.getenv("REST_API_TOKEN","")
 LIVE_ARMED=os.getenv("LIVE_TRADING","false").lower()=="true" and os.getenv("LIVE_CONFIRMATION","")=="I_ACCEPT_THE_25_USDC_LIVE_RISK"
 ALLOCATION_FRACTION=min(.95,max(.20,float(os.getenv("MAX_CAPITAL_ALLOCATION_PCT","95"))/100))
 store=Store(os.getenv("DATA_DIR","/app/data"),os.environ["CREDENTIAL_ENCRYPTION_KEY"])
-auth=GitHubProvider(client_id=os.environ["GITHUB_CLIENT_ID"],client_secret=os.environ["GITHUB_CLIENT_SECRET"],base_url=BASE_URL,client_storage=DiskStore(directory=os.path.join(os.getenv("DATA_DIR","/app/data"),"oauth")))
+OAUTH_STORAGE_DIR=os.path.join(os.getenv("DATA_DIR","/app/data"),"oauth")
+auth=GitHubProvider(client_id=os.environ["GITHUB_CLIENT_ID"],client_secret=os.environ["GITHUB_CLIENT_SECRET"],base_url=BASE_URL,redirect_path=OAUTH_CALLBACK_PATH,jwt_signing_key=os.environ["JWT_SIGNING_KEY"],client_storage=DiskStore(directory=OAUTH_STORAGE_DIR))
 mcp=FastMCP("Primus Unified Coinbase Pilot",auth=auth,instructions="Model 3.1 recommendations must be issued and frozen here before reporting or execution. Execution accepts only the exact ticket ID and hash. Reconcile before every decision. Live writes are high impact.")
 
 def exchange():return Exchange(*store.credentials())
@@ -97,7 +100,8 @@ def rest_authorized(request):
 def unauthorized():return JSONResponse({"error":"unauthorized"},status_code=401,headers={"WWW-Authenticate":"Bearer"})
 
 @mcp.custom_route("/health",methods=["GET"])
-async def health(_):return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED"})
+async def health(_):
+    return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED","oauth":{"provider":"github","base_url":BASE_URL,"callback_url":oauth_callback_url(BASE_URL),"persistent_client_storage":os.path.abspath(OAUTH_STORAGE_DIR).startswith("/app/data/"),"jwt_signing_key_configured":bool(os.getenv("JWT_SIGNING_KEY")),"fastmcp_version":package_version("fastmcp")}})
 @mcp.custom_route("/setup",methods=["GET","POST"])
 async def setup(request):
     if not hmac.compare_digest(request.query_params.get("token",""),SETUP_TOKEN):return HTMLResponse("Not found",status_code=404)

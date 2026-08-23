@@ -64,7 +64,27 @@ This produces hourly reporting. Immediate server-originated email would require 
 - Rotate `SETUP_TOKEN` after setup.
 - Keep a persistent Railway volume mounted at `/app/data`.
 
-Required variables are documented in `.env.example`. Keep live execution locked while refreshing and testing the new MCP schema:
+Required variables are documented in `.env.example`.
+
+### OAuth deployment checklist
+
+Use these exact values for the deployed Railway service:
+
+```text
+PUBLIC_BASE_URL=https://memecoin-mcp-server-production.up.railway.app
+```
+
+Do not append `/mcp` to `PUBLIC_BASE_URL`. In the GitHub OAuth App, set the authorization callback URL exactly to:
+
+```text
+https://memecoin-mcp-server-production.up.railway.app/auth/callback
+```
+
+Set `JWT_SIGNING_KEY` in Railway to a stable, randomly generated secret of at least 32 bytes. Do not paste that secret into ChatGPT, commit it, or rotate it casually: FastMCP uses it to sign OAuth proxy tokens. Keep the Railway volume mounted at `/app/data` so dynamically registered ChatGPT clients survive deploys and restarts.
+
+After deployment, `/health` reports only non-secret OAuth diagnostics: the canonical base URL, exact callback URL, FastMCP version, signing-key presence, and whether persistent client storage is under `/app/data`.
+
+Keep live execution locked while refreshing and testing the new MCP schema:
 
 ```text
 LIVE_TRADING=false
