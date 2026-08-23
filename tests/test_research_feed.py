@@ -78,7 +78,27 @@ class ResearchFeedTests(unittest.TestCase):
         )
         self.assertIsNone(candidate)
         self.assertIn("identity not attested", failures)
-        self.assertIn("verified news score below 4", failures)
+
+    def test_clean_established_asset_does_not_require_positive_news(self):
+        feed = self.make_feed()
+        at = datetime.now(timezone.utc)
+        candidate, failures = feed.build_candidate(
+            self.market(), {"product_id": "TEST-USDC", "price": .1},
+            self.evidence(news_score=0, social_score=0), {"classification": "MIXED"}, at,
+        )
+        self.assertEqual([], failures)
+        self.assertEqual("MIXED", candidate["regime"])
+        self.assertEqual(78, sum(candidate["component_scores"].values()))
+
+    def test_news_veto_still_rejects(self):
+        feed = self.make_feed()
+        candidate, failures = feed.build_candidate(
+            self.market(), {"product_id": "TEST-USDC", "price": .1},
+            self.evidence(news_veto=True), {"classification": "RISING"},
+            datetime.now(timezone.utc),
+        )
+        self.assertIsNone(candidate)
+        self.assertIn("news veto active", failures)
 
     def test_extension_and_dilution_are_rejected(self):
         feed = self.make_feed()
@@ -88,7 +108,7 @@ class ResearchFeedTests(unittest.TestCase):
             {"classification": "RISING"}, datetime.now(timezone.utc),
         )
         self.assertIsNone(candidate)
-        self.assertIn("24h momentum outside (0%,15%]", failures)
+        self.assertIn("24h momentum outside policy range", failures)
         self.assertIn("severe dilution", failures)
 
     def test_duplicate_symbols_are_excluded(self):
