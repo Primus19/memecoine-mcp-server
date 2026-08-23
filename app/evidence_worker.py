@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -120,8 +121,21 @@ class EvidenceAdapter:
         configured = [value.strip() for value in os.getenv("EVIDENCE_NEWS_RSS_URLS", "").split(",") if value.strip()]
         self.news_feeds = tuple(configured) or DEFAULT_NEWS_FEEDS
         self.interval = min(900, max(60, int(os.getenv("EVIDENCE_SCAN_INTERVAL_SECONDS", "300"))))
+        self.request_spacing = max(0.5, float(os.getenv("EVIDENCE_REQUEST_SPACING_SECONDS", "2.5")))
+        self.max_retries = min(5, max(1, int(os.getenv("EVIDENCE_HTTP_MAX_RETRIES", "3"))))
         self.status: dict[str, Any] = {"ok": False}
         self.lock = threading.RLock()
+        self.request_lock = threading.Lock()
+        self.last_request_by_host: dict[str, float] = {}
+        self.detail_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    def throttle(self, url: str) -> None:
+        host = urlparse(url).hostname or "unknown"
+        with self.request_lock:
+            wait = self.request_spacing - (time.monotonic() - self.last_request_by_host.get(host, 0))
+            if wait > 0:
+                time.sleep(wait)
+            self.last_request_by_host[host] = time.monotonic()
 
     def fetch(self, url: str, token: str = "") -> bytes:
         headers = {"Accept": "application/json, application/rss+xml, application/xml", "User-Agent": "primus-evidence-adapter/1.0"}
@@ -129,8 +143,20 @@ class EvidenceAdapter:
             headers["Authorization"] = f"Bearer {token}"
         if self.cg_key and url.startswith(self.cg_base):
             headers["x-cg-demo-api-key"] = self.cg_key
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as response:
-            return response.read()
+        for attempt in range(self.max_retries):
+            self.throttle(url)
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as response:
+                    return response.read()
+            except urllib.error.HTTPError as exc:
+                if exc.code != 429 or attempt + 1 >= self.max_retries:
+                    raise
+                try:
+                    retry_after = float(exc.headers.get("Retry-After", "0") or 0)
+                except (TypeError, ValueError):
+                    retry_after = 0
+                time.sleep(min(60, max(retry_after, 5 * (attempt + 1))))
+        raise RuntimeError("HTTP retry loop exited unexpectedly")
 
     def json(self, url: str, token: str = "") -> Any:
         return json.loads(self.fetch(url, token).decode())
@@ -169,9 +195,15 @@ class EvidenceAdapter:
         return result
 
     def coin_detail(self, coin_id: str) -> dict[str, Any]:
+        cached = self.detail_cache.get(coin_id)
+        if cached and time.time() - cached[0] <= 6 * 3600:
+            return cached[1]
         query = urllib.parse.urlencode({"localization": "false", "tickers": "false", "market_data": "false", "community_data": "false", "developer_data": "false"})
         value = self.json(f"{self.cg_base}/coins/{urllib.parse.quote(coin_id)}?{query}")
-        return value if isinstance(value, dict) else {}
+        result = value if isinstance(value, dict) else {}
+        if result:
+            self.detail_cache[coin_id] = (time.time(), result)
+        return result
 
     def security(self, detail: dict[str, Any]) -> tuple[bool, int, list[str], str]:
         platforms = detail.get("platforms") or {}
@@ -203,10 +235,17 @@ class EvidenceAdapter:
             cap, volume = float(market.get("market_cap") or 0), float(market.get("total_volume") or 0)
             if product_id not in eligible or symbol_counts.get(symbol) != 1 or cap < 50_000_000 or volume < 10_000_000:
                 continue
-            detail = self.coin_detail(str(market["id"]))
-            identity = str(detail.get("id", "")) == str(market["id"]) and str(detail.get("symbol", "")).upper() == symbol
-            clean, safety_score, safety_failures, contract = self.security(detail)
-            news_score, news_veto, news_urls = score_news(articles, name=str(detail.get("name") or market.get("name") or ""), symbol=symbol)
+            try:
+                detail = self.coin_detail(str(market["id"]))
+                identity = str(detail.get("id", "")) == str(market["id"]) and str(detail.get("symbol", "")).upper() == symbol
+                clean, safety_score, safety_failures, contract = self.security(detail)
+                news_score, news_veto, news_urls = score_news(articles, name=str(detail.get("name") or market.get("name") or ""), symbol=symbol)
+            except urllib.error.HTTPError as exc:
+                rejected.append({"product_id": product_id, "source_error": f"HTTP {exc.code} from {urlparse(exc.url).hostname or 'upstream'}"})
+                continue
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+                rejected.append({"product_id": product_id, "source_error": f"{type(exc).__name__}: {str(exc)[:160]}"})
+                continue
             if not identity or not clean or news_score < 4 or news_veto:
                 rejected.append({"product_id": product_id, "identity": identity, "safety": safety_failures, "news_score": news_score, "news_veto": news_veto})
                 continue

@@ -1,7 +1,8 @@
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
-from app.evidence_worker import article_mentions, evaluate_goplus, score_news
+from app.evidence_worker import EvidenceAdapter, article_mentions, evaluate_goplus, score_news
 
 
 class EvidenceWorkerTests(unittest.TestCase):
@@ -50,6 +51,16 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertFalse(clean)
         self.assertEqual(0, score)
         self.assertIn("is_honeypot", failures)
+
+    def test_coin_detail_is_cached(self):
+        adapter = EvidenceAdapter.__new__(EvidenceAdapter)
+        adapter.detail_cache = {}
+        adapter.cg_base = "https://api.example"
+        adapter.json = Mock(return_value={"id": "turbo", "symbol": "turbo"})
+        first = adapter.coin_detail("turbo")
+        second = adapter.coin_detail("turbo")
+        self.assertEqual(first, second)
+        adapter.json.assert_called_once()
 
 
 if __name__ == "__main__":
