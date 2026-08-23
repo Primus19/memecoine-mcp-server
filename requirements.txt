@@ -1,7 +1,8 @@
 fastmcp==3.4.7
-coinbase-advanced-py==1.8.2
 cryptography==45.0.6
 python-multipart==0.0.26
+requests==2.34.2
+PyJWT==2.13.0
+backoff==2.2.1
 
 py-key-value-aio[disk]>=0.1.0
-
