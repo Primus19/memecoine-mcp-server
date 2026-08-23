@@ -78,6 +78,18 @@ class MultiAssetTests(unittest.TestCase):
             with self.assertRaisesRegex(MultiAssetRejected, "disabled"):
                 MultiAssetEngine(self.ledger, self.policy).process(snapshot)
 
+    def test_paper_position_can_be_closed_append_only(self):
+        snapshot = {**self.base("FOREX", "EUR_USD"), "change_1h_pct": .2,
+                    "change_24h_pct": .5, "trend_strength": 1,
+                    "liquidity_score": 1, "session_liquid": True,
+                    "economic_event_within_minutes": 120}
+        with patch.dict(os.environ, {"FOREX_ENGINE_ENABLED": "true"}):
+            fill = MultiAssetEngine(self.ledger, self.policy).process(snapshot)
+        close = self.ledger.close(fill["proposal_id"], 1.12, "TARGET")
+        self.assertEqual("PAPER_CLOSE", close["type"])
+        self.assertEqual([], self.ledger.positions())
+        self.assertEqual(3, len(self.ledger.records()))
+
 
 if __name__ == "__main__":
     unittest.main()
