@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 from datetime import datetime
+from decimal import Decimal, ROUND_DOWN
 
 from coinbase.rest import RESTClient
 
@@ -79,16 +80,61 @@ class Exchange:
                 break
         return products
 
-    def preview_buy(self, ticket: dict):
+    def buy_configuration(self, ticket: dict, product: dict) -> dict:
+        base_size = self.normalize_base_size(product, float(ticket["notional_usdc"])/float(ticket["limit_price"]))
+        if float(base_size) < float(product.get("base_min_size") or 0):
+            raise RuntimeError("derived base size is below Coinbase minimum")
+        return {"limit_limit_gtc": {"base_size": base_size, "limit_price": str(ticket["limit_price"]), "post_only": False}}
+
+    def preview_buy(self, ticket: dict, product: dict):
         return self.client.preview_order(
             product_id=ticket["product_id"], side="BUY",
-            order_configuration={"limit_limit_gtc": {"quote_size": str(ticket["notional_usdc"]), "limit_price": str(ticket["limit_price"]), "post_only": False}},
+            order_configuration=self.buy_configuration(ticket, product),
         )
 
-    def submit_buy(self, ticket: dict) -> dict:
+    def execution_quote(self, product_id: str, quote_size: float, limit: int = 50) -> dict:
+        """Reconstruct spread and buy slippage from the live Coinbase book."""
+        response = self.client.get_product_book(product_id=product_id, limit=limit)
+        book = field(response, "pricebook", response)
+        bids = list(field(book, "bids", []) or [])
+        asks = list(field(book, "asks", []) or [])
+        if not bids or not asks:
+            raise RuntimeError("Coinbase order book has no executable bid/ask")
+
+        def level(raw: Any) -> tuple[float, float]:
+            return float(field(raw, "price", 0) or 0), float(field(raw, "size", 0) or 0)
+
+        best_bid, _ = level(bids[0]); best_ask, _ = level(asks[0])
+        if best_bid <= 0 or best_ask <= 0 or best_ask < best_bid:
+            raise RuntimeError("Coinbase order book is invalid")
+        remaining = float(quote_size); base = 0.0; spent = 0.0
+        for raw in asks:
+            price, size = level(raw)
+            if price <= 0 or size <= 0:
+                continue
+            take_quote = min(remaining, price * size)
+            base += take_quote / price; spent += take_quote; remaining -= take_quote
+            if remaining <= 1e-9:
+                break
+        if remaining > 0.01 or base <= 0:
+            raise RuntimeError("insufficient visible liquidity for requested order")
+        average = spent / base
+        return {
+            "best_bid": best_bid, "best_ask": best_ask, "average_buy_price": average,
+            "spread_bps": (best_ask-best_bid)/((best_ask+best_bid)/2)*10_000,
+            "slippage_bps": (average-best_ask)/best_ask*10_000,
+            "visible_quote_filled": spent,
+        }
+
+    def normalize_base_size(self, product: dict, size: float) -> str:
+        increment = str(product.get("base_increment") or "0.00000001")
+        value = Decimal(str(size)).quantize(Decimal(increment), rounding=ROUND_DOWN)
+        return format(value, "f")
+
+    def submit_buy(self, ticket: dict, product: dict) -> dict:
         response = self.client.create_order(
             client_order_id=ticket["ticket_id"], product_id=ticket["product_id"], side="BUY",
-            order_configuration={"limit_limit_gtc": {"quote_size": str(ticket["notional_usdc"]), "limit_price": str(ticket["limit_price"]), "post_only": False}},
+            order_configuration=self.buy_configuration(ticket, product),
             attached_order_configuration={"trigger_bracket_gtc": {"limit_price": str(ticket["target_price"]), "stop_trigger_price": str(ticket["stop_price"])}}
         )
         return as_dict(response)
@@ -121,4 +167,3 @@ class Exchange:
 
     def market_sell(self, product_id: str, base_size: float, client_order_id: str) -> dict:
         return as_dict(self.client.create_order(client_order_id=client_order_id, product_id=product_id, side="SELL", order_configuration={"market_market_ioc": {"base_size": str(base_size)}}))
-

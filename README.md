@@ -7,8 +7,9 @@ This MCP server is the authoritative decision and execution ledger for the Coinb
 1. Market research supplies normalized evidence to `issue_model_3_1_recommendation`.
 2. The server calculates the Model 3.1 total from bounded component scores, applies live Coinbase and risk checks, freezes the complete recommendation, and returns a ticket ID plus SHA-256 hash.
 3. The hourly report must display that exact stored record.
-4. `execute_issued_ticket` accepts only the stored ticket ID and matching hash. It rejects edited, expired, unknown, previously used, or non-qualifying tickets.
-5. Coinbase product state, cash and risk gates are checked again immediately before preview and submission.
+4. `process_preauthorized_candidate` atomically freezes and processes the same candidate without waiting for an email response. `execute_issued_ticket` remains available for dry-run and diagnostic use.
+5. Coinbase product state, cash, live order-book spread, modeled slippage, source age and entry drift are checked again immediately before preview and submission.
+6. Entries expire within two minutes. A submitted entry that does not fill within the configured timeout is cancelled instead of being chased. An attached bracket carries the recorded stop and target.
 
 The reporting agent must never invent a live ticket outside this flow.
 
@@ -21,6 +22,7 @@ The reporting agent must never invent a live ticket outside this flow.
 | `issue_model_3_1_recommendation` | Score and freeze the exact report/execution record |
 | `pilot_status` | Reconcile fills and return the authoritative hourly snapshot, P&L, reviews and notification events |
 | `execute_issued_ticket` | Preview or execute only an issued ticket ID/hash |
+| `process_preauthorized_candidate` | Atomically freeze, revalidate, preview and process a pre-authorized candidate |
 | `emergency_pause` | Block new entries |
 | `emergency_flatten` | Cancel the tracked entry and market-sell the tracked asset after explicit confirmation |
 | `resume_trading` | Resume only with the required explicit acknowledgement |
@@ -28,7 +30,8 @@ The reporting agent must never invent a live ticket outside this flow.
 ## Capital and P&L
 
 - The first valid $5-$30 USDC balance is recorded as the initial baseline.
-- Later deposits and withdrawals are recorded separately from trading P&L and become part of permitted capital.
+- Later deposits and withdrawals are recorded separately from trading P&L and never expand permitted capital automatically.
+- The original baseline plus realized P&L is the only compounding capital. Adding cash to Coinbase does not authorize the executor to use it.
 - Realized and unrealized P&L are calculated from Coinbase fills, quantities, prices and commissions—not from balance changes.
 - Up to 95% of available permitted capital may be allocated by default, leaving a fee reserve.
 - One open position maximum; USDC spot only; no leverage, derivatives, transfers, DEXs, presales or averaging down.
@@ -37,8 +40,8 @@ The reporting agent must never invent a live ticket outside this flow.
 
 New entries pause automatically after any of:
 
-- three consecutive losing trades;
-- 10% daily drawdown;
+- two consecutive losing trades;
+- 15% daily drawdown;
 - 25% drawdown from peak equity.
 
 `emergency_pause` blocks new entries. `emergency_flatten` is a separate destructive action because it can realize a loss. Resuming requires the exact acknowledgement `I_REVIEWED_THE_LOSSES_AND_ACCEPT_RESUMING`.
@@ -98,7 +101,11 @@ LIVE_TRADING=true
 LIVE_CONFIRMATION=I_ACCEPT_THE_25_USDC_LIVE_RISK
 ```
 
-ChatGPT currently requires manual confirmation for MCP write actions; this server does not bypass that protection.
+For unattended operation, a trusted signal worker may call `POST /api/auto-candidate` with `Authorization: Bearer $REST_API_TOKEN`. That endpoint invokes the exact same freeze, risk, preview and execution code as the MCP tool. Keep the bearer token only in the worker's secret manager. MCP write actions may still require ChatGPT confirmation and are not the low-latency path.
+
+## Pre-authorized fast path
+
+The fast path is disabled unless both live environment variables are armed. It does not weaken the Model 3.1 gates. Each candidate must be based on market data no more than two minutes old, and execution independently requires a live spread and modeled slippage of at most 50 bps, entry drift of at most 35 bps, a best ask at or below the frozen entry ceiling, one-position maximum, and the existing $2.50 loss cap. The order is previewed before submission and carries an attached stop/target bracket.
 
 ## Tests
 
