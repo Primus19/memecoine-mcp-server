@@ -109,6 +109,14 @@ The fast path is disabled unless both live environment variables are armed. It d
 
 Some ChatGPT clients cache an older MCP tool list. Set `PREAUTHORIZED_AUTO_EXECUTION=true` to make the existing `issue_model_3_1_recommendation` tool invoke the exact same atomic fast path as `process_preauthorized_candidate`. This compatibility mode does not bypass any validation. With `LIVE_TRADING=false`, it performs a dry run only. `/health` reports schema version 3.2 and whether compatibility mode is enabled without exposing secrets.
 
+The caller no longer supplies authoritative Coinbase execution facts. Before a
+candidate is accepted, the server fetches the Coinbase product and order book
+and overwrites `identity_verified`, `spot_available`, `spread_bps` and
+`slippage_bps`. The frozen ticket includes timestamped `coinbase_evidence`.
+Research still must supply fresh, auditable regime, momentum, market-cap,
+volume, news, social, tokenomics and safety evidence; missing research evidence
+is never converted into a passing score.
+
 ## Tests
 
 ```bash

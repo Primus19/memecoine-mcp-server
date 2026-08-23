@@ -9,6 +9,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse,JSONResponse
 from .auth_config import OAUTH_CALLBACK_PATH, load_or_create_signing_key, oauth_callback_url, validate_public_base_url
 from .decision import build_recommendation,canonical_hash
+from .enrichment import enrich_with_coinbase
 from .exchange import Exchange
 from .risk import TicketRejected,validate_ticket
 from .store import Store
@@ -62,7 +63,12 @@ def issue(candidate):
     if store.paused():raise RuntimeError("live pilot is paused")
     state=reconcile()
     if state.get("open_position"):raise RuntimeError("one-position limit reached")
-    pf=run_preflight();recommendation=build_recommendation(candidate);product=exchange().product(recommendation["product_id"])
+    pf=run_preflight();ex=exchange();draft=build_recommendation(candidate);product=ex.product(draft["product_id"])
+    quote=ex.execution_quote(draft["product_id"],draft["notional_usdc"])
+    enriched=enrich_with_coinbase(candidate,product=product,quote=quote)
+    recommendation=build_recommendation(enriched)
+    recommendation["coinbase_evidence"]=enriched["coinbase_evidence"]
+    recommendation["coinbase_checked_at"]=enriched["coinbase_checked_at"]
     validate_ticket(recommendation,available_usdc=pf["usdc_available"],permitted_capital=store.permitted_capital(),open_positions=0,product=product,allocation_fraction=ALLOCATION_FRACTION)
     recommendation["verified_product"]={k:product.get(k) for k in ("product_id","product_type","price","volume_24h","base_min_size","quote_min_size","trading_disabled","view_only")}
     recommendation["recommendation_hash"]=canonical_hash({k:v for k,v in recommendation.items() if k!="recommendation_hash"})
