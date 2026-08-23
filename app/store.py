@@ -38,12 +38,15 @@ class Store:
         for n,v in (("pilot_baseline_usdc",total),("realized_pnl_usdc",0),("net_external_flows_usdc",0),("peak_equity_usdc",total),("daily_start_equity_usdc",total),("daily_start_date",today),("consecutive_losses",0)): self.set_setting(n,v)
         self.event("PILOT_BASELINE_INITIALIZED",{"usdc":total}); return total
     def permitted_capital(self):
-        return max(0,sum(float(self.setting(k,"0") or 0) for k in ("pilot_baseline_usdc","realized_pnl_usdc","net_external_flows_usdc")))
+        # Only the immutable pilot baseline and realized trading P&L compound.
+        # Deposits are audited but never silently expand the trading mandate.
+        return max(0,sum(float(self.setting(k,"0") or 0) for k in ("pilot_baseline_usdc","realized_pnl_usdc")))
     def add_realized_pnl(self,pnl):
         self.set_setting("realized_pnl_usdc",float(self.setting("realized_pnl_usdc","0") or 0)+pnl)
     def sync_external_flow(self,actual):
         if self.open_position(): return None
-        delta=actual-self.permitted_capital()
+        expected=self.permitted_capital()+float(self.setting("net_external_flows_usdc","0") or 0)
+        delta=actual-expected
         if abs(delta)<.01:return None
         kind="DEPOSIT" if delta>0 else "WITHDRAWAL"; self.set_setting("net_external_flows_usdc",float(self.setting("net_external_flows_usdc","0") or 0)+delta)
         self.db.execute("INSERT INTO capital_flows(at,kind,amount,balance_after) VALUES(?,?,?,?)",(utcnow(),kind,delta,actual)); self.db.commit(); self.event("CAPITAL_"+kind,{"amount_usdc":delta,"balance_after_usdc":actual}); return {"kind":kind,"amount_usdc":delta}
@@ -72,8 +75,8 @@ class Store:
         if self.setting("daily_start_date")!=today:self.set_setting("daily_start_date",today);self.set_setting("daily_start_equity_usdc",equity)
         peak=max(float(self.setting("peak_equity_usdc","0") or 0),equity);self.set_setting("peak_equity_usdc",peak); daily=float(self.setting("daily_start_equity_usdc",str(equity)) or equity)
         dd=0 if peak<=0 else (peak-equity)/peak; ddd=0 if daily<=0 else (daily-equity)/daily; losses=int(self.setting("consecutive_losses","0") or 0); reasons=[]
-        if losses>=3:reasons.append("three consecutive losses")
-        if ddd>=.10:reasons.append("daily drawdown reached 10%")
+        if losses>=2:reasons.append("two consecutive losses")
+        if ddd>=.15:reasons.append("daily drawdown reached 15%")
         if dd>=.25:reasons.append("peak drawdown reached 25%")
         if reasons and not self.paused():self.event("PAUSED",{"reason":"; ".join(reasons),"automatic":True})
         return {"peak_equity_usdc":peak,"drawdown_pct":dd*100,"daily_drawdown_pct":ddd*100,"consecutive_losses":losses,"circuit_breakers":reasons}
