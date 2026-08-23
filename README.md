@@ -145,6 +145,60 @@ executor without changing the worker. The worker is a low-latency transport,
 not a substitute for a genuine always-on research feed. If the feed is missing,
 stale, malformed, or unavailable, it fails closed and forwards nothing.
 
+## Continuous research-feed producer
+
+Run `python -m app.research_feed` as a third Railway service from this same
+repository. It continuously scans up to 750 CoinGecko meme-category markets,
+intersects unique symbols with the executor's actual eligible Coinbase USDC
+products, classifies liquid breadth, calculates the bounded Model 3.1
+components, and publishes fresh candidates at `GET /candidates`.
+
+The feed deliberately separates automatically observed market facts from
+verified qualitative evidence. A candidate is not published until an
+authenticated evidence adapter has submitted fresh identity, safety and news
+attestations to `POST /evidence`. Missing evidence is zero—not neutral—and the
+scanner fails closed. This prevents an article snippet, duplicate symbol, or
+unsupported safety claim from becoming a real order.
+
+Research-feed variables:
+
+```text
+RESEARCH_FEED_ENABLED=true
+RESEARCH_SCAN_INTERVAL_SECONDS=30
+RESEARCH_MARKET_PAGES=2
+EXECUTOR_BASE_URL=https://memecoin-mcp-server-production.up.railway.app
+REST_API_TOKEN=<same executor bearer token>
+SIGNAL_FEED_BEARER_TOKEN=<new independent random bearer token>
+COINGECKO_API_KEY=<optional CoinGecko demo/pro key>
+RESEARCH_FEED_STATE_PATH=/app/data/research_feed.json
+PORT=8080
+```
+
+Give the research service a Railway volume at `/app/data` and set its start
+command to `python -m app.research_feed`. Railway creates its public domain; the
+worker's `SIGNAL_FEED_URL` is that domain plus `/candidates`, and the worker's
+`SIGNAL_FEED_BEARER_TOKEN` must equal the research service's token.
+
+Generate that shared token yourself in a password manager or with
+`python -c "import secrets; print(secrets.token_urlsafe(48))"`; the service does
+not print or expose secrets. `/health` is public and contains no evidence or
+candidate payloads. `/candidates`, `/status`, and `/evidence` require the bearer
+token.
+
+Evidence submissions must include `coin_id`, `product_id`, `identity_verified`,
+`no_safety_veto`, bounded `safety_score`, `news_score` and `social_score`, HTTPS
+`source_urls`, `observed_at`, `expires_at`, `thesis`, and `invalidation`. This
+endpoint is intended for a separately reviewed news/safety adapter; it is not a
+way to assert passing values without source-backed verification.
+
+End-to-end Railway topology:
+
+1. Research service publishes authenticated `/candidates`.
+2. Worker polls it and forwards each stable `signal_id` once.
+3. Executor independently rechecks Coinbase identity, order book, capital,
+   one-position limit, spread, slippage, drift, stop and loss cap.
+4. Any missing/stale/conflicting fact stops the chain.
+
 ## Tests
 
 ```bash
