@@ -1,87 +1,94 @@
-# Primus Coinbase $25 MCP Pilot
+# Primus Coinbase Compounding MCP Pilot
 
-A private remote MCP app for connecting ChatGPT to a dedicated Coinbase Advanced Trade portfolio. It is intentionally locked by default and exposes only four tools:
+A private remote MCP app for a dedicated Coinbase Advanced Trade portfolio. It starts from one immutable $5-$30 USDC baseline, may compound only reconciled net trading profit, and never treats later deposits as trading capital.
+
+## MCP tools
 
 | Tool | Purpose |
 |---|---|
-| `pilot_status` | Read-only redacted status and audit history |
-| `preflight_coinbase` | Verify View + Trade, Transfer disabled, and pilot balance |
-| `execute_validated_ticket` | Preview and optionally submit one server-validated spot ticket |
-| `emergency_pause` | Block every new order submission |
+| `pilot_status` | Reconcile Coinbase state and report live position, P&L, capital and audit events |
+| `preflight_coinbase` | Verify View + Trade, Transfer disabled, and initialize the immutable baseline |
+| `list_eligible_spot_products` | Discover current tradable Coinbase USDC spot markets |
+| `execute_validated_ticket` | Preview or submit one server-validated spot ticket |
+| `emergency_pause` | Block every new submission |
 
-Coinbase credentials are entered on the server's private `/setup` page, encrypted with Fernet, and never returned through MCP.
+## Risk and capital rules
 
-## Risk behavior
+- One open position maximum; spot only; no leverage, margin, derivatives, transfers, DEXs, presales or averaging down.
+- The first successful preflight freezes the dedicated portfolio baseline between $5 and $30.
+- Permitted capital is `baseline + reconciled cumulative realized P&L`. Additional deposits do not increase it.
+- Default entry allocation is at most 95% of the lesser of available USDC and permitted capital, leaving a fee reserve.
+- Maximum modeled loss remains the lesser of $2.50 and 10% of permitted capital.
+- The fixed symbol allowlist is replaced by live Coinbase verification. Only currently tradable, USDC-quoted Coinbase spot products can pass.
+- Research gates remain: score ≥85, verified news ≥4, RISING regime, positive 1h/24h, ≤15% daily extension, ≥$50M market cap, ≥$10M volume, 5%-100% turnover, ≤50 bps spread/slippage, verified identity and no veto.
+- Coinbase product status and identity are rechecked server-side immediately before preview and submission.
+- Every accepted entry includes a stop and profit target. Duplicate and expired tickets are rejected.
 
-- One open position maximum.
-- Spot limit orders only; no leverage, margin, derivatives, borrowing, DEXs, presales, or averaging down.
-- Maximum order is the lesser of available equity and $25.
-- Maximum modeled loss is the lesser of $2.50 and 10% of current equity.
-- Score ≥85, verified news score ≥4, RISING regime, positive 1h/24h momentum, ≤15% daily extension, ≥$50M market cap, ≥$10M volume, 5%-100% turnover, ≤50 bps spread/slippage, verified identity, and no veto.
-- Duplicate and expired tickets are rejected.
-- Coinbase key must have View + Trade and **Transfer disabled**.
-- The initial dedicated USDC balance must not exceed $30.
-- Every submitted entry includes an attached Coinbase stop/target bracket where supported. If Coinbase preview rejects the product/order configuration, nothing is submitted.
+This software cannot guarantee profit. The pilot balance can be lost, stops can gap, and fees can dominate small positions.
 
-The current version keeps each trade capped at $25. Profits remain in the dedicated portfolio but are not automatically added to the next trade yet. This avoids silently expanding risk before exchange-fill reconciliation and profit accounting are implemented and tested.
+## Security
 
-## Deploy
+- Use a dedicated portfolio-scoped CDP key with **View + Trade only** and **Transfer disabled**.
+- Enter credentials only through `/setup?token=...`; they are encrypted at rest and never returned through MCP.
+- Rotate `SETUP_TOKEN` after setup.
+- `/mcp` uses GitHub OAuth.
+- Every `/api/*` REST route requires `Authorization: Bearer $REST_API_TOKEN`. If `REST_API_TOKEN` is absent, REST access remains denied.
+- Keep `LIVE_TRADING=false` until preflight, dynamic-product discovery, dry-run preview, reconciliation and email delivery have all been tested.
 
-Deploy the folder as a private GitHub repository to Railway or another Docker host. Add a persistent volume at `/app/data` and these server-side variables:
+ChatGPT currently requires confirmation for MCP write actions. This server does not bypass that safeguard.
 
-| Variable | Description |
-|---|---|
-| `PUBLIC_BASE_URL` | HTTPS origin, such as `https://your-service.up.railway.app` |
-| `GITHUB_CLIENT_ID` | GitHub OAuth app client ID used to sign into the MCP app |
-| `GITHUB_CLIENT_SECRET` | GitHub OAuth app secret |
-| `JWT_SIGNING_KEY` | Long random signing secret for MCP OAuth tokens |
-| `SETUP_TOKEN` | Random 32+ character one-time setup token |
-| `CREDENTIAL_ENCRYPTION_KEY` | Fernet key generated with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
-| `PRODUCT_ALLOWLIST` | Explicit Coinbase USDC spot pairs |
-| `LIVE_TRADING` | `false` during testing |
-| `LIVE_CONFIRMATION` | Empty during testing |
+## Email trade and P&L reporting
 
-Create the GitHub OAuth app using the callback URL shown by the deployed MCP authorization flow. Keep all variables in the host's encrypted secret manager.
+Configure SMTP in the host secret manager. The server emails on order submission, first detected fill, position close with gain/loss, and emergency pause. Email failure is recorded in the append-only audit log and never weakens risk validation.
 
-Then open this URL yourself in a browser:
+For Gmail, use an app password or a dedicated SMTP provider credential; never use the normal account password.
+
+## Railway variables
 
 ```text
-https://YOUR-SERVICE/setup?token=YOUR_SETUP_TOKEN
+PUBLIC_BASE_URL=https://YOUR-SERVICE.up.railway.app
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+JWT_SIGNING_KEY=...
+SETUP_TOKEN=...
+CREDENTIAL_ENCRYPTION_KEY=...
+REST_API_TOKEN=...
+LIVE_TRADING=false
+LIVE_CONFIRMATION=
+MAX_CAPITAL_ALLOCATION_PCT=95
+TRADE_REPORT_EMAIL=primus.vekuh@gmail.com
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_USERNAME=...
+SMTP_PASSWORD=...
+SMTP_FROM=...
+DATA_DIR=/app/data
 ```
 
-Enter the Coinbase CDP key name and EC private key in that form. Do not paste them into ChatGPT. After a successful preflight, rotate or delete `SETUP_TOKEN`.
-
-## Connect to ChatGPT
-
-1. On ChatGPT web, open **Settings → Security and login → Developer mode**.
-2. Open **Plugins**, press **+**, and create a developer-mode app.
-3. Enter `https://YOUR-SERVICE/mcp` as the remote MCP URL.
-4. Complete GitHub OAuth and review the four tools.
-5. Keep `execute_validated_ticket` and `emergency_pause` visible as write actions.
-6. Test `pilot_status`, then `preflight_coinbase`, then a valid ticket while locked.
-
-The server is live only when both variables are set exactly:
+The server is armed only when both values match exactly:
 
 ```text
 LIVE_TRADING=true
 LIVE_CONFIRMATION=I_ACCEPT_THE_25_USDC_LIVE_RISK
 ```
 
-Set either back to a nonmatching value to lock submissions. Revoking the Coinbase key is the exchange-side emergency stop.
+## Safe rollout
 
-## Scheduling limitation
-
-The MCP environment makes the trading tool callable from ChatGPT. Whether a scheduled task may call a write tool without an interactive confirmation depends on ChatGPT's current app confirmation controls and your workspace settings. Do not assume that an hourly prompt can bypass required confirmation. The server always applies its own risk checks even when ChatGPT permits the call.
+1. Deploy with `LIVE_TRADING=false`.
+2. Save the portfolio-scoped Coinbase key and rotate the setup token.
+3. Call `preflight_coinbase`; confirm the immutable baseline and Transfer disabled.
+4. Call `list_eligible_spot_products` and `pilot_status`.
+5. Submit a valid ticket while locked; verify `DRY_RUN_ONLY`.
+6. Confirm trade-report email configuration.
+7. Arm only after the above checks pass.
+8. Review and confirm each write action in ChatGPT.
 
 ## Tests
 
 ```bash
 PYTHONPATH=. python -m unittest discover -s tests -v
+python -m py_compile app/*.py tests/*.py
 docker build -t primus-coinbase-mcp .
 ```
 
-## Important
-
-This is speculative software and cannot guarantee profit. The entire $25 can be lost. Stops may execute below their triggers during gaps, orders may not fill, and fees may dominate small positions. Production use also requires fill reconciliation, monitoring alerts, and venue-specific integration tests against the exact Coinbase account and products.
-
-References: [OpenAI MCP server guide](https://developers.openai.com/plugins/build/mcp-server), [ChatGPT Developer Mode](https://developers.openai.com/api/docs/guides/developer-mode), [MCP authentication](https://developers.openai.com/plugins/build/auth), and [ChatGPT MCP connection flow](https://developers.openai.com/plugins/build/app-quickstart).
+References: [OpenAI MCP server guide](https://developers.openai.com/api/docs/mcp), [Coinbase Advanced Trade API](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/rest-api), and [Coinbase Products API](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/products/list-products).
