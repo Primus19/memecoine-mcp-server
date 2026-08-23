@@ -194,6 +194,13 @@ async def rest_status(request):
     try:return JSONResponse(hourly_snapshot(int(request.query_params.get("since_seq","0"))))
     except Exception as exc:return JSONResponse({"error":str(exc)},status_code=500)
 
+@mcp.custom_route("/api/eligible-products",methods=["GET"])
+async def rest_eligible_products(request):
+    if not rest_authorized(request):return unauthorized()
+    try:
+        products=exchange().eligible_products();return JSONResponse({"count":len(products),"products":products})
+    except Exception as exc:return JSONResponse({"error":str(exc)},status_code=500)
+
 @mcp.custom_route("/api/auto-candidate",methods=["POST"])
 async def rest_auto_candidate(request):
     if not rest_authorized(request):return unauthorized()
