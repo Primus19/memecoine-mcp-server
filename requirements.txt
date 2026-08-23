@@ -2,6 +2,7 @@ fastmcp==3.4.7
 coinbase-advanced-py==1.8.2
 cryptography==45.0.6
 python-multipart==0.0.26
+websockets>=13.0,<14.0
 
 py-key-value-aio[disk]>=0.1.0
 
