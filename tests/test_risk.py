@@ -12,7 +12,8 @@ def ticket(notional=23.75):
         "spread_bps": 20, "slippage_bps": 20, "identity_verified": True,
         "spot_available": True, "no_safety_veto": True, "notional_usdc": notional,
         "max_loss_usdc": 2, "limit_price": .1, "stop_price": .092, "target_price": .115,
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        "reference_price": .1, "source_timestamp": datetime.now(timezone.utc).isoformat(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=90)).isoformat(),
     }
 
 
@@ -45,3 +46,7 @@ class RiskTests(unittest.TestCase):
     def test_reject_excess_loss(self):
         t = ticket(); t["max_loss_usdc"] = 3
         with self.assertRaises(TicketRejected): self.validate(t)
+
+    def test_reject_stale_source(self):
+        t=ticket();t["source_timestamp"]=(datetime.now(timezone.utc)-timedelta(minutes=3)).isoformat()
+        with self.assertRaisesRegex(TicketRejected,"fresh"):self.validate(t)
