@@ -15,6 +15,7 @@ from .store import Store
 
 BASE_URL=validate_public_base_url(os.environ["PUBLIC_BASE_URL"]);SETUP_TOKEN=os.environ["SETUP_TOKEN"];REST_API_TOKEN=os.getenv("REST_API_TOKEN","")
 LIVE_ARMED=os.getenv("LIVE_TRADING","false").lower()=="true" and os.getenv("LIVE_CONFIRMATION","")=="I_ACCEPT_THE_25_USDC_LIVE_RISK"
+PREAUTHORIZED_AUTO_EXECUTION=os.getenv("PREAUTHORIZED_AUTO_EXECUTION","false").lower()=="true"
 ALLOCATION_FRACTION=min(.95,max(.20,float(os.getenv("MAX_CAPITAL_ALLOCATION_PCT","95"))/100))
 ENTRY_TIMEOUT_SECONDS=min(90,max(5,int(os.getenv("ENTRY_TIMEOUT_SECONDS","45"))))
 MAX_ENTRY_DRIFT_BPS=min(35,max(1,float(os.getenv("MAX_ENTRY_DRIFT_BPS","35"))))
@@ -142,7 +143,7 @@ def unauthorized():return JSONResponse({"error":"unauthorized"},status_code=401,
 
 @mcp.custom_route("/health",methods=["GET"])
 async def health(_):
-    return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED","oauth":{"provider":"github","base_url":BASE_URL,"callback_url":oauth_callback_url(BASE_URL),"persistent_client_storage":os.path.abspath(OAUTH_STORAGE_DIR).startswith("/app/data/"),"jwt_signing_key_configured":True,"jwt_signing_key_source":JWT_SIGNING_KEY_SOURCE,"fastmcp_version":package_version("fastmcp")}})
+    return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED","schema_version":"3.2","preauthorized_auto_execution":PREAUTHORIZED_AUTO_EXECUTION,"expected_tool_count":9,"oauth":{"provider":"github","base_url":BASE_URL,"callback_url":oauth_callback_url(BASE_URL),"persistent_client_storage":os.path.abspath(OAUTH_STORAGE_DIR).startswith("/app/data/"),"jwt_signing_key_configured":True,"jwt_signing_key_source":JWT_SIGNING_KEY_SOURCE,"fastmcp_version":package_version("fastmcp")}})
 @mcp.custom_route("/setup",methods=["GET","POST"])
 async def setup(request):
     if not hmac.compare_digest(request.query_params.get("token",""),SETUP_TOKEN):return HTMLResponse("Not found",status_code=404)
@@ -158,10 +159,10 @@ def preflight_coinbase()->dict:return run_preflight()
 @mcp.tool(annotations={"readOnlyHint":True,"openWorldHint":True})
 def list_eligible_spot_products()->dict:
     products=exchange().eligible_products();return {"count":len(products),"products":products}
-@mcp.tool(annotations={"openWorldHint":True,"idempotentHint":False})
+@mcp.tool(annotations={"destructiveHint":True,"openWorldHint":True,"idempotentHint":False})
 def issue_model_3_1_recommendation(candidate:dict)->dict:
-    """Score, validate and freeze the exact recommendation that must appear in the report before execution."""
-    return issue(candidate)
+    """Score and freeze a recommendation. When preauthorized mode is enabled, immediately run the same validated fast execution path; this may spend real money if live trading is armed."""
+    return auto_process(candidate) if PREAUTHORIZED_AUTO_EXECUTION else issue(candidate)
 @mcp.tool(annotations={"readOnlyHint":True,"openWorldHint":True})
 def pilot_status(since_event_seq:int=0)->dict:return hourly_snapshot(since_event_seq)
 @mcp.tool(annotations={"destructiveHint":True,"openWorldHint":True,"idempotentHint":True})
