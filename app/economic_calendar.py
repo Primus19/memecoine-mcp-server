@@ -2,17 +2,29 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from html import unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from zoneinfo import ZoneInfo
 
 LOCK = threading.RLock()
 STATE = {"ok": False, "observed_at": "", "source_url": "", "events": [], "error": "not scanned"}
 
 TRADING_ECONOMICS_SOURCE = "https://api.tradingeconomics.com/calendar"
+OFFICIAL_COMPOSITE_SOURCE = "https://www.bls.gov/schedule/news_release/bls.ics"
+OFFICIAL_SOURCES = {
+    "bls": ("USD", OFFICIAL_COMPOSITE_SOURCE),
+    "federal_reserve": ("USD", "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"),
+    "ecb": ("EUR", "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html"),
+    "bank_of_england": ("GBP", "https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates"),
+    "bank_of_japan": ("JPY", "https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm"),
+}
 COUNTRY_CURRENCY = {
     "australia": "AUD", "canada": "CAD", "euro area": "EUR",
     "european union": "EUR", "france": "EUR", "germany": "EUR",
@@ -32,6 +44,8 @@ def build_request(now: datetime | None = None) -> tuple[str, dict[str, str], str
     """Build an upstream request while keeping credentials out of published evidence."""
     provider = os.getenv("ECONOMIC_CALENDAR_PROVIDER", "generic").strip().lower()
     headers = {"Accept": "application/json", "User-Agent": "primus-economic-calendar/1.1"}
+    if provider == "official_composite":
+        return "official-composite://calendar", headers, OFFICIAL_COMPOSITE_SOURCE, provider
     if provider == "trading_economics":
         key = os.environ["TRADING_ECONOMICS_API_KEY"].strip()
         if not key:
@@ -58,6 +72,166 @@ def build_request(now: datetime | None = None) -> tuple[str, dict[str, str], str
     parsed = urllib.parse.urlsplit(url)
     public_source = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
     return url, headers, public_source, provider
+
+
+def _utc(year: int, month: int, day: int, hour: int, minute: int, zone: str) -> datetime:
+    return datetime(year, month, day, hour, minute, tzinfo=ZoneInfo(zone)).astimezone(timezone.utc)
+
+
+def _text(value: str) -> str:
+    return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", value))).strip()
+
+
+def _event(currency: str, title: str, stamp: datetime, source: str,
+           blackout_before: int = 30, blackout_after: int = 30) -> dict:
+    return {"currency": currency, "impact": "HIGH", "event": title[:300],
+            "time": stamp.astimezone(timezone.utc).isoformat(), "source_url": source,
+            "blackout_before_minutes": blackout_before,
+            "blackout_after_minutes": blackout_after}
+
+
+def _parse_ics_datetime(value: str, params: str) -> datetime:
+    zone_match = re.search(r"TZID=([^;:]+)", params)
+    zone_name = zone_match.group(1) if zone_match else "UTC"
+    # BLS uses the legacy US-Eastern alias, which is not installed in every
+    # slim container even when the canonical IANA zone is available.
+    if zone_name == "US-Eastern": zone_name = "America/New_York"
+    zone = ZoneInfo(zone_name) if zone_match else timezone.utc
+    raw = value.strip()
+    if len(raw) == 8:
+        return datetime.strptime(raw, "%Y%m%d").replace(tzinfo=zone)
+    if raw.endswith("Z"):
+        return datetime.strptime(raw, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    return datetime.strptime(raw, "%Y%m%dT%H%M%S").replace(tzinfo=zone)
+
+
+def parse_bls_ics(body: str) -> list[dict]:
+    body = re.sub(r"\r?\n[ \t]", "", body)
+    high = re.compile(r"consumer price|producer price|employment situation|job openings|"
+                      r"import and export price|employment cost|productivity and costs", re.I)
+    events = []
+    for block in re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", body, re.S):
+        summary = re.search(r"^SUMMARY(?:;[^:]*)?:(.*)$", block, re.M)
+        stamp = re.search(r"^DTSTART(?P<params>;[^:]*)?:(?P<value>.*)$", block, re.M)
+        if not summary or not stamp or not high.search(summary.group(1)): continue
+        try:
+            when = _parse_ics_datetime(stamp.group("value"), stamp.group("params") or "")
+        except (ValueError, KeyError):
+            continue
+        events.append(_event("USD", summary.group(1).replace("\\,", ","), when,
+                             OFFICIAL_SOURCES["bls"][1]))
+    return events
+
+
+def parse_fomc_html(body: str, year: int) -> list[dict]:
+    panel = re.search(rf">{year} FOMC Meetings</a>(.*?)(?=>{year + 1} FOMC Meetings</a>|</main>)", body, re.S | re.I)
+    if not panel: return []
+    events = []
+    pattern = re.compile(r'fomc-meeting__month[^>]*><strong>([^<]+)</strong>.*?fomc-meeting__date[^>]*>([^<]+)', re.S)
+    for month_name, days in pattern.findall(panel.group(1)):
+        nums = re.findall(r"\d+", days)
+        if not nums: continue
+        try:
+            day = int(nums[-1]); month = datetime.strptime(month_name.strip(), "%B").month
+            when = _utc(year, month, day, 14, 0, "America/New_York")
+        except ValueError:
+            continue
+        events.append(_event("USD", "FOMC monetary policy decision", when,
+                             OFFICIAL_SOURCES["federal_reserve"][1], 60, 60))
+    return events
+
+
+def parse_ecb_html(body: str) -> list[dict]:
+    events = []
+    for raw_date, description in re.findall(r"<dt[^>]*>\s*([0-9]{2}/[0-9]{2}/[0-9]{4})\s*</dt>\s*<dd[^>]*>(.*?)</dd>", body, re.S | re.I):
+        title = _text(description)
+        if "monetary policy" not in title.lower() or "press conference" not in title.lower(): continue
+        try:
+            day, month, year = map(int, raw_date.split("/"))
+            when = _utc(year, month, day, 14, 15, "Europe/Berlin")
+        except ValueError:
+            continue
+        events.append(_event("EUR", "ECB monetary policy decision and press conference", when,
+                             OFFICIAL_SOURCES["ecb"][1], 60, 90))
+    return events
+
+
+def parse_boe_html(body: str, year: int) -> list[dict]:
+    section = re.search(rf">{year} confirmed dates</h2>(.*?)(?=<h2|</section>)", body, re.S | re.I)
+    if not section: return []
+    events = []
+    for cell in re.findall(r"<tr[^>]*>\s*<td[^>]*>(.*?)</td>", section.group(1), re.S | re.I):
+        label = _text(cell).replace("\xa0", " ")
+        match = re.search(r"(?:Monday|Tuesday|Wednesday|Thursday|Friday)\s+(\d{1,2})\s+([A-Za-z]+)", label)
+        if not match: continue
+        try:
+            month = datetime.strptime(match.group(2), "%B").month
+            when = _utc(year, month, int(match.group(1)), 12, 0, "Europe/London")
+        except ValueError:
+            continue
+        events.append(_event("GBP", "Bank of England MPC decision", when,
+                             OFFICIAL_SOURCES["bank_of_england"][1], 60, 60))
+    return events
+
+
+def parse_boj_html(body: str, year: int) -> list[dict]:
+    section = re.search(rf'id="p{year}"[^>]*>(.*?)(?=id="p{year + 1}"|$)', body, re.S | re.I)
+    if not section: return []
+    events = []
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", section.group(1), re.S | re.I):
+        first = re.search(r"<td[^>]*>(.*?)</td>", row, re.S | re.I)
+        if not first: continue
+        label = _text(first.group(1))
+        dates = re.findall(r"([A-Za-z]{3,9})\.?.*?(\d{1,2})\s*\([^)]*\)", label)
+        if not dates: continue
+        month_name, day_text = dates[-1]
+        try:
+            month = datetime.strptime(month_name[:3], "%b").month
+            when = _utc(year, month, int(day_text), 12, 0, "Asia/Tokyo")
+        except ValueError:
+            continue
+        events.append(_event("JPY", "Bank of Japan monetary policy decision window", when,
+                             OFFICIAL_SOURCES["bank_of_japan"][1], 720, 360))
+    return events
+
+
+def _fetch_official(name: str, now: datetime) -> tuple[dict, list[dict]]:
+    currency, url = OFFICIAL_SOURCES[name]
+    request = urllib.request.Request(url, headers={"Accept": "text/html,text/calendar", "User-Agent": "primus-economic-calendar/1.2"})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        body = response.read().decode("utf-8", "replace")
+        status = getattr(response, "status", 200)
+    if status != 200 or not body.strip(): raise ValueError(f"{name} returned an empty or unsuccessful response")
+    if name == "bls": events = parse_bls_ics(body)
+    elif name == "federal_reserve": events = sum((parse_fomc_html(body, year) for year in {now.year, now.year + 1}), [])
+    elif name == "ecb": events = parse_ecb_html(body)
+    elif name == "bank_of_england": events = sum((parse_boe_html(body, year) for year in {now.year, now.year + 1}), [])
+    else: events = sum((parse_boj_html(body, year) for year in {now.year, now.year + 1}), [])
+    if not events:
+        raise ValueError(f"{name} response contained no recognized calendar entries")
+    return {"name": name, "currency": currency, "url": url, "ok": True, "event_count": len(events)}, events
+
+
+def scan_official_composite(now: datetime | None = None) -> dict:
+    clock = now or datetime.now(timezone.utc)
+    required = {item.strip().upper() for item in os.getenv("OFFICIAL_CALENDAR_REQUIRED_CURRENCIES", "USD,EUR,GBP,JPY").split(",") if item.strip()}
+    selected = [name for name, (currency, _) in OFFICIAL_SOURCES.items() if currency in required]
+    with ThreadPoolExecutor(max_workers=len(selected)) as pool:
+        results = list(pool.map(lambda name: _fetch_official(name, clock), selected))
+    sources = [result[0] for result in results]
+    coverage = {source["currency"] for source in sources if source["ok"]}
+    if not required.issubset(coverage): raise ValueError(f"official calendar coverage missing: {sorted(required - coverage)}")
+    lookahead = min(31, max(1, int(os.getenv("ECONOMIC_CALENDAR_LOOKAHEAD_DAYS", "7"))))
+    floor, ceiling = clock - timedelta(days=1), clock + timedelta(days=lookahead)
+    events = [event for _, rows in results for event in rows
+              if floor <= datetime.fromisoformat(event["time"]) <= ceiling]
+    events.sort(key=lambda event: event["time"])
+    for event in events:
+        stamp = datetime.fromisoformat(event["time"])
+        event["minutes_until"] = round((stamp - clock).total_seconds() / 60)
+    return {"observed_at": clock.isoformat(), "source_url": OFFICIAL_COMPOSITE_SOURCE,
+            "provider": "official_composite", "coverage": sorted(coverage),
+            "sources": sources, "events": events}
 
 
 def normalize(payload: object, source_url: str, provider: str = "generic") -> dict:
@@ -87,10 +261,15 @@ def normalize(payload: object, source_url: str, provider: str = "generic") -> di
 
 
 def scan() -> None:
-    url, headers, public_source, provider = build_request()
-    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as response:
-        value = normalize(json.loads(response.read().decode()), public_source, provider)
-    if not value["events"] and os.getenv("ECONOMIC_CALENDAR_REQUIRE_EVENTS", "true").lower() == "true":
+    provider = os.getenv("ECONOMIC_CALENDAR_PROVIDER", "generic").strip().lower()
+    if provider == "official_composite":
+        value = scan_official_composite()
+    else:
+        url, headers, public_source, provider = build_request()
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as response:
+            value = normalize(json.loads(response.read().decode()), public_source, provider)
+    require_events = os.getenv("ECONOMIC_CALENDAR_REQUIRE_EVENTS", "true").lower() == "true"
+    if not value["events"] and require_events and provider != "official_composite":
         raise ValueError("upstream returned no recognized high-impact events; calendar remains unverified")
     with LOCK: STATE.update(ok=True, error="", **value)
 
