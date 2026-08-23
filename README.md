@@ -228,6 +228,8 @@ MULTI_ASSET_FEED_URL=https://multi-asset-market-feed-production.up.railway.app/s
 FOREX_MAX_RISK_USD=2.50
 FOREX_MAX_OPEN_POSITIONS=1
 FOREX_DAILY_LOSS_LIMIT_USD=2.50
+FOREX_MAX_NOTIONAL_USD=50.00
+FOREX_MAX_MARGIN_USED_USD=5.00
 ```
 
 Live mode additionally requires all four values below plus a current verified
@@ -256,6 +258,12 @@ OANDA_ENVIRONMENT=practice
 FOREX_PRACTICE_EXECUTION_ENABLED=true
 FOREX_PRACTICE_ACK=I_ACCEPT_PRACTICE_ORDER_EXECUTION
 ```
+
+Run `python -m app.economic_calendar` as a separate service to normalize a
+trusted upstream calendar into the `/events` schema consumed by the market
+feed. Configure `ECONOMIC_CALENDAR_UPSTREAM_URL`, optional
+`ECONOMIC_CALENDAR_UPSTREAM_TOKEN`, and point the market feed's
+`ECONOMIC_CALENDAR_URL` to this service's `/events` endpoint.
 
 ## Continuous signal worker
 

@@ -53,12 +53,20 @@ class OandaAdapter:
         account = payload.get("account", {})
         return {"broker": "OANDA", "environment": self.environment, "account_id_suffix": self.account[-4:],
                 "currency": account.get("currency"), "balance": float(account.get("balance", 0)),
+                "nav": float(account.get("NAV", account.get("balance", 0))),
                 "margin_available": float(account.get("marginAvailable", 0)),
+                "margin_used": float(account.get("marginUsed", 0)),
                 "open_trade_count": int(account.get("openTradeCount", 0)),
                 "last_transaction_id": str(payload.get("lastTransactionID") or account.get("lastTransactionID") or "")}
 
     def instruments(self) -> list[dict[str, Any]]:
         return request_json(f"{self.base}/v3/accounts/{self.account}/instruments", token=self.token).get("instruments", [])
+
+    def instrument(self, symbol: str) -> dict:
+        query = urllib.parse.urlencode({"instruments": symbol})
+        values = request_json(f"{self.base}/v3/accounts/{self.account}/instruments?{query}", token=self.token).get("instruments", [])
+        if not values: raise BrokerError("OANDA returned no instrument metadata")
+        return values[0]
 
     def candles(self, symbol: str, granularity: str = "H1", count: int = 30) -> list[dict]:
         query = urllib.parse.urlencode({"granularity": granularity, "count": count, "price": "M"})
