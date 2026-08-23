@@ -32,14 +32,14 @@ class StoreTests(unittest.TestCase):
         self.store.initialize_baseline(25)
         flow=self.store.sync_external_flow(40)
         self.assertEqual(flow["kind"],"DEPOSIT")
-        self.assertAlmostEqual(self.store.permitted_capital(),40)
+        self.assertAlmostEqual(self.store.permitted_capital(),25)
         self.assertAlmostEqual(float(self.store.setting("realized_pnl_usdc")),0)
 
-    def test_three_losses_pause(self):
+    def test_two_losses_pause(self):
         self.store.initialize_baseline(25)
-        for i in range(3):
+        for i in range(2):
             payload={"ticket_id":f"t{i}","recommendation_hash":f"h{i}","model_version":"3.1","created_at":"x","expires_at":"x","product_id":"TURBO-USDC","score":85}
             self.store.issue_recommendation(payload);self.store.add_position({"ticket_id":f"t{i}","product_id":"TURBO-USDC","notional_usdc":5,"limit_price":1},f"o{i}");self.store.record_closed_trade(f"t{i}",-1,-20)
         controls=self.store.update_equity_controls(22)
-        self.assertIn("three consecutive losses",controls["circuit_breakers"])
+        self.assertIn("two consecutive losses",controls["circuit_breakers"])
         self.assertTrue(self.store.paused())
