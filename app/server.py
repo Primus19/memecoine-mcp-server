@@ -51,21 +51,18 @@ async def setup(request: Request):
     return HTMLResponse(page)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
-def pilot_status() -> dict:
-    """Return live-pilot mode, pause/position state, allowlist, and redacted audit history."""
+def _pilot_status_impl() -> dict:
+    """Implementation of pilot_status (called by both MCP tool and REST endpoint)."""
     return {"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED", "paused":store.paused(), "open_position":store.open_position(), "allowlist":sorted(ALLOWLIST), "events":store.recent()}
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
-def preflight_coinbase() -> dict:
-    """Verify Coinbase key permissions and dedicated USDC balance. Never returns credentials."""
+def _preflight_coinbase_impl() -> dict:
+    """Implementation of preflight_coinbase (called by both MCP tool and REST endpoint)."""
     result = exchange().preflight(); store.event("PREFLIGHT_OK", result); return result
 
 
-@mcp.tool(annotations={"destructiveHint": True, "openWorldHint": True, "idempotentHint": True})
-def execute_validated_ticket(ticket: dict) -> dict:
-    """Preview and, only when armed, submit one expiring Coinbase spot ticket with attached stop/target. This can spend real money."""
+def _execute_validated_ticket_impl(ticket: dict) -> dict:
+    """Implementation of execute_validated_ticket (called by both MCP tool and REST endpoint)."""
     ticket_id = str(ticket.get("ticket_id", ""))
     if not ticket_id: raise ValueError("ticket_id required")
     if store.paused(): raise RuntimeError("live pilot is paused")
@@ -81,10 +78,33 @@ def execute_validated_ticket(ticket: dict) -> dict:
     return {"status":"ORDER_SUBMITTED", "ticket_id":ticket_id, "response":str(result)}
 
 
+def _emergency_pause_impl(reason: str) -> dict:
+    """Implementation of emergency_pause (called by both MCP tool and REST endpoint)."""
+    store.event("PAUSED", {"reason":reason}); return {"paused":True, "reason":reason}
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def pilot_status() -> dict:
+    """Return live-pilot mode, pause/position state, allowlist, and redacted audit history."""
+    return _pilot_status_impl()
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+def preflight_coinbase() -> dict:
+    """Verify Coinbase key permissions and dedicated USDC balance. Never returns credentials."""
+    return _preflight_coinbase_impl()
+
+
+@mcp.tool(annotations={"destructiveHint": True, "openWorldHint": True, "idempotentHint": True})
+def execute_validated_ticket(ticket: dict) -> dict:
+    """Preview and, only when armed, submit one expiring Coinbase spot ticket with attached stop/target. This can spend real money."""
+    return _execute_validated_ticket_impl(ticket)
+
+
 @mcp.tool(annotations={"destructiveHint": True, "idempotentHint": True})
 def emergency_pause(reason: str) -> dict:
     """Immediately block new live submissions. Existing Coinbase bracket orders remain on exchange."""
-    store.event("PAUSED", {"reason":reason}); return {"paused":True, "reason":reason}
+    return _emergency_pause_impl(reason)
 
 
 # REST endpoints for ChatGPT integration
@@ -92,7 +112,7 @@ def emergency_pause(reason: str) -> dict:
 async def rest_pilot_status(_: Request):
     """REST endpoint for pilot_status tool."""
     try:
-        result = pilot_status()
+        result = _pilot_status_impl()
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -102,7 +122,7 @@ async def rest_pilot_status(_: Request):
 async def rest_preflight(_: Request):
     """REST endpoint for preflight_coinbase tool."""
     try:
-        result = preflight_coinbase()
+        result = _preflight_coinbase_impl()
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -114,7 +134,7 @@ async def rest_execute_ticket(request: Request):
     try:
         body = await request.json()
         ticket = body.get("ticket", {})
-        result = execute_validated_ticket(ticket)
+        result = _execute_validated_ticket_impl(ticket)
         return JSONResponse(result)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -130,7 +150,7 @@ async def rest_emergency_pause(request: Request):
     try:
         body = await request.json()
         reason = body.get("reason", "Manual emergency pause")
-        result = emergency_pause(reason)
+        result = _emergency_pause_impl(reason)
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
