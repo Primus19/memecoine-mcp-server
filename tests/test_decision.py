@@ -12,3 +12,7 @@ class DecisionTests(unittest.TestCase):
     def test_component_limit_is_enforced(self):
         c=candidate();c["component_scores"]["news"]=11
         with self.assertRaises(ValueError):build_recommendation(c)
+    def test_opportunity_policy_is_frozen_into_hash(self):
+        r=build_recommendation(candidate())
+        self.assertEqual("1.0",r["opportunity_policy"]["version"])
+        self.assertEqual(78,r["opportunity_policy"]["min_score"])
