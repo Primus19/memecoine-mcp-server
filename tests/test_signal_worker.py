@@ -5,6 +5,11 @@ from app.signal_worker import candidate_digest, eligible_fresh_candidates
 
 
 class SignalWorkerTests(unittest.TestCase):
+    def test_signal_id_makes_digest_stable_across_market_refreshes(self):
+        first = {"signal_id": "abc", "source_timestamp": "2026-01-01T00:00:00+00:00", "price": 1}
+        second = {"signal_id": "abc", "source_timestamp": "2026-01-01T00:00:10+00:00", "price": 2}
+        self.assertEqual(candidate_digest(first), candidate_digest(second))
+
     def test_only_forwards_fresh_candidates(self):
         now=datetime.now(timezone.utc)
         fresh={"product_id":"AAA-USDC","source_timestamp":now.isoformat()}
