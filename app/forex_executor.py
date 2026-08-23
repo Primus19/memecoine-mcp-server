@@ -91,6 +91,9 @@ class Ledger:
     def paper_positions(self) -> list[dict]:
         return [dict(row) for row in self.db.execute("SELECT * FROM intents WHERE status='PAPER_OPEN'").fetchall()]
 
+    def broker_positions(self) -> list[dict]:
+        return [dict(row) for row in self.db.execute("SELECT * FROM intents WHERE status IN ('SUBMITTED','OPEN')").fetchall()]
+
 
 def fetch_json(url: str) -> dict:
     with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "primus-forex-executor/1.0"}), timeout=20) as response:
@@ -120,10 +123,18 @@ def safe_quantity(adapter: OandaAdapter, proposal: dict, risk_usd: float) -> flo
     if age < -5 or age > 10:
         raise MultiAssetRejected("broker quote stale")
     factor = float(quote.get("quoteHomeConversionFactors", {}).get("negativeUnits") or 0)
+    bids, asks = quote.get("bids", []), quote.get("asks", [])
+    mid = (float(bids[0]["price"]) + float(asks[0]["price"])) / 2 if bids and asks else float(proposal["reference_price"])
     distance = abs(float(proposal["reference_price"]) - float(proposal["stop_price"]))
     if factor <= 0 or distance <= 0:
         raise MultiAssetRejected("risk conversion unavailable")
     units = int(risk_usd / (distance * factor))
+    metadata = adapter.instrument(proposal["symbol"])
+    margin_rate = float(metadata.get("marginRate") or 1)
+    unit_notional_home = mid * factor
+    notional_cap = max(1.0, float(os.getenv("FOREX_MAX_NOTIONAL_USD", "50")))
+    margin_cap = max(0.50, float(os.getenv("FOREX_MAX_MARGIN_USED_USD", "5")))
+    units = min(units, int(notional_cap / unit_notional_home), int(margin_cap / (unit_notional_home * margin_rate)))
     if units < 1:
         raise MultiAssetRejected("risk cap cannot support minimum unit")
     return float(units)
@@ -150,12 +161,31 @@ class Executor:
                                                      "pending_orders": pending, "transactions": transactions})
         if len(trades) > int(os.getenv("FOREX_MAX_OPEN_POSITIONS", "1")):
             raise BrokerError("broker position count exceeds limit")
+        if live_armed(self.adapter) or practice_armed(self.adapter):
+            expected = {str(item.get("broker_trade_id") or "") for item in self.ledger.broker_positions() if item.get("broker_trade_id")}
+            actual = {str(item.get("id") or "") for item in trades}
+            unexpected = actual - expected
+            if unexpected: raise BrokerError("unexpected broker trade detected; entries paused")
+            for trade in trades:
+                if not trade.get("stopLossOrder") or not trade.get("takeProfitOrder"):
+                    trade_id = str(trade.get("id") or "")
+                    result = self.adapter.close_trade(trade_id) if trade_id else {}
+                    self.ledger.event("UNPROTECTED_TRADE_EMERGENCY_CLOSE", {"trade_id": trade_id, "response": result})
+                    raise BrokerError("unprotected broker trade closed; entries paused")
         baseline = float(os.getenv("FOREX_LIVE_BASELINE_USD", "0") or 0)
         loss_limit = min(5.0, max(0.50, float(os.getenv("FOREX_DAILY_LOSS_LIMIT_USD", "2.50"))))
         if live_armed(self.adapter) and baseline <= 0:
             raise BrokerError("FOREX_LIVE_BASELINE_USD must be configured")
-        if live_armed(self.adapter) and baseline - float(summary["balance"]) >= loss_limit:
-            raise BrokerError("daily loss circuit breaker active")
+        today = datetime.now(UTC).date().isoformat()
+        if self.ledger.setting("daily_baseline_date") != today:
+            self.ledger.set_setting("daily_baseline_date", today)
+            self.ledger.set_setting("daily_baseline_nav", str(summary["nav"]))
+            self.ledger.event("DAILY_BASELINE_RESET", {"date": today, "nav": summary["nav"]})
+        daily_nav = float(self.ledger.setting("daily_baseline_nav", str(summary["nav"])))
+        if (live_armed(self.adapter) or practice_armed(self.adapter)) and daily_nav - float(summary["nav"]) >= loss_limit:
+            raise BrokerError("daily NAV loss circuit breaker active")
+        if (live_armed(self.adapter) or practice_armed(self.adapter)) and float(summary["margin_used"]) > float(os.getenv("FOREX_MAX_MARGIN_USED_USD", "5")):
+            raise BrokerError("margin-used circuit breaker active")
         with LOCK:
             STATE["open_positions"] = len(trades)
 
@@ -197,6 +227,17 @@ class Executor:
         status = "OPEN" if trade_id else "SUBMITTED"
         self.ledger.update_intent(intent_id, status, order_id, trade_id)
         self.ledger.event("ORDER_ACCEPTED", {"intent_id": intent_id, "order_id": order_id, "trade_id": trade_id, "response": response})
+        if trade_id:
+            protected = {}
+            for _ in range(3):
+                protected = next((item for item in self.adapter.open_trades() if str(item.get("id")) == trade_id), {})
+                if protected.get("stopLossOrder") and protected.get("takeProfitOrder"): break
+                time.sleep(1)
+            if not protected.get("stopLossOrder") or not protected.get("takeProfitOrder"):
+                close = self.adapter.close_trade(trade_id)
+                self.ledger.update_intent(intent_id, "EMERGENCY_CLOSED", order_id, trade_id)
+                self.ledger.event("ENTRY_PROTECTION_FAILED", {"intent_id": intent_id, "trade_id": trade_id, "close": close})
+                raise BrokerError("entry protection missing; trade closed")
         return {"status": status, "id": intent_id, "order_id": order_id, "trade_id": trade_id}
 
     def supervise_paper(self, snapshots: list[dict]) -> list[dict]:

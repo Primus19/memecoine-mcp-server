@@ -16,7 +16,10 @@ class Adapter:
             "status": "tradeable",
             "time": datetime.now(timezone.utc).isoformat(),
             "quoteHomeConversionFactors": {"negativeUnits": "1.0"},
+            "bids": [{"price":"1.1"}], "asks": [{"price":"1.1"}],
         }
+
+    def instrument(self, _symbol): return {"marginRate":"0.02"}
 
 
 class ForexExecutorTests(unittest.TestCase):
@@ -53,8 +56,8 @@ class ForexExecutorTests(unittest.TestCase):
 
     def test_home_currency_risk_sizing(self):
         proposal = {"symbol":"EUR_USD","reference_price":1.1,"stop_price":1.095}
-        # Binary floating point rounds conservatively down, never above risk.
-        self.assertEqual(499.0, safe_quantity(Adapter(), proposal, 2.5))
+        # The $50 notional cap is stricter than the stop-risk calculation.
+        self.assertEqual(45.0, safe_quantity(Adapter(), proposal, 2.5))
 
 
 if __name__ == "__main__": unittest.main()
