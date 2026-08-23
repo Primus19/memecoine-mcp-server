@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .policy import OpportunityPolicy
+
 try:
     from starlette.applications import Starlette
     from starlette.requests import Request
@@ -61,6 +63,7 @@ class ResearchFeed:
         self.interval = max(15, min(300, int(os.getenv("RESEARCH_SCAN_INTERVAL_SECONDS", "30"))))
         self.notional = clamp(float(os.getenv("PILOT_NOTIONAL_USDC", "23.75")), 1.0, 25.0)
         self.max_loss = min(2.5, float(os.getenv("PILOT_MAX_LOSS_USDC", "2.50")))
+        self.policy = OpportunityPolicy.from_env()
         self.state_path = Path(os.getenv("RESEARCH_FEED_STATE_PATH", "/app/data/research_feed.json"))
         self.lock = threading.RLock()
         self.state: dict[str, Any] = {"evidence": {}, "candidates": [], "status": {"ok": False}}
@@ -127,7 +130,7 @@ class ResearchFeed:
         if evidence.get("identity_verified") is not True: failures.append("identity not attested")
         if evidence.get("no_safety_veto") is not True: failures.append("safety veto not cleared")
         if float(evidence.get("safety_score") or 0) < 12: failures.append("safety score below 12")
-        if float(evidence.get("news_score") or 0) < 4: failures.append("verified news score below 4")
+        if evidence.get("news_veto") is True: failures.append("news veto active")
         urls = evidence.get("source_urls")
         if not isinstance(urls, list) or not urls or any(not str(url).startswith("https://") for url in urls): failures.append("HTTPS evidence sources missing")
         try:
@@ -145,24 +148,25 @@ class ResearchFeed:
         week = float(market.get("price_change_percentage_7d_in_currency") or 0)
         dilution = cap / fdv if fdv else 0
         failures = []
-        if regime["classification"] != "RISING": failures.append("regime not RISING")
-        if cap < 50_000_000: failures.append("market cap below $50M")
-        if volume < 10_000_000: failures.append("volume below $10M")
-        if not .05 <= turnover <= 1: failures.append("turnover outside 5%-100%")
+        if not self.policy.regime_allowed(regime["classification"]): failures.append("regime not permitted")
+        if cap < self.policy.min_market_cap_usd: failures.append("market cap below policy minimum")
+        if volume < self.policy.min_volume_24h_usd: failures.append("volume below policy minimum")
+        if not self.policy.min_turnover <= turnover <= self.policy.max_turnover: failures.append("turnover outside policy range")
         if one <= 0: failures.append("1h momentum not positive")
-        if day <= 0 or day > 15: failures.append("24h momentum outside (0%,15%]")
+        if day <= 0 or day > self.policy.max_momentum_24h_pct: failures.append("24h momentum outside policy range")
         if dilution < .70: failures.append("severe dilution")
+        if not self.policy.news_allowed(evidence.get("news_score", 0), news_veto=evidence.get("news_veto") is True): failures.append("news policy gate failed")
         components = {
-            "regime": 15 if regime["classification"] == "RISING" else 0,
+            "regime": 15 if regime["classification"] == "RISING" else (8 if regime["classification"] == "MIXED" else 0),
             "liquidity": 20 if volume >= 25_000_000 else 18,
-            "momentum": 13 if one > 0 and 0 < day <= 15 and week > 0 else (9 if one > 0 and 0 < day <= 15 else 0),
-            "volume_quality": 12 if .05 <= turnover <= 1 else 0,
+            "momentum": 13 if one > 0 and 0 < day <= self.policy.max_momentum_24h_pct and week > 0 else (9 if one > 0 and 0 < day <= self.policy.max_momentum_24h_pct else 0),
+            "volume_quality": 12 if self.policy.min_turnover <= turnover <= self.policy.max_turnover else 0,
             "tokenomics": 10 if dilution >= .9 else (8 if dilution >= .7 else 0),
             "safety": int(clamp(float(evidence.get("safety_score") or 0), 0, 15)),
             "news": int(clamp(float(evidence.get("news_score") or 0), 0, 10)),
             "social": int(clamp(float(evidence.get("social_score") or 0), 0, 5)),
         }
-        if sum(components.values()) < 85: failures.append("Model 3.1 score below 85")
+        if sum(components.values()) < self.policy.min_score: failures.append(f"Model 3.1 score below {self.policy.min_score:g}")
         return components, failures
 
     def build_candidate(self, market: dict[str, Any], product: dict[str, Any], evidence: dict[str, Any], regime: dict[str, Any], at: datetime) -> tuple[dict[str, Any] | None, list[str]]:
@@ -177,7 +181,7 @@ class ResearchFeed:
         signal_id = hashlib.sha256(f"{product_id}|{evidence_stamp}|{at.strftime('%Y-%m-%dT%H')}".encode()).hexdigest()
         sources = [f"https://www.coingecko.com/en/coins/{market['id']}", *evidence["source_urls"]]
         candidate = {
-            "signal_id": signal_id, "product_id": product_id, "regime": "RISING",
+            "signal_id": signal_id, "product_id": product_id, "regime": regime["classification"],
             "component_scores": components,
             "change_1h_pct": float(market.get("price_change_percentage_1h_in_currency") or 0),
             "change_24h_pct": float(market.get("price_change_percentage_24h_in_currency") or 0),
@@ -185,7 +189,7 @@ class ResearchFeed:
             "market_cap_usd": float(market.get("market_cap") or 0),
             "volume_24h_usd": float(market.get("total_volume") or 0),
             "turnover": float(market.get("total_volume") or 0) / float(market.get("market_cap") or 1),
-            "identity_verified": True, "no_safety_veto": True,
+            "identity_verified": True, "no_safety_veto": True, "news_veto": evidence.get("news_veto") is True,
             "notional_usdc": self.notional, "max_loss_usdc": self.max_loss,
             "reference_price": price, "limit_price": price * 1.0035,
             "stop_price": price * .92, "target_1_price": price * 1.15,
