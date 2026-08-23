@@ -265,10 +265,31 @@ feed. Configure `ECONOMIC_CALENDAR_UPSTREAM_URL`, optional
 `ECONOMIC_CALENDAR_UPSTREAM_TOKEN`, and point the market feed's
 `ECONOMIC_CALENDAR_URL` to this service's `/events` endpoint.
 
-For production Forex execution, use the first-class Trading Economics adapter.
-It requests high-importance events for a bounded set of major-currency
-countries, maps country names to ISO currency codes, normalizes timestamps to
-UTC, rejects empty/unrecognized responses, and never publishes its API key:
+The recommended no-subscription mode is the fail-closed official composite. It
+fetches the BLS calendar plus Federal Reserve, ECB, Bank of England and Bank of
+Japan policy schedules concurrently, normalizes local release times to UTC,
+and attests coverage separately from the event list. A quiet lookahead window
+is therefore valid only when all required currency sources were successfully
+fetched. BOJ decisions use an extended event-specific blackout because their
+exact release time is not promised:
+
+```text
+ECONOMIC_CALENDAR_ENABLED=true
+ECONOMIC_CALENDAR_PROVIDER=official_composite
+OFFICIAL_CALENDAR_REQUIRED_CURRENCIES=USD,EUR,GBP,JPY
+ECONOMIC_CALENDAR_LOOKAHEAD_DAYS=7
+ECONOMIC_CALENDAR_INTERVAL_SECONDS=300
+```
+
+No API key is required. If any required official source is unreachable or its
+format is no longer recognized, `/health` and `/events` fail closed rather than
+silently treating the week as event-free.
+
+The first-class Trading Economics adapter remains available as an optional
+paid fallback. It requests high-importance events for a bounded set of
+major-currency countries, maps country names to ISO currency codes, normalizes
+timestamps to UTC, rejects empty/unrecognized responses, and never publishes
+its API key:
 
 ```text
 ECONOMIC_CALENDAR_ENABLED=true
