@@ -151,8 +151,8 @@ class ResearchFeed:
         if day <= 0 or day > 15: failures.append("24h momentum outside (0%,15%]")
         if dilution < .70: failures.append("severe dilution")
         components = {
-            "market_regime": 15 if regime["classification"] == "RISING" else 0,
-            "liquidity_executability": 20 if volume >= 25_000_000 else 18,
+            "regime": 15 if regime["classification"] == "RISING" else 0,
+            "liquidity": 20 if volume >= 25_000_000 else 18,
             "momentum": 13 if one > 0 and 0 < day <= 15 and week > 0 else (9 if one > 0 and 0 < day <= 15 else 0),
             "volume_quality": 12 if .05 <= turnover <= 1 else 0,
             "tokenomics": 10 if dilution >= .9 else (8 if dilution >= .7 else 0),
@@ -177,12 +177,12 @@ class ResearchFeed:
         candidate = {
             "signal_id": signal_id, "product_id": product_id, "regime": "RISING",
             "component_scores": components,
-            "price_change_1h_pct": float(market.get("price_change_percentage_1h_in_currency") or 0),
-            "price_change_24h_pct": float(market.get("price_change_percentage_24h_in_currency") or 0),
-            "price_change_7d_pct": float(market.get("price_change_percentage_7d_in_currency") or 0),
+            "change_1h_pct": float(market.get("price_change_percentage_1h_in_currency") or 0),
+            "change_24h_pct": float(market.get("price_change_percentage_24h_in_currency") or 0),
+            "change_7d_pct": float(market.get("price_change_percentage_7d_in_currency") or 0),
             "market_cap_usd": float(market.get("market_cap") or 0),
             "volume_24h_usd": float(market.get("total_volume") or 0),
-            "turnover_pct": 100 * float(market.get("total_volume") or 0) / float(market.get("market_cap") or 1),
+            "turnover": float(market.get("total_volume") or 0) / float(market.get("market_cap") or 1),
             "identity_verified": True, "no_safety_veto": True,
             "notional_usdc": self.notional, "max_loss_usdc": self.max_loss,
             "reference_price": price, "limit_price": price * 1.0035,

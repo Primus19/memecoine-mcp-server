@@ -199,6 +199,37 @@ End-to-end Railway topology:
    one-position limit, spread, slippage, drift, stop and loss cap.
 4. Any missing/stale/conflicting fact stops the chain.
 
+## Continuous evidence adapter
+
+Run `python -m app.evidence_worker` as a fourth Railway service. It intersects
+unique CoinGecko meme symbols with eligible Coinbase USDC products, verifies
+CoinGecko contract identity, requires complete clean GoPlus EVM token-security
+facts, and requires positive catalyst coverage from at least two independent
+configured RSS domains. A two-source exploit, hack, rug, honeypot, delisting,
+compromise, breach or chain-halt report is a veto. Missing contract fields,
+unsupported chains, ambiguous symbols, missing holder data and single-source
+news all fail closed. Social receives zero because the adapter has no reliable
+public account-quality and bot-analysis source.
+
+Required variables:
+
+```text
+EVIDENCE_ADAPTER_ENABLED=true
+EVIDENCE_SCAN_INTERVAL_SECONDS=300
+EXECUTOR_BASE_URL=https://memecoin-mcp-server-production.up.railway.app
+REST_API_TOKEN=<reference the executor token>
+RESEARCH_FEED_URL=https://memecoin-research-feed-production.up.railway.app
+SIGNAL_FEED_BEARER_TOKEN=<reference the research-feed token>
+COINGECKO_API_KEY=<optional demo/pro key>
+EVIDENCE_NEWS_RSS_URLS=<optional comma-separated reviewed RSS URLs>
+```
+
+The adapter has no Coinbase credentials and cannot place orders. It only posts
+bounded evidence to the authenticated research service. Keep
+`LIVE_TRADING=false` until a genuine adapter-produced candidate completes the
+full path and returns `DRY_RUN_ONLY`. Do not use fabricated evidence to force a
+production test.
+
 ## Tests
 
 ```bash

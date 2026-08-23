@@ -61,6 +61,10 @@ class ResearchFeedTests(unittest.TestCase):
         self.assertGreaterEqual(sum(candidate["component_scores"].values()), 85)
         self.assertLessEqual(candidate["max_loss_usdc"], 2.5)
         self.assertTrue(candidate["signal_id"])
+        self.assertIn("regime", candidate["component_scores"])
+        self.assertIn("liquidity", candidate["component_scores"])
+        self.assertEqual(1, candidate["change_1h_pct"])
+        self.assertEqual(.25, candidate["turnover"])
 
     def test_missing_evidence_fails_closed(self):
         feed = self.make_feed()

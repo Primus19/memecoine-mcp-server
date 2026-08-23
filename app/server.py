@@ -205,7 +205,7 @@ async def rest_eligible_products(request):
 async def rest_auto_candidate(request):
     if not rest_authorized(request):return unauthorized()
     try:return JSONResponse(auto_process(await request.json()))
-    except TicketRejected as exc:return JSONResponse({"error":"ticket_rejected","detail":str(exc)},status_code=422)
+    except (TicketRejected,ValueError,TypeError,KeyError) as exc:return JSONResponse({"error":"ticket_rejected","detail":str(exc)},status_code=422)
     except Exception as exc:return JSONResponse({"error":str(exc)},status_code=500)
 
 if __name__=="__main__":mcp.run(transport="http",host="0.0.0.0",port=int(os.getenv("PORT","8080")))
