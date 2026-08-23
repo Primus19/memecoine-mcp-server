@@ -117,6 +117,34 @@ Research still must supply fresh, auditable regime, momentum, market-cap,
 volume, news, social, tokenomics and safety evidence; missing research evidence
 is never converted into a passing score.
 
+## Continuous signal worker
+
+Run `python -m app.signal_worker` as a separate Railway service. It polls a
+trusted research feed every 5-60 seconds (15 seconds by default), discards data
+older than the configured freshness window, deduplicates candidates, and sends
+only fresh complete payloads to the authenticated `/api/auto-candidate` route.
+It never creates scores, fills missing news/safety evidence, or holds Coinbase
+credentials. The executor performs the final Coinbase and portfolio checks.
+
+Required worker variables:
+
+```text
+SIGNAL_WORKER_ENABLED=true
+SIGNAL_SCAN_INTERVAL_SECONDS=15
+SIGNAL_MAX_AGE_SECONDS=90
+SIGNAL_FEED_URL=https://your-trusted-research-feed.example/candidates
+SIGNAL_FEED_BEARER_TOKEN=<feed-specific secret, if required>
+EXECUTOR_BASE_URL=https://memecoin-mcp-server-production.up.railway.app
+REST_API_TOKEN=<same executor bearer token>
+```
+
+Keep `LIVE_TRADING=false` on the executor while testing. A healthy worker writes
+`/app/data/signal_worker_status.json` and emits structured `SIGNAL_SCAN` logs.
+Once a dry-run candidate returns `DRY_RUN_ONLY`, live mode can be armed on the
+executor without changing the worker. The worker is a low-latency transport,
+not a substitute for a genuine always-on research feed. If the feed is missing,
+stale, malformed, or unavailable, it fails closed and forwards nothing.
+
 ## Tests
 
 ```bash
