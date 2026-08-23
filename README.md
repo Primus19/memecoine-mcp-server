@@ -265,6 +265,24 @@ feed. Configure `ECONOMIC_CALENDAR_UPSTREAM_URL`, optional
 `ECONOMIC_CALENDAR_UPSTREAM_TOKEN`, and point the market feed's
 `ECONOMIC_CALENDAR_URL` to this service's `/events` endpoint.
 
+For production Forex execution, use the first-class Trading Economics adapter.
+It requests high-importance events for a bounded set of major-currency
+countries, maps country names to ISO currency codes, normalizes timestamps to
+UTC, rejects empty/unrecognized responses, and never publishes its API key:
+
+```text
+ECONOMIC_CALENDAR_ENABLED=true
+ECONOMIC_CALENDAR_PROVIDER=trading_economics
+TRADING_ECONOMICS_API_KEY=<Railway secret from developer.tradingeconomics.com>
+TRADING_ECONOMICS_COUNTRIES=united states,euro area,united kingdom,japan,canada,australia
+ECONOMIC_CALENDAR_LOOKAHEAD_DAYS=7
+ECONOMIC_CALENDAR_REQUIRE_EVENTS=true
+ECONOMIC_CALENDAR_INTERVAL_SECONDS=300
+```
+
+The generic HTTPS JSON mode remains available. Query strings are stripped from
+the public `source_url` so credentials cannot leak into feed evidence.
+
 ## Continuous signal worker
 
 Run `python -m app.signal_worker` as a separate Railway service. It polls a
