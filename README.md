@@ -107,6 +107,8 @@ For unattended operation, a trusted signal worker may call `POST /api/auto-candi
 
 The fast path is disabled unless both live environment variables are armed. It does not weaken the Model 3.1 gates. Each candidate must be based on market data no more than two minutes old, and execution independently requires a live spread and modeled slippage of at most 50 bps, entry drift of at most 35 bps, a best ask at or below the frozen entry ceiling, one-position maximum, and the existing $2.50 loss cap. The order is previewed before submission and carries an attached stop/target bracket.
 
+Some ChatGPT clients cache an older MCP tool list. Set `PREAUTHORIZED_AUTO_EXECUTION=true` to make the existing `issue_model_3_1_recommendation` tool invoke the exact same atomic fast path as `process_preauthorized_candidate`. This compatibility mode does not bypass any validation. With `LIVE_TRADING=false`, it performs a dry run only. `/health` reports schema version 3.2 and whether compatibility mode is enabled without exposing secrets.
+
 ## Tests
 
 ```bash
