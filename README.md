@@ -209,6 +209,54 @@ trusted economic-calendar adapter attests that the event window is clear.
 Paper and supervisor services must mount the same Railway volume at `/app/data`
 so they share `multi_asset.jsonl`.
 
+## Authoritative Forex executor
+
+`python -m app.forex_executor` is the hardened single-writer Forex lifecycle
+service. It stores intents, broker identifiers and a hash-chained audit stream
+in SQLite on a Railway volume, independently rechecks OANDA pricing and
+home-currency risk, suppresses duplicate intents, attaches stop-loss and
+take-profit protection to an accepted OANDA order, and reconciles broker state.
+
+It is paper-only unless **all** independent live gates are present. Never reuse
+the practice deployment or database for a production account.
+
+```text
+FOREX_EXECUTOR_ENABLED=true
+FOREX_EXECUTOR_INTERVAL_SECONDS=30
+FOREX_LEDGER_PATH=/app/data/forex.sqlite3
+MULTI_ASSET_FEED_URL=https://multi-asset-market-feed-production.up.railway.app/snapshots
+FOREX_MAX_RISK_USD=2.50
+FOREX_MAX_OPEN_POSITIONS=1
+FOREX_DAILY_LOSS_LIMIT_USD=2.50
+```
+
+Live mode additionally requires all four values below plus a current verified
+economic-calendar response. Missing or inconsistent values fail closed:
+
+```text
+OANDA_ENVIRONMENT=live
+FOREX_LIVE_ENABLED=true
+FOREX_LIVE_ACK=I_ACCEPT_REAL_MONEY_RISK
+FOREX_ALLOWED_ACCOUNT_ID=<exact live v20 account id>
+FOREX_LIVE_BASELINE_USD=<broker-confirmed starting balance>
+```
+
+The market feed accepts a normalized calendar endpoint through
+`ECONOMIC_CALENDAR_URL` and optional `ECONOMIC_CALENDAR_BEARER_TOKEN`. Its
+response must contain a fresh `observed_at`, direct HTTPS `source_url`, and
+currency-tagged high-impact events. The fixed
+`FOREX_DEFAULT_EVENT_DISTANCE_MINUTES` value is never accepted as verified
+calendar evidence for live orders.
+
+Before live promotion, exercise the identical broker path against OANDA
+practice with virtual funds:
+
+```text
+OANDA_ENVIRONMENT=practice
+FOREX_PRACTICE_EXECUTION_ENABLED=true
+FOREX_PRACTICE_ACK=I_ACCEPT_PRACTICE_ORDER_EXECUTION
+```
+
 ## Continuous signal worker
 
 Run `python -m app.signal_worker` as a separate Railway service. It polls a

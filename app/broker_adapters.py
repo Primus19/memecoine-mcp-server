@@ -49,11 +49,13 @@ class OandaAdapter:
         self.environment = env
 
     def preflight(self) -> dict:
-        account = request_json(f"{self.base}/v3/accounts/{self.account}/summary", token=self.token).get("account", {})
+        payload = request_json(f"{self.base}/v3/accounts/{self.account}/summary", token=self.token)
+        account = payload.get("account", {})
         return {"broker": "OANDA", "environment": self.environment, "account_id_suffix": self.account[-4:],
                 "currency": account.get("currency"), "balance": float(account.get("balance", 0)),
                 "margin_available": float(account.get("marginAvailable", 0)),
-                "open_trade_count": int(account.get("openTradeCount", 0))}
+                "open_trade_count": int(account.get("openTradeCount", 0)),
+                "last_transaction_id": str(payload.get("lastTransactionID") or account.get("lastTransactionID") or "")}
 
     def instruments(self) -> list[dict[str, Any]]:
         return request_json(f"{self.base}/v3/accounts/{self.account}/instruments", token=self.token).get("instruments", [])
@@ -74,6 +76,46 @@ class OandaAdapter:
                 "client_order_id": proposal.get("proposal_id") or str(uuid.uuid4()), "instrument": proposal["symbol"],
                 "units": units, "stop_loss": proposal["stop_price"], "take_profit": proposal["target_price"],
                 "maximum_loss_usd": proposal["maximum_loss_usd"]}
+
+    def create_order(self, proposal: dict, *, client_order_id: str) -> dict:
+        """Create one protected OANDA order. Callers must enforce live policy first."""
+        units = int(round(float(proposal["quantity"]))) * (1 if proposal["side"] == "BUY" else -1)
+        if units == 0:
+            raise BrokerError("order units round to zero")
+        order = {
+            "type": "MARKET",
+            "instrument": proposal["symbol"],
+            "units": str(units),
+            "timeInForce": "FOK",
+            "positionFill": "DEFAULT",
+            "clientExtensions": {"id": client_order_id, "tag": "primus-forex-v1"},
+            "stopLossOnFill": {"price": str(proposal["stop_price"]), "timeInForce": "GTC"},
+            "takeProfitOnFill": {"price": str(proposal["target_price"]), "timeInForce": "GTC"},
+        }
+        return request_json(
+            f"{self.base}/v3/accounts/{self.account}/orders",
+            token=self.token,
+            method="POST",
+            payload={"order": order},
+        )
+
+    def open_trades(self) -> list[dict[str, Any]]:
+        return request_json(f"{self.base}/v3/accounts/{self.account}/openTrades", token=self.token).get("trades", [])
+
+    def pending_orders(self) -> list[dict[str, Any]]:
+        return request_json(f"{self.base}/v3/accounts/{self.account}/pendingOrders", token=self.token).get("orders", [])
+
+    def transactions_since(self, transaction_id: str) -> dict:
+        query = urllib.parse.urlencode({"id": transaction_id})
+        return request_json(f"{self.base}/v3/accounts/{self.account}/transactions/sinceid?{query}", token=self.token)
+
+    def close_trade(self, trade_id: str) -> dict:
+        return request_json(
+            f"{self.base}/v3/accounts/{self.account}/trades/{trade_id}/close",
+            token=self.token,
+            method="PUT",
+            payload={"units": "ALL"},
+        )
 
 
 class AlpacaAdapter:
