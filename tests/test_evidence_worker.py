@@ -2,7 +2,14 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
-from app.evidence_worker import EvidenceAdapter, article_mentions, evaluate_goplus, score_news
+from app.evidence_worker import (
+    EvidenceAdapter,
+    article_mentions,
+    canonical_contract,
+    evaluate_goplus,
+    evaluate_goplus_solana,
+    score_news,
+)
 
 
 class EvidenceWorkerTests(unittest.TestCase):
@@ -51,6 +58,43 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertFalse(clean)
         self.assertEqual(0, score)
         self.assertIn("is_honeypot", failures)
+
+    def test_canonical_platform_wins_over_bridged_contracts(self):
+        detail = {
+            "asset_platform_id": "ethereum",
+            "platforms": {"ethereum": "0xcanonical", "base": "0xbridged"},
+        }
+        self.assertEqual(("ethereum", "0xcanonical"), canonical_contract(detail))
+
+    def test_ambiguous_platform_without_canonical_fails_closed(self):
+        detail = {"platforms": {"ethereum": "0xone", "base": "0xtwo"}}
+        self.assertEqual(("", ""), canonical_contract(detail))
+
+    def test_clean_solana_security_result_passes(self):
+        clean, score, failures = evaluate_goplus_solana({
+            "mintable": {"status": "0"},
+            "freezable": {"status": "0"},
+            "closable": {"status": "0"},
+            "balance_mutable_authority": {"status": "0"},
+            "non_transferable": "0",
+            "default_account_state": "1",
+            "holders": [{"percent": "0.03"}, {"percent": "0.02"}],
+        })
+        self.assertTrue(clean)
+        self.assertEqual(15, score)
+        self.assertEqual([], failures)
+
+    def test_solana_dangerous_authorities_fail(self):
+        clean, score, failures = evaluate_goplus_solana({
+            "mintable": {"status": "1"},
+            "freezable": {"status": "0"},
+            "closable": {"status": "0"},
+            "balance_mutable_authority": {"status": "0"},
+            "holders": [{"percent": "0.01"}],
+        })
+        self.assertFalse(clean)
+        self.assertEqual(0, score)
+        self.assertIn("mintable", failures)
 
     def test_coin_detail_is_cached(self):
         adapter = EvidenceAdapter.__new__(EvidenceAdapter)

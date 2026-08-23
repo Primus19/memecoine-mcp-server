@@ -110,6 +110,62 @@ def evaluate_goplus(payload: dict[str, Any]) -> tuple[bool, int, list[str]]:
     return clean, 15 if clean else 0, failures
 
 
+def evaluate_goplus_solana(payload: dict[str, Any]) -> tuple[bool, int, list[str]]:
+    """Fail closed on the documented Solana token-control and holder risks."""
+    failures: list[str] = []
+    for key in ("mintable", "freezable", "closable", "balance_mutable_authority"):
+        value = payload.get(key)
+        if not isinstance(value, dict) or "status" not in value:
+            failures.append(key)
+        elif truthy(value.get("status")):
+            failures.append(key)
+    if truthy(payload.get("non_transferable", "0")):
+        failures.append("non_transferable")
+    if str(payload.get("default_account_state", "1")) != "1":
+        failures.append("default_account_state")
+    transfer_hook = payload.get("transfer_hook")
+    if isinstance(transfer_hook, dict) and transfer_hook:
+        failures.append("transfer_hook")
+    transfer_fee = payload.get("transfer_fee")
+    if isinstance(transfer_fee, dict):
+        current = transfer_fee.get("current_fee_rate") or {}
+        try:
+            if float(current.get("fee_rate") or 0) > 500:
+                failures.append("transfer_fee")
+        except (TypeError, ValueError):
+            failures.append("transfer_fee")
+    creators = payload.get("creators") or payload.get("creator") or []
+    if any(truthy(item.get("malicious_address")) for item in creators if isinstance(item, dict)):
+        failures.append("malicious_creator")
+    holders = payload.get("holders")
+    if not isinstance(holders, list) or not holders:
+        failures.append("holders")
+    else:
+        try:
+            concentration = sum(float(item.get("percent") or 0) for item in holders[:10])
+            if concentration > 0.50:
+                failures.append("top10_concentration")
+        except (TypeError, ValueError):
+            failures.append("holders")
+    failures = list(dict.fromkeys(failures))
+    return not failures, 15 if not failures else 0, failures
+
+
+def canonical_contract(detail: dict[str, Any]) -> tuple[str, str]:
+    """Return only CoinGecko's canonical platform/address, never a bridged guess."""
+    platform = str(detail.get("asset_platform_id") or "")
+    platforms = detail.get("platforms") or {}
+    address = str(platforms.get(platform) or "") if isinstance(platforms, dict) else ""
+    if platform and address:
+        return platform, address
+    supported = [
+        (str(candidate), str(value))
+        for candidate, value in (platforms.items() if isinstance(platforms, dict) else [])
+        if candidate in {*EVM_CHAINS, "solana"} and value
+    ]
+    return supported[0] if len(supported) == 1 else ("", "")
+
+
 class EvidenceAdapter:
     def __init__(self) -> None:
         self.executor_url = os.environ["EXECUTOR_BASE_URL"].rstrip("/")
@@ -206,16 +262,21 @@ class EvidenceAdapter:
         return result
 
     def security(self, detail: dict[str, Any]) -> tuple[bool, int, list[str], str]:
-        platforms = detail.get("platforms") or {}
-        supported = [(platform, address) for platform, address in platforms.items() if platform in EVM_CHAINS and address]
-        if len(supported) != 1:
-            return False, 0, ["unsupported or ambiguous contract platform"], ""
-        platform, address = supported[0]
+        platform, address = canonical_contract(detail)
+        if not platform or not address:
+            return False, 0, ["canonical contract platform unavailable"], ""
         query = urllib.parse.urlencode({"contract_addresses": address})
-        response = self.json(f"https://api.gopluslabs.io/api/v1/token_security/{EVM_CHAINS[platform]}?{query}")
+        if platform == "solana":
+            response = self.json(f"https://api.gopluslabs.io/api/v1/solana/token_security?{query}")
+        elif platform in EVM_CHAINS:
+            response = self.json(f"https://api.gopluslabs.io/api/v1/token_security/{EVM_CHAINS[platform]}?{query}")
+        else:
+            return False, 0, [f"unsupported canonical contract platform: {platform}"], address
         result = response.get("result") or {}
         facts = result.get(address.lower()) or result.get(address) or {}
-        clean, score, failures = evaluate_goplus(facts)
+        if not facts and len(result) == 1:
+            facts = next(iter(result.values()))
+        clean, score, failures = evaluate_goplus_solana(facts) if platform == "solana" else evaluate_goplus(facts)
         return clean, score, failures, address
 
     def scan_once(self) -> dict[str, Any]:
@@ -255,7 +316,7 @@ class EvidenceAdapter:
                 "coin_id": market["id"], "product_id": product_id, "contract": contract,
                 "identity_verified": True, "no_safety_veto": True, "safety_score": safety_score,
                 "news_score": news_score, "social_score": 0,
-                "source_urls": list(dict.fromkeys([*news_urls, *explorer_urls[:1], "https://docs.gopluslabs.io/reference/token-security-api"])),
+                "source_urls": list(dict.fromkeys([*news_urls, *explorer_urls[:1], "https://docs.gopluslabs.io/reference/api-overview"])),
                 "observed_at": observed.isoformat(), "expires_at": (observed + timedelta(hours=2)).isoformat(),
                 "thesis": "Two-source catalyst corroboration, verified token identity, and clean contract-security checks.",
                 "invalidation": "Catalyst reversal, safety warning, identity mismatch, liquidity deterioration, or momentum reversal.",
