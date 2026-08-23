@@ -35,8 +35,8 @@ class Exchange:
         if not permissions["can_view"] or not permissions["can_trade"] or permissions["can_transfer"]:
             raise RuntimeError("Key must have View + Trade and Transfer disabled")
         accounts = self.accounts()
-        available = sum(float(a.available_balance.value) for a in accounts if a.currency == "USDC")
-        total = sum(float(a.available_balance.value) + float(a.hold.value) for a in accounts if a.currency == "USDC")
+        available = sum(float(field(a.available_balance, "value") or field(a.available_balance, "amount") or 0) for a in accounts if a.currency == "USDC")
+        total = sum(float(field(a.available_balance, "value") or field(a.available_balance, "amount") or 0) + float(field(a.hold, "value") or field(a.hold, "amount") or 0) for a in accounts if a.currency == "USDC")
         return {"permissions": permissions, "usdc_available": available, "usdc_total": total}
 
     def product(self, product_id: str) -> dict:
@@ -99,7 +99,7 @@ class Exchange:
 
     def base_balance(self, product_id: str) -> float:
         base = product_id.split("-", 1)[0]
-        return sum(float(a.available_balance.value) + float(a.hold.value) for a in self.accounts() if a.currency == base)
+        return sum(float(field(a.available_balance, "value") or field(a.available_balance, "amount") or 0) + float(field(a.hold, "value") or field(a.hold, "amount") or 0) for a in self.accounts() if a.currency == base)
 
     def fills(self, product_id: str, opened_at: str) -> list[dict]:
         response = self.client.get_fills(product_ids=[product_id], limit=100)
@@ -121,3 +121,4 @@ class Exchange:
 
     def market_sell(self, product_id: str, base_size: float, client_order_id: str) -> dict:
         return as_dict(self.client.create_order(client_order_id=client_order_id, product_id=product_id, side="SELL", order_configuration={"market_market_ioc": {"base_size": str(base_size)}}))
+
