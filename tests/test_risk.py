@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from app.risk import TicketRejected, validate_ticket
 
@@ -36,9 +37,24 @@ class RiskTests(unittest.TestCase):
     def test_rejects_external_cash_above_permitted_capital(self):
         with self.assertRaisesRegex(TicketRejected, "envelope"): self.validate(ticket(28), cash=40, capital=25)
 
-    def test_reject_mixed(self):
+    def test_accept_mixed_under_opportunity_policy(self):
         t = ticket(); t["regime"] = "MIXED"
-        with self.assertRaises(TicketRejected): self.validate(t)
+        self.validate(t)
+
+    def test_can_disable_mixed_regime(self):
+        t = ticket(); t["regime"] = "MIXED"
+        with patch.dict("os.environ", {"LIVE_ALLOW_MIXED_REGIME": "false"}):
+            with self.assertRaisesRegex(TicketRejected, "regime"):
+                self.validate(t)
+
+    def test_news_is_optional_without_veto(self):
+        t = ticket(); t["news_score"] = 0
+        self.validate(t)
+
+    def test_news_veto_remains_hard(self):
+        t = ticket(); t["news_score"] = 10; t["news_veto"] = True
+        with self.assertRaisesRegex(TicketRejected, "news"):
+            self.validate(t)
 
     def test_reject_duplicate_position(self):
         with self.assertRaises(TicketRejected): self.validate(ticket(), positions=1)

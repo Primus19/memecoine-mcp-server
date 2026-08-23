@@ -307,7 +307,7 @@ class EvidenceAdapter:
             except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
                 rejected.append({"product_id": product_id, "source_error": f"{type(exc).__name__}: {str(exc)[:160]}"})
                 continue
-            if not identity or not clean or news_score < 4 or news_veto:
+            if not identity or not clean or news_veto:
                 rejected.append({"product_id": product_id, "identity": identity, "safety": safety_failures, "news_score": news_score, "news_veto": news_veto})
                 continue
             observed = now_utc()
@@ -315,10 +315,12 @@ class EvidenceAdapter:
             payload = {
                 "coin_id": market["id"], "product_id": product_id, "contract": contract,
                 "identity_verified": True, "no_safety_veto": True, "safety_score": safety_score,
-                "news_score": news_score, "social_score": 0,
+                "news_score": news_score, "news_veto": news_veto, "social_score": 0,
                 "source_urls": list(dict.fromkeys([*news_urls, *explorer_urls[:1], "https://docs.gopluslabs.io/reference/api-overview"])),
                 "observed_at": observed.isoformat(), "expires_at": (observed + timedelta(hours=2)).isoformat(),
-                "thesis": "Two-source catalyst corroboration, verified token identity, and clean contract-security checks.",
+                "thesis": ("Two-source catalyst corroboration, verified token identity, and clean contract-security checks."
+                           if news_score >= 4 else
+                           "Verified token identity and clean contract-security checks; no positive news points awarded."),
                 "invalidation": "Catalyst reversal, safety warning, identity mismatch, liquidity deterioration, or momentum reversal.",
             }
             self.post(f"{self.research_url}/evidence", payload, self.feed_token)
