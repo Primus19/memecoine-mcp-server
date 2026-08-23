@@ -5,6 +5,7 @@ import os
 import statistics
 import threading
 import time
+import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -17,6 +18,27 @@ STATE = {"ok": False, "scanned_at": "", "snapshots": [], "error": "not scanned"}
 def pct(a: float, b: float) -> float: return 0.0 if a == 0 else (b - a) / a * 100
 
 
+def calendar_evidence(symbol: str) -> dict:
+    url = os.getenv("ECONOMIC_CALENDAR_URL", "").strip()
+    if not url:
+        return {"minutes": int(os.getenv("FOREX_DEFAULT_EVENT_DISTANCE_MINUTES", "0")), "verified": False, "source": ""}
+    headers = {"Accept": "application/json", "User-Agent": "primus-forex-calendar/1.0"}
+    token = os.getenv("ECONOMIC_CALENDAR_BEARER_TOKEN", "")
+    if token: headers["Authorization"] = f"Bearer {token}"
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as response:
+        payload = json.loads(response.read().decode())
+    observed = datetime.fromisoformat(str(payload["observed_at"]).replace("Z", "+00:00"))
+    if (datetime.now(timezone.utc) - observed).total_seconds() > int(os.getenv("ECONOMIC_CALENDAR_MAX_AGE_SECONDS", "300")):
+        raise ValueError("economic calendar stale")
+    source = str(payload.get("source_url", ""))
+    if not source.startswith("https://"): raise ValueError("economic calendar source missing")
+    currencies = set(symbol.split("_")); distances = []
+    for event in payload.get("events", []):
+        if str(event.get("currency", "")).upper() in currencies and str(event.get("impact", "")).upper() == "HIGH":
+            distances.append(abs(int(event.get("minutes_until", 0))))
+    return {"minutes": min(distances) if distances else 10080, "verified": True, "source": source}
+
+
 def forex_snapshot(adapter: OandaAdapter, symbol: str) -> dict:
     h1 = [c for c in adapter.candles(symbol, "H1", 30) if c.get("complete")]
     d1 = [c for c in adapter.candles(symbol, "D", 3) if c.get("complete")]
@@ -27,7 +49,7 @@ def forex_snapshot(adapter: OandaAdapter, symbol: str) -> dict:
     change_1h = pct(closes[-2], closes[-1]); change_24h = pct(closes[-25], closes[-1])
     trend = (closes[-1] - statistics.mean(closes[-20:])) / max(abs(closes[-1]) * .01, 1e-9)
     # Event distance is fail-closed unless an independently normalized calendar service attests it.
-    event_minutes = int(os.getenv("FOREX_DEFAULT_EVENT_DISTANCE_MINUTES", "0"))
+    calendar = calendar_evidence(symbol); event_minutes = calendar["minutes"]
     return {"asset_class": "FOREX", "symbol": symbol, "price": mid,
             "spread_bps": (ask - bid) / mid * 10000, "tradable": quote.get("status") == "tradeable",
             "market_veto": event_minutes < 30, "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -35,6 +57,7 @@ def forex_snapshot(adapter: OandaAdapter, symbol: str) -> dict:
             "change_1h_pct": change_1h, "change_24h_pct": change_24h,
             "trend_strength": max(-1, min(1, trend)), "liquidity_score": 1.0,
             "session_liquid": quote.get("status") == "tradeable", "economic_event_within_minutes": event_minutes,
+            "calendar_verified": calendar["verified"], "economic_event_source": calendar["source"],
             "stop_distance": max(abs(closes[-1] - statistics.mean(closes[-10:])), mid * .0025),
             "maximum_loss_usd": float(os.getenv("FOREX_PAPER_MAX_LOSS_USD", "2.50")),
             "reward_multiple": 2.0, "expiry_seconds": 300,
