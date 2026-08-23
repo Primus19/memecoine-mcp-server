@@ -247,6 +247,35 @@ class PaperLedger:
                 positions[proposal_id] = False
         return sum(positions.values())
 
+    def records(self) -> list[dict[str, Any]]:
+        try:
+            return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except FileNotFoundError:
+            return []
+
+    def positions(self) -> list[dict[str, Any]]:
+        positions: dict[str, dict[str, Any]] = {}
+        for record in self.records():
+            proposal_id = str(record.get("proposal_id", ""))
+            if record.get("type") == "PAPER_FILL":
+                positions[proposal_id] = record
+            elif record.get("type") == "PAPER_CLOSE":
+                positions.pop(proposal_id, None)
+        return list(positions.values())
+
+    def close(self, proposal_id: str, price: float, reason: str) -> dict[str, Any]:
+        position = next((item for item in self.positions() if item.get("proposal_id") == proposal_id), None)
+        if not position:
+            raise MultiAssetRejected("paper position is not open")
+        side = str(position["side"])
+        quantity = float(position["quantity"])
+        entry = float(position["fill_price"])
+        pnl = (price - entry) * quantity * (1 if side == "BUY" else -1)
+        return self.append({"type": "PAPER_CLOSE", "mode": "PAPER_ONLY", "asset_class": position["asset_class"],
+                            "strategy": position["strategy"], "symbol": position["symbol"],
+                            "proposal_id": proposal_id, "entry_price": entry, "fill_price": price,
+                            "quantity": quantity, "reason": reason, "realized_pnl_usd": round(pnl, 8)})
+
 
 class MultiAssetEngine:
     def __init__(self, ledger: PaperLedger, policy: AssetPolicy | None = None) -> None:

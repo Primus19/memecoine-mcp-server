@@ -176,6 +176,39 @@ The feed returns `{"snapshots": [...]}`. Every snapshot must contain a fresh
 spread, stop distance, maximum loss, thesis and invalidation. Asset-specific
 fields are validated before a proposal can become a paper fill.
 
+### Deployable multi-asset services
+
+The broker-backed paper release adds three independently deployable processes:
+
+- `python -m app.market_feed` obtains OANDA pricing and candles and emits
+  normalized Forex snapshots;
+- `python -m app.asset_worker` creates append-only paper proposals and fills;
+- `python -m app.asset_supervisor` marks paper positions and appends stop/target
+  closes without rewriting history.
+
+`app.broker_adapters` provides read-only preflight and order-preview structures
+for OANDA and Alpaca. No method in this release submits a Forex, equity, or
+option order. `MULTI_ASSET_LIVE_ENABLED` defaults to false. A separately
+reviewed execution adapter must add idempotent submission, reconciliation,
+attached protection, and emergency exits before live use.
+
+Required Forex feed variables:
+
+```text
+MULTI_ASSET_FEED_ENABLED=true
+OANDA_ENVIRONMENT=practice
+OANDA_API_TOKEN=<Railway secret>
+OANDA_ACCOUNT_ID=<Railway secret>
+FOREX_SYMBOLS=EUR_USD,GBP_USD,USD_JPY,AUD_USD,USD_CAD
+FOREX_DEFAULT_EVENT_DISTANCE_MINUTES=0
+MULTI_ASSET_FEED_INTERVAL_SECONDS=60
+```
+
+`FOREX_DEFAULT_EVENT_DISTANCE_MINUTES=0` intentionally vetoes entries until a
+trusted economic-calendar adapter attests that the event window is clear.
+Paper and supervisor services must mount the same Railway volume at `/app/data`
+so they share `multi_asset.jsonl`.
+
 ## Continuous signal worker
 
 Run `python -m app.signal_worker` as a separate Railway service. It polls a

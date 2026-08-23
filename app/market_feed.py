@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+import json
+import os
+import statistics
+import threading
+import time
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from .broker_adapters import OandaAdapter
+
+LOCK = threading.RLock()
+STATE = {"ok": False, "scanned_at": "", "snapshots": [], "error": "not scanned"}
+
+
+def pct(a: float, b: float) -> float: return 0.0 if a == 0 else (b - a) / a * 100
+
+
+def forex_snapshot(adapter: OandaAdapter, symbol: str) -> dict:
+    h1 = [c for c in adapter.candles(symbol, "H1", 30) if c.get("complete")]
+    d1 = [c for c in adapter.candles(symbol, "D", 3) if c.get("complete")]
+    quote = adapter.price(symbol); bids = quote.get("bids", []); asks = quote.get("asks", [])
+    if len(h1) < 25 or len(d1) < 2 or not bids or not asks: raise ValueError("insufficient broker market data")
+    closes = [float(c["mid"]["c"]) for c in h1]
+    bid, ask = float(bids[0]["price"]), float(asks[0]["price"]); mid = (bid + ask) / 2
+    change_1h = pct(closes[-2], closes[-1]); change_24h = pct(closes[-25], closes[-1])
+    trend = (closes[-1] - statistics.mean(closes[-20:])) / max(abs(closes[-1]) * .01, 1e-9)
+    # Event distance is fail-closed unless an independently normalized calendar service attests it.
+    event_minutes = int(os.getenv("FOREX_DEFAULT_EVENT_DISTANCE_MINUTES", "0"))
+    return {"asset_class": "FOREX", "symbol": symbol, "price": mid,
+            "spread_bps": (ask - bid) / mid * 10000, "tradable": quote.get("status") == "tradeable",
+            "market_veto": event_minutes < 30, "observed_at": datetime.now(timezone.utc).isoformat(),
+            "source_urls": [f"https://developer.oanda.com/rest-live-v20/pricing-ep/"],
+            "change_1h_pct": change_1h, "change_24h_pct": change_24h,
+            "trend_strength": max(-1, min(1, trend)), "liquidity_score": 1.0,
+            "session_liquid": quote.get("status") == "tradeable", "economic_event_within_minutes": event_minutes,
+            "stop_distance": max(abs(closes[-1] - statistics.mean(closes[-10:])), mid * .0025),
+            "maximum_loss_usd": float(os.getenv("FOREX_PAPER_MAX_LOSS_USD", "2.50")),
+            "reward_multiple": 2.0, "expiry_seconds": 300,
+            "thesis": "Broker-attested liquid-session trend continuation",
+            "invalidation": "Trend alignment, spread, session liquidity or economic-event gate fails"}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path not in {"/health", "/snapshots", "/status"}: self.send_error(404); return
+        with LOCK: value = dict(STATE)
+        if self.path == "/health": value = {"ok": value["ok"], "service": "multi-asset-market-feed", "scanned_at": value["scanned_at"]}
+        elif self.path == "/snapshots": value = {"snapshots": value["snapshots"], "scanned_at": value["scanned_at"]}
+        body = json.dumps(value).encode(); self.send_response(200 if value.get("ok", True) else 503)
+        self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *_): return
+
+
+def main():
+    if os.getenv("MULTI_ASSET_FEED_ENABLED", "false").lower() != "true": raise SystemExit("MULTI_ASSET_FEED_ENABLED is not true")
+    threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler).serve_forever, daemon=True).start()
+    interval = max(30, int(os.getenv("MULTI_ASSET_FEED_INTERVAL_SECONDS", "60")))
+    symbols = [s.strip().upper() for s in os.getenv("FOREX_SYMBOLS", "EUR_USD,GBP_USD,USD_JPY,AUD_USD,USD_CAD").split(",") if s.strip()]
+    while True:
+        try:
+            adapter = OandaAdapter(); snapshots = []
+            for symbol in symbols:
+                try: snapshots.append(forex_snapshot(adapter, symbol))
+                except Exception as exc: print(json.dumps({"event": "FOREX_SYMBOL_REJECTED", "symbol": symbol, "reason": str(exc)[:300]}), flush=True)
+            with LOCK: STATE.update(ok=True, scanned_at=datetime.now(timezone.utc).isoformat(), snapshots=snapshots, error="")
+            print(json.dumps({"event": "MULTI_ASSET_FEED_SCAN", "paper_only": True, "snapshot_count": len(snapshots)}), flush=True)
+        except Exception as exc:
+            with LOCK: STATE.update(ok=False, error=str(exc)[:500])
+            print(json.dumps({"event": "MULTI_ASSET_FEED_ERROR", "error": type(exc).__name__, "detail": str(exc)[:500]}), flush=True)
+        time.sleep(interval)
+
+
+if __name__ == "__main__": main()
