@@ -7,7 +7,9 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 from typing import Any
 
 
@@ -26,6 +28,29 @@ def candidate_digest(candidate: dict[str, Any]) -> str:
         return hashlib.sha256(("signal-id:" + signal_id).encode()).hexdigest()
     raw = json.dumps(candidate, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.path != "/health":
+            self.send_error(404)
+            return
+        payload = json.dumps({"ok": True, "service": "memecoin-signal-worker"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+
+def start_health_server() -> ThreadingHTTPServer:
+    port = int(os.getenv("PORT", "8080"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    Thread(target=server.serve_forever, name="signal-worker-health", daemon=True).start()
+    return server
 
 
 def eligible_fresh_candidates(payload: Any, *, max_age_seconds: int = 90) -> list[dict[str, Any]]:
@@ -57,7 +82,9 @@ class SignalWorker:
 
     def __init__(self) -> None:
         self.feed_url = os.environ["SIGNAL_FEED_URL"]
-        self.executor_url = os.getenv("EXECUTOR_BASE_URL", os.environ["PUBLIC_BASE_URL"]).rstrip("/")
+        self.executor_url = (os.getenv("EXECUTOR_BASE_URL") or os.getenv("PUBLIC_BASE_URL") or "").rstrip("/")
+        if not self.executor_url:
+            raise RuntimeError("EXECUTOR_BASE_URL or PUBLIC_BASE_URL must be configured")
         self.executor_token = os.environ["REST_API_TOKEN"]
         self.feed_token = os.getenv("SIGNAL_FEED_BEARER_TOKEN", "")
         self.interval = min(60, max(5, int(os.getenv("SIGNAL_SCAN_INTERVAL_SECONDS", "15"))))
@@ -132,6 +159,7 @@ class SignalWorker:
 def main() -> None:
     if os.getenv("SIGNAL_WORKER_ENABLED", "false").lower() != "true":
         raise SystemExit("SIGNAL_WORKER_ENABLED is not true; refusing to start")
+    start_health_server()
     SignalWorker().run()
 
 
