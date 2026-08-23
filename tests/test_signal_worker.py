@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from app.signal_worker import candidate_digest, eligible_fresh_candidates
+from app.signal_worker import candidate_digest, eligible_fresh_candidates, terminal_http_status
 
 
 class SignalWorkerTests(unittest.TestCase):
@@ -21,6 +21,11 @@ class SignalWorkerTests(unittest.TestCase):
 
     def test_invalid_feed_shape_fails_closed(self):
         with self.assertRaises(ValueError):eligible_fresh_candidates({"candidate":{}})
+
+    def test_transient_executor_errors_are_retryable(self):
+        self.assertFalse(terminal_http_status(500))
+        self.assertFalse(terminal_http_status(503))
+        self.assertTrue(terminal_http_status(422))
 
 
 if __name__ == "__main__":unittest.main()
