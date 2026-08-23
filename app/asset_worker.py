@@ -4,8 +4,20 @@ import json
 import os
 import time
 import urllib.request
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .multi_asset import MultiAssetEngine, MultiAssetRejected, PaperLedger
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/health":
+            self.send_error(404); return
+        body = b'{"ok":true,"service":"multi-asset-paper-worker","paper_only":true}'
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *_): return
 
 
 def fetch(url: str, token: str) -> dict:
@@ -24,6 +36,8 @@ def main() -> None:
     token = os.getenv("MULTI_ASSET_FEED_TOKEN", "")
     interval = max(15, min(300, int(os.getenv("MULTI_ASSET_SCAN_INTERVAL_SECONDS", "60"))))
     engine = MultiAssetEngine(PaperLedger(os.getenv("MULTI_ASSET_LEDGER_PATH", "/app/data/multi_asset.jsonl")))
+    server = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     while True:
         try:
             payload = fetch(feed_url, token)
