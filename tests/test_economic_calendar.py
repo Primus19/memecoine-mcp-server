@@ -3,7 +3,10 @@ import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from app.economic_calendar import build_request, normalize
+from app.economic_calendar import (build_request, normalize, parse_bls_ics,
+                                   parse_boe_html, parse_boj_html,
+                                   parse_ecb_html, parse_fomc_html,
+                                   scan_official_composite)
 
 
 class CalendarTests(unittest.TestCase):
@@ -44,6 +47,39 @@ class CalendarTests(unittest.TestCase):
             url, _, source, _ = build_request()
         self.assertIn("secret", url)
         self.assertEqual("https://calendar.example/events", source)
+
+    def test_official_composite_request_needs_no_paid_key(self):
+        with patch.dict(os.environ, {"ECONOMIC_CALENDAR_PROVIDER":"official_composite"}, clear=True):
+            url, _, source, provider = build_request()
+        self.assertEqual("official-composite://calendar", url)
+        self.assertEqual("official_composite", provider)
+        self.assertTrue(source.startswith("https://www.bls.gov/"))
+
+    def test_parses_official_source_shapes(self):
+        bls = """BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART;TZID=America/New_York:20260904T083000\nSUMMARY:Employment Situation\nEND:VEVENT\nEND:VCALENDAR"""
+        fed = """>2026 FOMC Meetings</a><div class="fomc-meeting__month"><strong>September</strong></div><div class="fomc-meeting__date">15-16*</div></main>"""
+        ecb = """<dt>10/09/2026</dt><dd>Governing Council: monetary policy meeting, followed by press conference</dd>"""
+        boe = """<h2>2026 confirmed dates</h2><table><tr><td>Thursday 17 September</td><td>Summary</td></tr></table></section>"""
+        boj = """<h2 id="p2026">2026</h2><table><tr><td>Sept. 17 (Thurs.), 18 (Fri.)</td><td>-</td></tr></table><h2 id="p2027">2027</h2>"""
+        self.assertEqual("USD", parse_bls_ics(bls)[0]["currency"])
+        self.assertEqual("USD", parse_fomc_html(fed, 2026)[0]["currency"])
+        self.assertEqual("EUR", parse_ecb_html(ecb)[0]["currency"])
+        self.assertEqual("GBP", parse_boe_html(boe, 2026)[0]["currency"])
+        jpy = parse_boj_html(boj, 2026)[0]
+        self.assertEqual("JPY", jpy["currency"])
+        self.assertEqual(720, jpy["blackout_before_minutes"])
+
+    def test_composite_verifies_coverage_even_when_window_is_quiet(self):
+        clock = datetime(2026, 8, 24, tzinfo=timezone.utc)
+        def fake_fetch(name, _):
+            currencies = {"bls":"USD", "federal_reserve":"USD", "ecb":"EUR",
+                          "bank_of_england":"GBP", "bank_of_japan":"JPY"}
+            return ({"name":name, "currency":currencies[name], "url":"https://official.example", "ok":True, "event_count":0}, [])
+        with patch("app.economic_calendar._fetch_official", side_effect=fake_fetch), patch.dict(
+                os.environ, {"OFFICIAL_CALENDAR_REQUIRED_CURRENCIES":"USD,EUR,GBP,JPY"}, clear=True):
+            result = scan_official_composite(clock)
+        self.assertEqual(["EUR", "GBP", "JPY", "USD"], result["coverage"])
+        self.assertEqual([], result["events"])
 
 
 if __name__ == "__main__": unittest.main()
