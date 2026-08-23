@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime
 
 from coinbase.rest import RESTClient
 
@@ -57,22 +58,25 @@ class Exchange:
         }
 
     def eligible_products(self, limit: int = 250) -> list[dict]:
-        response = self.client.get_products(limit=limit, product_type="SPOT", get_tradability_status=True)
         products = []
-        for raw in field(response, "products", []):
-            data = as_dict(raw)
-            product_id = str(data.get("product_id", "")).upper()
-            if not product_id.endswith("-USDC"):
-                continue
-            if any(bool(data.get(k, False)) for k in ("trading_disabled", "view_only", "cancel_only")):
-                continue
-            products.append({
-                "product_id": product_id,
-                "price": float(data.get("price") or 0),
-                "volume_24h": float(data.get("volume_24h") or 0),
-                "price_percentage_change_24h": float(data.get("price_percentage_change_24h") or 0),
-                "quote_min_size": float(data.get("quote_min_size") or 0),
-            })
+        cursor = None
+        for _ in range(10):
+            params = {"limit": limit, "product_type": "SPOT", "get_tradability_status": True}
+            if cursor:
+                params["cursor"] = cursor
+            response = self.client.get_products(**params)
+            for raw in field(response, "products", []):
+                data = as_dict(raw)
+                product_id = str(data.get("product_id", "")).upper()
+                if not product_id.endswith("-USDC"):
+                    continue
+                if any(bool(data.get(k, False)) for k in ("trading_disabled", "view_only", "cancel_only")):
+                    continue
+                products.append({"product_id": product_id,"price": float(data.get("price") or 0),"volume_24h": float(data.get("volume_24h") or 0),"price_percentage_change_24h": float(data.get("price_percentage_change_24h") or 0),"quote_min_size": float(data.get("quote_min_size") or 0)})
+            pagination = field(response, "pagination", {}) or {}
+            cursor = field(pagination, "next_cursor", None)
+            if not cursor or not field(pagination, "has_next", False):
+                break
         return products
 
     def preview_buy(self, ticket: dict):
@@ -96,3 +100,24 @@ class Exchange:
     def base_balance(self, product_id: str) -> float:
         base = product_id.split("-", 1)[0]
         return sum(float(a.available_balance.value) + float(a.hold.value) for a in self.accounts() if a.currency == base)
+
+    def fills(self, product_id: str, opened_at: str) -> list[dict]:
+        response = self.client.get_fills(product_ids=[product_id], limit=100)
+        cutoff = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
+        result = []
+        for raw in field(response, "fills", []):
+            data = as_dict(raw)
+            stamp = str(data.get("trade_time") or data.get("trade_time_utc") or "")
+            try:
+                if datetime.fromisoformat(stamp.replace("Z", "+00:00")) < cutoff:
+                    continue
+            except ValueError:
+                continue
+            result.append({"order_id": str(data.get("order_id", "")), "side": str(data.get("side", "")).upper(), "price": float(data.get("price") or 0), "size": float(data.get("size") or 0), "commission": float(data.get("commission") or 0), "trade_time": stamp})
+        return result
+
+    def cancel_order(self, order_id: str) -> dict:
+        return as_dict(self.client.cancel_orders(order_ids=[order_id]))
+
+    def market_sell(self, product_id: str, base_size: float, client_order_id: str) -> dict:
+        return as_dict(self.client.create_order(client_order_id=client_order_id, product_id=product_id, side="SELL", order_configuration={"market_market_ioc": {"base_size": str(base_size)}}))
