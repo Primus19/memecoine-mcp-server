@@ -1,94 +1,90 @@
-# Primus Coinbase Compounding MCP Pilot
+# Primus Unified Coinbase Pilot
 
-A private remote MCP app for a dedicated Coinbase Advanced Trade portfolio. It starts from one immutable $5-$30 USDC baseline, may compound only reconciled net trading profit, and never treats later deposits as trading capital.
+This MCP server is the authoritative decision and execution ledger for the Coinbase pilot. It does not guarantee profit.
 
-## MCP tools
+## One report-to-execution chain
+
+1. Market research supplies normalized evidence to `issue_model_3_1_recommendation`.
+2. The server calculates the Model 3.1 total from bounded component scores, applies live Coinbase and risk checks, freezes the complete recommendation, and returns a ticket ID plus SHA-256 hash.
+3. The hourly report must display that exact stored record.
+4. `execute_issued_ticket` accepts only the stored ticket ID and matching hash. It rejects edited, expired, unknown, previously used, or non-qualifying tickets.
+5. Coinbase product state, cash and risk gates are checked again immediately before preview and submission.
+
+The reporting agent must never invent a live ticket outside this flow.
+
+## Tools
 
 | Tool | Purpose |
 |---|---|
-| `pilot_status` | Reconcile Coinbase state and report live position, P&L, capital and audit events |
-| `preflight_coinbase` | Verify View + Trade, Transfer disabled, and initialize the immutable baseline |
-| `list_eligible_spot_products` | Discover current tradable Coinbase USDC spot markets |
-| `execute_validated_ticket` | Preview or submit one server-validated spot ticket |
-| `emergency_pause` | Block every new submission |
+| `preflight_coinbase` | Verify portfolio permissions and synchronize capital |
+| `list_eligible_spot_products` | Discover current Coinbase USDC spot markets |
+| `issue_model_3_1_recommendation` | Score and freeze the exact report/execution record |
+| `pilot_status` | Reconcile fills and return the authoritative hourly snapshot, P&L, reviews and notification events |
+| `execute_issued_ticket` | Preview or execute only an issued ticket ID/hash |
+| `emergency_pause` | Block new entries |
+| `emergency_flatten` | Cancel the tracked entry and market-sell the tracked asset after explicit confirmation |
+| `resume_trading` | Resume only with the required explicit acknowledgement |
 
-## Risk and capital rules
+## Capital and P&L
 
-- One open position maximum; spot only; no leverage, margin, derivatives, transfers, DEXs, presales or averaging down.
-- The first successful preflight freezes the dedicated portfolio baseline between $5 and $30.
-- Permitted capital is `baseline + reconciled cumulative realized P&L`. Additional deposits do not increase it.
-- Default entry allocation is at most 95% of the lesser of available USDC and permitted capital, leaving a fee reserve.
-- Maximum modeled loss remains the lesser of $2.50 and 10% of permitted capital.
-- The fixed symbol allowlist is replaced by live Coinbase verification. Only currently tradable, USDC-quoted Coinbase spot products can pass.
-- Research gates remain: score ≥85, verified news ≥4, RISING regime, positive 1h/24h, ≤15% daily extension, ≥$50M market cap, ≥$10M volume, 5%-100% turnover, ≤50 bps spread/slippage, verified identity and no veto.
-- Coinbase product status and identity are rechecked server-side immediately before preview and submission.
-- Every accepted entry includes a stop and profit target. Duplicate and expired tickets are rejected.
+- The first valid $5-$30 USDC balance is recorded as the initial baseline.
+- Later deposits and withdrawals are recorded separately from trading P&L and become part of permitted capital.
+- Realized and unrealized P&L are calculated from Coinbase fills, quantities, prices and commissions—not from balance changes.
+- Up to 95% of available permitted capital may be allocated by default, leaving a fee reserve.
+- One open position maximum; USDC spot only; no leverage, derivatives, transfers, DEXs, presales or averaging down.
 
-This software cannot guarantee profit. The pilot balance can be lost, stops can gap, and fees can dominate small positions.
+## Circuit breakers
 
-## Security
+New entries pause automatically after any of:
 
-- Use a dedicated portfolio-scoped CDP key with **View + Trade only** and **Transfer disabled**.
-- Enter credentials only through `/setup?token=...`; they are encrypted at rest and never returned through MCP.
-- Rotate `SETUP_TOKEN` after setup.
+- three consecutive losing trades;
+- 10% daily drawdown;
+- 25% drawdown from peak equity.
+
+`emergency_pause` blocks new entries. `emergency_flatten` is a separate destructive action because it can realize a loss. Resuming requires the exact acknowledgement `I_REVIEWED_THE_LOSSES_AND_ACCEPT_RESUMING`.
+
+## Guarded model review
+
+Every hourly `pilot_status` snapshot creates at most one review record for that UTC hour. Every closed trade creates a trade-specific review. Reviews track sample size, wins/losses, win rate, net expectancy and profit factor.
+
+Model 3.1 remains locked until at least 30 closed outcomes exist. The server does not rewrite weights after one win or loss and never loosens safety controls automatically.
+
+## Email reporting without SMTP
+
+No SMTP server or app password is required. `pilot_status` returns an append-only notification/event feed plus the exact recommendations and review results. The existing ChatGPT scheduled task uses its connected Gmail account to format and email that snapshot.
+
+This produces hourly reporting. Immediate server-originated email would require a separate mail provider, which is intentionally not required here.
+
+## Security and deployment
+
 - `/mcp` uses GitHub OAuth.
-- Every `/api/*` REST route requires `Authorization: Bearer $REST_API_TOKEN`. If `REST_API_TOKEN` is absent, REST access remains denied.
-- Keep `LIVE_TRADING=false` until preflight, dynamic-product discovery, dry-run preview, reconciliation and email delivery have all been tested.
+- `/api/pilot-status` requires `Authorization: Bearer $REST_API_TOKEN`.
+- Coinbase credentials are entered only through `/setup?token=...`, encrypted at rest, and never returned through MCP.
+- The Coinbase key must be portfolio-scoped with View + Trade and Transfer disabled.
+- Rotate `SETUP_TOKEN` after setup.
+- Keep a persistent Railway volume mounted at `/app/data`.
 
-ChatGPT currently requires confirmation for MCP write actions. This server does not bypass that safeguard.
-
-## Email trade and P&L reporting
-
-Configure SMTP in the host secret manager. The server emails on order submission, first detected fill, position close with gain/loss, and emergency pause. Email failure is recorded in the append-only audit log and never weakens risk validation.
-
-For Gmail, use an app password or a dedicated SMTP provider credential; never use the normal account password.
-
-## Railway variables
+Required variables are documented in `.env.example`. Keep live execution locked while refreshing and testing the new MCP schema:
 
 ```text
-PUBLIC_BASE_URL=https://YOUR-SERVICE.up.railway.app
-GITHUB_CLIENT_ID=...
-GITHUB_CLIENT_SECRET=...
-JWT_SIGNING_KEY=...
-SETUP_TOKEN=...
-CREDENTIAL_ENCRYPTION_KEY=...
-REST_API_TOKEN=...
 LIVE_TRADING=false
 LIVE_CONFIRMATION=
-MAX_CAPITAL_ALLOCATION_PCT=95
-TRADE_REPORT_EMAIL=primus.vekuh@gmail.com
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=465
-SMTP_USERNAME=...
-SMTP_PASSWORD=...
-SMTP_FROM=...
-DATA_DIR=/app/data
 ```
 
-The server is armed only when both values match exactly:
+Arm only after preflight, product discovery, recommendation issuance, dry-run ticket execution, fill reconciliation, circuit-breaker and Gmail-report tests pass:
 
 ```text
 LIVE_TRADING=true
 LIVE_CONFIRMATION=I_ACCEPT_THE_25_USDC_LIVE_RISK
 ```
 
-## Safe rollout
-
-1. Deploy with `LIVE_TRADING=false`.
-2. Save the portfolio-scoped Coinbase key and rotate the setup token.
-3. Call `preflight_coinbase`; confirm the immutable baseline and Transfer disabled.
-4. Call `list_eligible_spot_products` and `pilot_status`.
-5. Submit a valid ticket while locked; verify `DRY_RUN_ONLY`.
-6. Confirm trade-report email configuration.
-7. Arm only after the above checks pass.
-8. Review and confirm each write action in ChatGPT.
+ChatGPT currently requires manual confirmation for MCP write actions; this server does not bypass that protection.
 
 ## Tests
 
 ```bash
-PYTHONPATH=. python -m unittest discover -s tests -v
 python -m py_compile app/*.py tests/*.py
-docker build -t primus-coinbase-mcp .
+PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-References: [OpenAI MCP server guide](https://developers.openai.com/api/docs/mcp), [Coinbase Advanced Trade API](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/rest-api), and [Coinbase Products API](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/products/list-products).
+References: [OpenAI MCP documentation](https://developers.openai.com/api/docs/mcp), [Coinbase Advanced Trade endpoints](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/rest-api), and [Coinbase Products API](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/products/list-products).
