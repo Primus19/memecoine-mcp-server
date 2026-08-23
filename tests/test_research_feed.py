@@ -65,6 +65,10 @@ class ResearchFeedTests(unittest.TestCase):
         self.assertIn("liquidity", candidate["component_scores"])
         self.assertEqual(1, candidate["change_1h_pct"])
         self.assertEqual(.25, candidate["turnover"])
+        self.assertAlmostEqual(.115, candidate["target_1_price"])
+        self.assertAlmostEqual(.13, candidate["target_price"])
+        self.assertEqual(12, candidate["trail_activation_pct"])
+        self.assertEqual(8, candidate["trail_pct"])
 
     def test_missing_evidence_fails_closed(self):
         feed = self.make_feed()
@@ -96,6 +100,10 @@ class ResearchFeedTests(unittest.TestCase):
         self.assertEqual("RISING", ResearchFeed.regime(markets)["classification"])
         for item in markets[:4]: item["price_change_percentage_24h_in_currency"] = -1
         self.assertEqual("MIXED", ResearchFeed.regime(markets)["classification"])
+
+    def test_regime_classifies_broad_short_term_decline_as_falling(self):
+        markets = [self.market(id=str(i), price_change_percentage_1h_in_currency=-1, price_change_percentage_24h_in_currency=-3) for i in range(6)]
+        self.assertEqual("FALLING", ResearchFeed.regime(markets)["classification"])
 
 
 if __name__ == "__main__":
