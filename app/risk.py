@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .policy import OpportunityPolicy
+
 UTC = timezone.utc
 
 
@@ -25,6 +27,7 @@ def validate_ticket(
     that Coinbase currently exposes it as a tradable USDC spot market.
     """
     errors: list[str] = []
+    policy = OpportunityPolicy.from_env()
     product_id = str(t.get("product_id", "")).upper()
     if open_positions:
         errors.append("one-position limit reached")
@@ -36,22 +39,22 @@ def validate_ticket(
         errors.append("product is not spot")
     if product.get("trading_disabled") or product.get("view_only"):
         errors.append("product is not currently tradable")
-    if t.get("regime") != "RISING":
-        errors.append("regime is not RISING")
-    if float(t.get("score", 0)) < 85:
-        errors.append("score below 85")
-    if float(t.get("news_score", 0)) < 4:
-        errors.append("verified news score below 4")
+    if not policy.regime_allowed(t.get("regime")):
+        errors.append("regime is not permitted")
+    if float(t.get("score", 0)) < policy.min_score:
+        errors.append(f"score below {policy.min_score:g}")
+    if not policy.news_allowed(t.get("news_score", 0), news_veto=t.get("news_veto") is True):
+        errors.append("news policy gate failed")
     if min(float(t.get("change_1h_pct", 0)), float(t.get("change_24h_pct", 0))) <= 0:
         errors.append("1h/24h momentum gate failed")
-    if float(t.get("change_24h_pct", 99)) > 15:
-        errors.append("24h move exceeds 15%")
-    if float(t.get("market_cap_usd", 0)) < 50_000_000:
-        errors.append("market cap below $50M")
-    if float(t.get("volume_24h_usd", 0)) < 10_000_000:
-        errors.append("volume below $10M")
-    if not 0.05 <= float(t.get("turnover", -1)) <= 1.0:
-        errors.append("turnover outside 5%-100%")
+    if float(t.get("change_24h_pct", 99)) > policy.max_momentum_24h_pct:
+        errors.append(f"24h move exceeds {policy.max_momentum_24h_pct:g}%")
+    if float(t.get("market_cap_usd", 0)) < policy.min_market_cap_usd:
+        errors.append("market cap below policy minimum")
+    if float(t.get("volume_24h_usd", 0)) < policy.min_volume_24h_usd:
+        errors.append("volume below policy minimum")
+    if not policy.min_turnover <= float(t.get("turnover", -1)) <= policy.max_turnover:
+        errors.append("turnover outside policy range")
     if float(t.get("spread_bps", 9999)) > 50:
         errors.append("spread above 50 bps")
     if float(t.get("slippage_bps", 9999)) > 50:
