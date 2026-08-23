@@ -70,8 +70,8 @@ def validate_ticket(
     try:
         expiry = datetime.fromisoformat(str(t["expires_at"]).replace("Z", "+00:00"))
         now = datetime.now(UTC)
-        if not now < expiry <= now + timedelta(hours=1):
-            errors.append("ticket expired or lasts over one hour")
+        if not now < expiry <= now + timedelta(seconds=120):
+            errors.append("ticket expired or lasts over two minutes")
     except Exception:
         errors.append("invalid expiry")
     entry, stop, target = (float(t.get(k, 0)) for k in ("limit_price", "stop_price", "target_price"))
@@ -79,5 +79,12 @@ def validate_ticket(
         errors.append("prices must satisfy stop < entry < target")
     if entry and notional * (entry - stop) / entry > maximum_loss:
         errors.append("stop risk exceeds cap")
+    try:
+        source_time = datetime.fromisoformat(str(t["source_timestamp"]).replace("Z", "+00:00"))
+        age = (datetime.now(UTC) - source_time).total_seconds()
+        if age < -5 or age > 120:
+            errors.append("source market data is not fresh")
+    except Exception:
+        errors.append("invalid source timestamp")
     if errors:
         raise TicketRejected("; ".join(errors))
