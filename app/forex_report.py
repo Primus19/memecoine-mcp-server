@@ -29,8 +29,10 @@ def render_forex_report(report: dict) -> str:
     events = report.get("events") or []
     balance = float(broker.get("balance") or 0)
     nav = float(broker.get("nav") or balance)
-    baseline = float(report.get("baseline_nav") or nav)
+    baseline = float(report.get("capital_baseline_nav") or report.get("baseline_nav") or nav)
     pnl = nav - baseline
+    daily_baseline = float(report.get("daily_baseline_nav") or nav)
+    daily_pnl = nav - daily_baseline
     margin = float(broker.get("margin_used") or 0)
     pending = int(report.get("pending_order_count") or 0)
     calendar_ok = sum(1 for row in snapshots if row.get("calendar_verified") is True)
@@ -54,6 +56,7 @@ def render_forex_report(report: dict) -> str:
             "calendar": "VERIFIED" if item.get("calendar_verified") is True else "BLOCKED",
         })
     outcome_rows = [{"symbol": x.get("symbol", ""), "status": x.get("status", ""),
+                     "score": f'{float(x.get("score") or 0):.2f} / {float(x.get("minimum_score") or 0):.2f}',
                      "reason": x.get("reason", x.get("id", ""))} for x in outcomes]
     intent_rows = [{"created": x.get("created_at", ""), "symbol": x.get("symbol", ""), "side": x.get("side", ""),
                     "mode": x.get("mode", ""), "status": x.get("status", ""),
@@ -67,12 +70,13 @@ def render_forex_report(report: dict) -> str:
 <div style="display:flex;flex-wrap:wrap;gap:12px;margin:16px 0">
 <div style="flex:1;min-width:180px;background:white;padding:16px;border-radius:12px"><small>Account NAV</small><div style="font-size:24px;font-weight:bold">{_money(nav)}</div></div>
 <div style="flex:1;min-width:180px;background:white;padding:16px;border-radius:12px"><small>P&amp;L vs baseline</small><div style="font-size:24px;font-weight:bold;color:{'#16a34a' if pnl >= 0 else '#dc2626'}">{_money(pnl)}</div></div>
+<div style="flex:1;min-width:180px;background:white;padding:16px;border-radius:12px"><small>Daily NAV change</small><div style="font-size:24px;font-weight:bold;color:{'#16a34a' if daily_pnl >= 0 else '#dc2626'}">{_money(daily_pnl)}</div></div>
 <div style="flex:1;min-width:180px;background:white;padding:16px;border-radius:12px"><small>Margin used</small><div style="font-size:24px;font-weight:bold">{_money(margin)}</div></div>
 <div style="flex:1;min-width:180px;background:white;padding:16px;border-radius:12px"><small>Calendar coverage</small><div style="font-size:24px;font-weight:bold">{calendar_ok}/{len(snapshots)}</div></div>
 </div>
-<div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px"><h2>Risk and readiness</h2><p><b>Execution:</b> {"Enabled by all independent gates" if mode == "LIVE_ARMED" else "No live order authorization"}. <b>Open broker trades:</b> {int(broker.get("open_trade_count") or report.get("open_trade_count") or 0)}. <b>Pending orders:</b> {pending}. <b>Margin available:</b> {_money(broker.get("margin_available"))}. <b>Last scan:</b> {html.escape(str(report.get("last_scan") or "never"))}.</p><p style="color:#b91c1c"><b>Current error:</b> {html.escape(str(report.get("last_error") or "None"))}</p></div>
+<div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px"><h2>Risk and readiness</h2><p><b>Execution:</b> {"Enabled by all independent gates" if mode == "LIVE_ARMED" else "No live order authorization"}. <b>Open broker trades:</b> {int(broker.get("open_trade_count") or report.get("open_trade_count") or 0)}. <b>Pending orders:</b> {pending}. <b>Margin available:</b> {_money(broker.get("margin_available"))}. <b>Realized P&amp;L:</b> {_money(broker.get("realized_pl", report.get("realized_pnl_usd")))}. <b>Unrealized P&amp;L:</b> {_money(broker.get("unrealized_pl"))}. <b>Financing:</b> {_money(broker.get("financing"))}. <b>Last scan:</b> {html.escape(str(report.get("last_scan") or "never"))}.</p><p style="color:#b91c1c"><b>Current error:</b> {html.escape(str(report.get("last_error") or "None"))}</p></div>
 <div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px;overflow-x:auto"><h2>Market and calendar</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th>Pair</th><th>Price</th><th>1h</th><th>24h</th><th>Spread</th><th>Calendar</th></tr>{rows(snapshot_rows, [("symbol","Pair"),("price","Price"),("1h","1h"),("24h","24h"),("spread","Spread"),("calendar","Calendar")])}</table></div>
-<div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px;overflow-x:auto"><h2>Latest decisions</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th>Pair</th><th>Action</th><th>Reason or signal ID</th></tr>{rows(outcome_rows, [("symbol","Pair"),("status","Action"),("reason","Reason")])}</table></div>
+<div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px;overflow-x:auto"><h2>Latest decisions</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th>Pair</th><th>Action</th><th>Score / minimum</th><th>Reason or signal ID</th></tr>{rows(outcome_rows, [("symbol","Pair"),("status","Action"),("score","Score"),("reason","Reason")])}</table></div>
 <div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px;overflow-x:auto"><h2>Auditable positions and intents</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th>Created</th><th>Pair</th><th>Side</th><th>Mode</th><th>Status</th><th>Max loss</th><th>Realized P&amp;L</th></tr>{rows(intent_rows, [("created","Created"),("symbol","Pair"),("side","Side"),("mode","Mode"),("status","Status"),("risk","Max loss"),("pnl","P&amp;L")])}</table></div>
 <div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px;overflow-x:auto"><h2>Append-only audit trail</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th>Time</th><th>Event</th><th>Record hash</th></tr>{rows(event_rows, [("time","Time"),("type","Event"),("hash","Hash")])}</table></div>
 <div style="background:#fffbeb;border:1px solid #f59e0b;border-radius:12px;padding:16px"><b>Risk notice</b><p style="margin-bottom:0">No strategy can guarantee profit. Live Forex trading can lose money rapidly. Broker balances, fills, stops, financing charges and open trades must be independently verified.</p></div>

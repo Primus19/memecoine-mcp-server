@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServer,
-                                live_armed, practice_armed, safe_quantity,
+                                closed_trade_pnl, live_armed, practice_armed, safe_quantity,
                                 validated_snapshots)
 
 
@@ -115,6 +115,28 @@ class ForexExecutorTests(unittest.TestCase):
         proposal = {"symbol":"EUR_USD","reference_price":1.1,"stop_price":1.095}
         # The $50 notional cap is stricter than the stop-risk calculation.
         self.assertEqual(45.0, safe_quantity(Adapter(), proposal, 2.5))
+
+    def test_closed_broker_trade_releases_position_limit_and_records_pnl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(directory + "/forex.sqlite3")
+            proposal = {"proposal_id":"p1","expires_at":"2999-01-01T00:00:00Z","symbol":"EUR_USD","reference_price":1.1,
+                        "side":"BUY","quantity":10,"stop_price":1.0,"target_price":1.2,"maximum_loss_usd":0.5}
+            ledger.add_intent(proposal, "LIVE", "SUBMITTED")
+            ledger.update_intent("p1", "OPEN", "order-1", "trade-1")
+            transactions = [{"type":"ORDER_FILL", "tradesClosed":[{"tradeID":"trade-1", "realizedPL":"0.75"}]}]
+            pnl = closed_trade_pnl(transactions)
+            ledger.close_broker_intent("trade-1", pnl["trade-1"])
+            self.assertEqual(0, ledger.open_count())
+            self.assertEqual(0.75, ledger.realized_pnl())
+
+    def test_cancelled_market_order_is_not_counted_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(directory + "/forex.sqlite3")
+            proposal = {"proposal_id":"p1","expires_at":"2999-01-01T00:00:00Z","symbol":"EUR_USD","reference_price":1.1,
+                        "side":"BUY","quantity":10,"stop_price":1.0,"target_price":1.2,"maximum_loss_usd":0.5}
+            ledger.add_intent(proposal, "LIVE", "SUBMITTING")
+            ledger.update_intent("p1", "CANCELLED")
+            self.assertEqual(0, ledger.open_count())
 
 
 if __name__ == "__main__": unittest.main()

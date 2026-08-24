@@ -121,6 +121,33 @@ class Ledger:
         return [dict(row) for row in self.db.execute(
             "SELECT seq,recorded_at,type,record_hash FROM events ORDER BY seq DESC LIMIT ?", (limit,)).fetchall()]
 
+    def close_broker_intent(self, trade_id: str, realized_pnl_usd: float | None) -> None:
+        with self.db:
+            self.db.execute("""UPDATE intents SET status='BROKER_CLOSED', realized_pnl_usd=?
+                              WHERE broker_trade_id=? AND status='OPEN'""",
+                            (realized_pnl_usd, trade_id))
+
+    def realized_pnl(self) -> float:
+        row = self.db.execute("SELECT COALESCE(SUM(realized_pnl_usd),0) FROM intents WHERE realized_pnl_usd IS NOT NULL").fetchone()
+        return float(row[0])
+
+
+def closed_trade_pnl(transactions: list[dict]) -> dict[str, float]:
+    """Return OANDA trade IDs closed/reduced by recent fill transactions."""
+    values: dict[str, float] = {}
+    for transaction in transactions:
+        if str(transaction.get("type", "")).upper() != "ORDER_FILL":
+            continue
+        legs = list(transaction.get("tradesClosed") or [])
+        if transaction.get("tradeReduced"):
+            legs.append(transaction["tradeReduced"])
+        for leg in legs:
+            trade_id = str(leg.get("tradeID") or "")
+            if not trade_id:
+                continue
+            values[trade_id] = values.get(trade_id, 0.0) + float(leg.get("realizedPL") or 0)
+    return values
+
 
 def fetch_json(url: str) -> dict:
     headers = {"Accept": "application/json", "User-Agent": "primus-forex-executor/1.0"}
@@ -193,10 +220,19 @@ class Executor:
         if len(trades) > int(os.getenv("FOREX_MAX_OPEN_POSITIONS", "1")):
             raise BrokerError("broker position count exceeds limit")
         if live_armed(self.adapter) or practice_armed(self.adapter):
-            expected = {str(item.get("broker_trade_id") or "") for item in self.ledger.broker_positions() if item.get("broker_trade_id")}
+            broker_positions = self.ledger.broker_positions()
+            expected = {str(item.get("broker_trade_id") or "") for item in broker_positions if item.get("broker_trade_id")}
             actual = {str(item.get("id") or "") for item in trades}
             unexpected = actual - expected
             if unexpected: raise BrokerError("unexpected broker trade detected; entries paused")
+            pnl_by_trade = closed_trade_pnl(transactions)
+            for position in broker_positions:
+                trade_id = str(position.get("broker_trade_id") or "")
+                if trade_id and trade_id not in actual:
+                    pnl = pnl_by_trade.get(trade_id)
+                    self.ledger.close_broker_intent(trade_id, pnl)
+                    self.ledger.event("BROKER_TRADE_CLOSED", {"intent_id": position["id"],
+                                      "trade_id": trade_id, "realized_pnl_usd": pnl})
             for trade in trades:
                 if not trade.get("stopLossOrder") or not trade.get("takeProfitOrder"):
                     trade_id = str(trade.get("id") or "")
@@ -253,6 +289,11 @@ class Executor:
             self.ledger.update_intent(intent_id, "REJECTED")
             self.ledger.event("ORDER_REJECTED", {"intent_id": intent_id, "response": response})
             raise BrokerError(str(rejected.get("rejectReason") or "order rejected"))
+        cancelled = response.get("orderCancelTransaction")
+        if cancelled and not response.get("orderFillTransaction"):
+            self.ledger.update_intent(intent_id, "CANCELLED")
+            self.ledger.event("ORDER_CANCELLED", {"intent_id": intent_id, "response": response})
+            raise BrokerError(str(cancelled.get("reason") or "order cancelled without fill"))
         created = response.get("orderCreateTransaction") or {}
         filled = response.get("orderFillTransaction") or {}
         order_id = str(created.get("id") or filled.get("orderID") or "")
@@ -300,10 +341,14 @@ class Executor:
         closes = self.supervise_paper(snapshots)
         outcomes = []
         for snapshot in snapshots:
+            score = round(self.engine.score(snapshot), 2)
             try:
-                outcomes.append({"symbol": snapshot.get("symbol"), **self.process(snapshot)})
+                outcomes.append({"symbol": snapshot.get("symbol"), "score": score,
+                                 "minimum_score": self.engine.policy.minimum_score, **self.process(snapshot)})
             except Exception as exc:
-                outcomes.append({"symbol": snapshot.get("symbol"), "status": "REJECTED", "reason": str(exc)[:300]})
+                outcomes.append({"symbol": snapshot.get("symbol"), "score": score,
+                                 "minimum_score": self.engine.policy.minimum_score,
+                                 "status": "REJECTED", "reason": str(exc)[:300]})
         self.ledger.event("SCAN", {"outcomes": outcomes, "paper_closes": closes})
         report = {"generated_at": utcnow(), "mode": "LIVE_ARMED" if live_armed(self.adapter) else
                   "PRACTICE_ARMED" if practice_armed(self.adapter) else "PAPER_ONLY",
@@ -314,7 +359,9 @@ class Executor:
                   "transaction_count_since_prior_scan": len(reconciliation["transactions"]),
                   "snapshots": snapshots, "outcomes": outcomes, "paper_closes": closes,
                   "intents": self.ledger.recent_intents(), "events": self.ledger.recent_events(),
-                  "baseline_nav": float(self.ledger.setting("daily_baseline_nav", str(reconciliation["summary"]["nav"])))}
+                  "realized_pnl_usd": self.ledger.realized_pnl(),
+                  "capital_baseline_nav": float(os.getenv("FOREX_LIVE_BASELINE_USD", "0") or 0),
+                  "daily_baseline_nav": float(self.ledger.setting("daily_baseline_nav", str(reconciliation["summary"]["nav"])))}
         with LOCK:
             STATE["report"] = report
         print(json.dumps({"event": "FOREX_EXECUTOR_SCAN", "outcomes": outcomes, "paper_closes": closes}), flush=True)
