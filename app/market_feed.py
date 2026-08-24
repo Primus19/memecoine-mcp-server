@@ -70,11 +70,24 @@ def forex_snapshot(adapter: OandaAdapter, symbol: str) -> dict:
             "invalidation": "Trend alignment, spread, session liquidity or economic-event gate fails"}
 
 
+def scan_symbols(adapter: OandaAdapter, symbols: list[str]) -> tuple[list[dict], list[dict]]:
+    snapshots, rejected = [], []
+    for symbol in symbols:
+        try:
+            snapshots.append(forex_snapshot(adapter, symbol))
+        except Exception as exc:
+            rejected.append({"symbol": symbol, "reason": str(exc)[:300]})
+    if not snapshots:
+        detail = "; ".join(f"{item['symbol']}: {item['reason']}" for item in rejected)
+        raise RuntimeError(f"no valid forex snapshots ({detail or 'no symbols configured'})")
+    return snapshots, rejected
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path not in {"/health", "/snapshots", "/status"}: self.send_error(404); return
         with LOCK: value = dict(STATE)
-        if self.path == "/health": value = {"ok": value["ok"], "service": "multi-asset-market-feed", "scanned_at": value["scanned_at"]}
+        if self.path == "/health": value = {"ok": value["ok"], "service": "multi-asset-market-feed", "scanned_at": value["scanned_at"], "error": value["error"]}
         elif self.path == "/snapshots": value = {"snapshots": value["snapshots"], "scanned_at": value["scanned_at"]}
         body = json.dumps(value).encode(); self.send_response(200 if value.get("ok", True) else 503)
         self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
@@ -88,10 +101,10 @@ def main():
     symbols = [s.strip().upper() for s in os.getenv("FOREX_SYMBOLS", "EUR_USD,GBP_USD,USD_JPY,AUD_USD,USD_CAD").split(",") if s.strip()]
     while True:
         try:
-            adapter = OandaAdapter(); snapshots = []
-            for symbol in symbols:
-                try: snapshots.append(forex_snapshot(adapter, symbol))
-                except Exception as exc: print(json.dumps({"event": "FOREX_SYMBOL_REJECTED", "symbol": symbol, "reason": str(exc)[:300]}), flush=True)
+            adapter = OandaAdapter()
+            snapshots, rejected = scan_symbols(adapter, symbols)
+            for item in rejected:
+                print(json.dumps({"event": "FOREX_SYMBOL_REJECTED", **item}), flush=True)
             with LOCK: STATE.update(ok=True, scanned_at=datetime.now(timezone.utc).isoformat(), snapshots=snapshots, error="")
             print(json.dumps({"event": "MULTI_ASSET_FEED_SCAN", "paper_only": True, "snapshot_count": len(snapshots)}), flush=True)
         except Exception as exc:
