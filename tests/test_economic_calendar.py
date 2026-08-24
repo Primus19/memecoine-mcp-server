@@ -14,6 +14,12 @@ from app.economic_calendar import (build_request, normalize, parse_bls_ics,
 
 
 class CalendarTests(unittest.TestCase):
+    def test_official_fetch_error_names_the_failed_source(self):
+        with patch("urllib.request.urlopen", side_effect=OSError("blocked")):
+            with self.assertRaisesRegex(RuntimeError, "official calendar source bls failed"):
+                from app.economic_calendar import _fetch_official
+                _fetch_official("bls", datetime(2026, 8, 24, tzinfo=timezone.utc))
+
     def test_health_is_liveness_even_before_calendar_is_ready(self):
         with LOCK:
             original = dict(STATE)
