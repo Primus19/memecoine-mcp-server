@@ -31,6 +31,7 @@ class BrokerAdapterTests(unittest.TestCase):
                                   "stop_price": 1.09, "target_price": 1.12}, client_order_id="intent123")
         payload = request.call_args.kwargs["payload"]["order"]
         self.assertEqual("intent123", payload["clientExtensions"]["id"])
+        self.assertEqual("primus-forex-v1", payload["tradeClientExtensions"]["tag"])
         self.assertEqual("1.09000", payload["stopLossOnFill"]["price"])
         self.assertEqual("1.12000", payload["takeProfitOnFill"]["price"])
         self.assertEqual("1.10165", payload["priceBound"])
