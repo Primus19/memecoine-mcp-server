@@ -230,7 +230,15 @@ FOREX_MAX_OPEN_POSITIONS=1
 FOREX_DAILY_LOSS_LIMIT_USD=2.50
 FOREX_MAX_NOTIONAL_USD=50.00
 FOREX_MAX_MARGIN_USED_USD=5.00
+FOREX_MAX_ENTRY_DRIFT_BPS=15
 ```
+
+Use `/railway.forex-executor.json` as the custom Railway config path for both
+Forex executor services. `/health` is process liveness and remains HTTP 200
+while the server is running; `executor_ready` reports dependency readiness.
+`/status` remains fail-closed with HTTP 503 until broker reconciliation and the
+market-feed scan succeed. The executor can authenticate to the market feed with
+the optional `MULTI_ASSET_FEED_BEARER_TOKEN` secret.
 
 Live mode additionally requires all four values below plus a current verified
 economic-calendar response. Missing or inconsistent values fail closed:

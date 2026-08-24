@@ -90,12 +90,17 @@ class OandaAdapter:
         units = int(round(float(proposal["quantity"]))) * (1 if proposal["side"] == "BUY" else -1)
         if units == 0:
             raise BrokerError("order units round to zero")
+        reference = float(proposal["reference_price"])
+        drift_bps = min(50.0, max(1.0, float(os.getenv("FOREX_MAX_ENTRY_DRIFT_BPS", "15"))))
+        price_bound = reference * (1 + drift_bps / 10_000) if units > 0 else reference * (1 - drift_bps / 10_000)
+        precision = int(self.instrument(proposal["symbol"]).get("displayPrecision") or 5)
         order = {
             "type": "MARKET",
             "instrument": proposal["symbol"],
             "units": str(units),
             "timeInForce": "FOK",
             "positionFill": "DEFAULT",
+            "priceBound": f"{price_bound:.{precision}f}",
             "clientExtensions": {"id": client_order_id, "tag": "primus-forex-v1"},
             "stopLossOnFill": {"price": str(proposal["stop_price"]), "timeInForce": "GTC"},
             "takeProfitOnFill": {"price": str(proposal["target_price"]), "timeInForce": "GTC"},
