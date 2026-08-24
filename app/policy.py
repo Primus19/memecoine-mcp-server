@@ -25,6 +25,12 @@ class OpportunityPolicy:
     min_turnover: float = 0.03
     max_turnover: float = 1.50
     max_momentum_24h_pct: float = 15.0
+    emerging_enabled: bool = True
+    emerging_min_score: float = 84.0
+    emerging_min_market_cap_usd: float = 10_000_000.0
+    emerging_min_volume_24h_usd: float = 1_000_000.0
+    emerging_max_spread_bps: float = 30.0
+    emerging_max_slippage_bps: float = 30.0
 
     @classmethod
     def from_env(cls) -> "OpportunityPolicy":
@@ -38,7 +44,25 @@ class OpportunityPolicy:
             min_turnover=float(os.getenv("LIVE_MIN_TURNOVER", "0.03")),
             max_turnover=float(os.getenv("LIVE_MAX_TURNOVER", "1.50")),
             max_momentum_24h_pct=float(os.getenv("LIVE_MAX_24H_GAIN_PCT", "15")),
+            emerging_enabled=_truthy("LIVE_EMERGING_MEME_ENABLED", True),
+            emerging_min_score=float(os.getenv("LIVE_EMERGING_MIN_SCORE", "84")),
+            emerging_min_market_cap_usd=float(os.getenv("LIVE_EMERGING_MIN_MARKET_CAP_USD", "10000000")),
+            emerging_min_volume_24h_usd=float(os.getenv("LIVE_EMERGING_MIN_VOLUME_24H_USD", "1000000")),
+            emerging_max_spread_bps=float(os.getenv("LIVE_EMERGING_MAX_SPREAD_BPS", "30")),
+            emerging_max_slippage_bps=float(os.getenv("LIVE_EMERGING_MAX_SLIPPAGE_BPS", "30")),
         )
+
+    def tier(self, market_cap_usd: Any, volume_24h_usd: Any) -> str:
+        cap, volume = float(market_cap_usd or 0), float(volume_24h_usd or 0)
+        if cap >= self.min_market_cap_usd and volume >= self.min_volume_24h_usd:
+            return "ESTABLISHED"
+        if (self.emerging_enabled and cap >= self.emerging_min_market_cap_usd
+                and volume >= self.emerging_min_volume_24h_usd):
+            return "EMERGING"
+        return "INELIGIBLE"
+
+    def minimum_score_for(self, tier: str) -> float:
+        return self.emerging_min_score if tier == "EMERGING" else self.min_score
 
     def regime_allowed(self, regime: Any) -> bool:
         value = str(regime or "").upper()
@@ -50,4 +74,3 @@ class OpportunityPolicy:
         if not self.require_news_catalyst:
             return True
         return float(news_score or 0) >= self.min_news_score_when_required
-

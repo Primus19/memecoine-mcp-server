@@ -67,10 +67,12 @@ class ResearchFeed:
         self.request_spacing = max(0.0, min(10.0, float(os.getenv("RESEARCH_REQUEST_SPACING_SECONDS", "1"))))
         self.notional = clamp(float(os.getenv("PILOT_NOTIONAL_USDC", "23.75")), 1.0, 25.0)
         self.max_loss = min(2.5, float(os.getenv("PILOT_MAX_LOSS_USDC", "2.50")))
+        self.emerging_notional = clamp(float(os.getenv("PILOT_EMERGING_NOTIONAL_USDC", "5.00")), 5.0, 5.0)
+        self.emerging_max_loss = min(.25, float(os.getenv("PILOT_EMERGING_MAX_LOSS_USDC", "0.25")))
         self.policy = OpportunityPolicy.from_env()
         self.state_path = Path(os.getenv("RESEARCH_FEED_STATE_PATH", "/app/data/research_feed.json"))
         self.lock = threading.RLock()
-        self.state: dict[str, Any] = {"evidence": {}, "candidates": [], "status": {"ok": False}}
+        self.state: dict[str, Any] = {"evidence": {}, "candidates": [], "shadow_outcomes": [], "status": {"ok": False}}
         self._load()
 
     def authorized(self, request: Request) -> bool:
@@ -166,8 +168,8 @@ class ResearchFeed:
         dilution = cap / fdv if fdv else 0
         failures = []
         if not self.policy.regime_allowed(regime["classification"]): failures.append("regime not permitted")
-        if cap < self.policy.min_market_cap_usd: failures.append("market cap below policy minimum")
-        if volume < self.policy.min_volume_24h_usd: failures.append("volume below policy minimum")
+        tier = self.policy.tier(cap, volume)
+        if tier == "INELIGIBLE": failures.append("market cap or volume below all policy tiers")
         if not self.policy.min_turnover <= turnover <= self.policy.max_turnover: failures.append("turnover outside policy range")
         if one <= 0: failures.append("1h momentum not positive")
         if day <= 0 or day > self.policy.max_momentum_24h_pct: failures.append("24h momentum outside policy range")
@@ -183,7 +185,8 @@ class ResearchFeed:
             "news": int(clamp(float(evidence.get("news_score") or 0), 0, 10)),
             "social": int(clamp(float(evidence.get("social_score") or 0), 0, 5)),
         }
-        if sum(components.values()) < self.policy.min_score: failures.append(f"Model 3.1 score below {self.policy.min_score:g}")
+        minimum_score = self.policy.minimum_score_for(tier)
+        if sum(components.values()) < minimum_score: failures.append(f"Model 3.1 score below {minimum_score:g}")
         return components, failures
 
     def build_candidate(self, market: dict[str, Any], product: dict[str, Any], evidence: dict[str, Any], regime: dict[str, Any], at: datetime) -> tuple[dict[str, Any] | None, list[str]]:
@@ -197,8 +200,11 @@ class ResearchFeed:
         evidence_stamp = str(evidence["observed_at"])
         signal_id = hashlib.sha256(f"{product_id}|{evidence_stamp}|{at.strftime('%Y-%m-%dT%H')}".encode()).hexdigest()
         sources = [f"https://www.coingecko.com/en/coins/{market['id']}", *evidence["source_urls"]]
+        tier = self.policy.tier(market.get("market_cap"), market.get("total_volume"))
+        emerging = tier == "EMERGING"
         candidate = {
-            "signal_id": signal_id, "product_id": product_id, "regime": regime["classification"],
+            "signal_id": signal_id, "product_id": product_id, "opportunity_tier": tier,
+            "regime": regime["classification"],
             "component_scores": components,
             "change_1h_pct": float(market.get("price_change_percentage_1h_in_currency") or 0),
             "change_24h_pct": float(market.get("price_change_percentage_24h_in_currency") or 0),
@@ -207,15 +213,56 @@ class ResearchFeed:
             "volume_24h_usd": float(market.get("total_volume") or 0),
             "turnover": float(market.get("total_volume") or 0) / float(market.get("market_cap") or 1),
             "identity_verified": True, "no_safety_veto": True, "news_veto": evidence.get("news_veto") is True,
-            "notional_usdc": self.notional, "max_loss_usdc": self.max_loss,
+            "notional_usdc": self.emerging_notional if emerging else self.notional,
+            "max_loss_usdc": self.emerging_max_loss if emerging else self.max_loss,
             "reference_price": price, "limit_price": price * 1.0035,
-            "stop_price": price * .92, "target_1_price": price * 1.15,
-            "target_price": price * 1.30, "trail_activation_pct": 12, "trail_pct": 8,
+            "stop_price": price * (.95 if emerging else .92), "target_1_price": price * 1.06,
+            "target_price": price * (1.15 if emerging else 1.20),
+            "trail_activation_pct": 5, "trail_pct": 3,
             "thesis": str(evidence.get("thesis") or "Fresh verified catalyst with positive liquid-market momentum"),
             "invalidation": str(evidence.get("invalidation") or "Safety veto, catalyst invalidation, spread/slippage failure, or momentum reversal"),
             "evidence_urls": list(dict.fromkeys(sources)), "source_timestamp": at.isoformat(), "expiry_seconds": 90,
         }
         return candidate, []
+
+    def update_shadow_outcomes(self, markets: dict[str, dict[str, Any]], at: datetime) -> None:
+        """Update counterfactual returns for rejected, never-traded candidates."""
+        shadows = list(self.state.get("shadow_outcomes", []))
+        for item in shadows:
+            market = markets.get(str(item.get("symbol", "")).upper())
+            price = float((market or {}).get("current_price") or 0)
+            entry = float(item.get("entry_price") or 0)
+            if price <= 0 or entry <= 0: continue
+            current = (price / entry - 1) * 100
+            item["last_price"] = price
+            item["last_seen_at"] = at.isoformat()
+            item["current_return_pct"] = round(current, 6)
+            item["max_return_pct"] = round(max(float(item.get("max_return_pct") or current), current), 6)
+            item["min_return_pct"] = round(min(float(item.get("min_return_pct") or current), current), 6)
+        self.state["shadow_outcomes"] = shadows[-500:]
+
+    def record_shadow(self, product_id: str, market: dict[str, Any], failures: list[str],
+                      components: dict[str, int], at: datetime) -> None:
+        price = float(market.get("current_price") or 0)
+        if price <= 0: return
+        key = f"{product_id}|{at.strftime('%Y-%m-%dT%H')}"
+        shadows = list(self.state.get("shadow_outcomes", []))
+        if any(item.get("key") == key for item in shadows): return
+        shadows.append({"key": key, "product_id": product_id,
+                        "symbol": product_id.removesuffix("-USDC"),
+                        "opportunity_tier": self.policy.tier(market.get("market_cap"), market.get("total_volume")),
+                        "score": sum(components.values()), "failures": list(failures),
+                        "entry_price": price, "last_price": price,
+                        "first_seen_at": at.isoformat(), "last_seen_at": at.isoformat(),
+                        "current_return_pct": 0.0, "max_return_pct": 0.0, "min_return_pct": 0.0})
+        self.state["shadow_outcomes"] = shadows[-500:]
+
+    def shadow_summary(self) -> dict[str, Any]:
+        shadows = list(self.state.get("shadow_outcomes", []))
+        positive = [x for x in shadows if float(x.get("current_return_pct") or 0) > 0]
+        return {"sample_size": len(shadows), "positive_now": len(positive),
+                "average_current_return_pct": (sum(float(x.get("current_return_pct") or 0) for x in shadows) / len(shadows) if shadows else None),
+                "best_missed_return_pct": max((float(x.get("max_return_pct") or 0) for x in shadows), default=None)}
 
     def scan_once(self) -> dict[str, Any]:
         started = now_utc()
@@ -231,6 +278,7 @@ class ResearchFeed:
         candidates, rejected = [], []
         with self.lock:
             evidence_store = dict(self.state.get("evidence", {}))
+            self.update_shadow_outcomes(by_symbol, started)
         for product in products:
             product_id = str(product.get("product_id", ""))
             if not product_id.endswith("-USDC"): continue
@@ -238,11 +286,16 @@ class ResearchFeed:
             market = by_symbol.get(symbol)
             if not market: continue
             evidence = evidence_store.get(str(market["id"]), {})
+            components, _ = self.score(market, evidence, regime)
             candidate, failures = self.build_candidate(market, product, evidence, regime, started)
             if candidate: candidates.append(candidate)
-            elif evidence: rejected.append({"product_id": product_id, "coin_id": market["id"], "failures": failures})
+            elif evidence:
+                rejected.append({"product_id": product_id, "coin_id": market["id"],
+                                 "opportunity_tier": self.policy.tier(market.get("market_cap"), market.get("total_volume")),
+                                 "score": sum(components.values()), "failures": failures})
+                with self.lock: self.record_shadow(product_id, market, failures, components, started)
         candidates.sort(key=lambda item: sum(item["component_scores"].values()), reverse=True)
-        status = {"ok": True, "scanned_at": iso_now(), "duration_ms": round((now_utc() - started).total_seconds() * 1000), "market_count": len(markets), "coinbase_product_count": len(products), "regime": regime, "candidate_count": len(candidates), "rejected_attested": rejected[:50]}
+        status = {"ok": True, "scanned_at": iso_now(), "duration_ms": round((now_utc() - started).total_seconds() * 1000), "market_count": len(markets), "coinbase_product_count": len(products), "regime": regime, "candidate_count": len(candidates), "candidate_tiers": {"established": sum(x.get("opportunity_tier") == "ESTABLISHED" for x in candidates), "emerging": sum(x.get("opportunity_tier") == "EMERGING" for x in candidates)}, "shadow_summary": self.shadow_summary(), "rejected_attested": rejected[:50]}
         with self.lock:
             self.state["candidates"], self.state["status"] = candidates, status
             self._save()

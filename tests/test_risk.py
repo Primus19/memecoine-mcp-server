@@ -66,3 +66,19 @@ class RiskTests(unittest.TestCase):
     def test_reject_stale_source(self):
         t=ticket();t["source_timestamp"]=(datetime.now(timezone.utc)-timedelta(minutes=3)).isoformat()
         with self.assertRaisesRegex(TicketRejected,"fresh"):self.validate(t)
+
+    def test_emerging_tier_is_small_and_stricter(self):
+        t=ticket(5);t.update(opportunity_tier="EMERGING",market_cap_usd=15_000_000,
+                             volume_24h_usd=2_000_000,max_loss_usdc=.25,score=86,
+                             spread_bps=25,slippage_bps=25,stop_price=.095)
+        self.validate(t)
+        t["notional_usdc"]=6
+        with self.assertRaisesRegex(TicketRejected,"emerging-tier notional"):
+            self.validate(t)
+
+    def test_emerging_tier_rejects_wide_execution(self):
+        t=ticket(5);t.update(opportunity_tier="EMERGING",market_cap_usd=15_000_000,
+                             volume_24h_usd=2_000_000,max_loss_usdc=.25,score=86,
+                             spread_bps=31,slippage_bps=25,stop_price=.095)
+        with self.assertRaisesRegex(TicketRejected,"30 bps"):
+            self.validate(t)
