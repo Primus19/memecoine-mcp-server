@@ -11,11 +11,13 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .broker_adapters import BrokerError, OandaAdapter
+from .forex_report import render_forex_report
 from .multi_asset import AssetPolicy, ForexEngine, MultiAssetRejected
 
 UTC = timezone.utc
 LOCK = threading.RLock()
-STATE = {"ok": False, "mode": "STARTING", "last_scan": "", "last_error": "", "open_positions": 0}
+STATE = {"ok": False, "mode": "STARTING", "last_scan": "", "last_error": "", "open_positions": 0,
+         "report": {}}
 
 
 def truthy(name: str) -> bool:
@@ -94,6 +96,13 @@ class Ledger:
     def broker_positions(self) -> list[dict]:
         return [dict(row) for row in self.db.execute("SELECT * FROM intents WHERE status IN ('SUBMITTED','OPEN')").fetchall()]
 
+    def recent_intents(self, limit: int = 25) -> list[dict]:
+        return [dict(row) for row in self.db.execute("SELECT * FROM intents ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()]
+
+    def recent_events(self, limit: int = 25) -> list[dict]:
+        return [dict(row) for row in self.db.execute(
+            "SELECT seq,recorded_at,type,record_hash FROM events ORDER BY seq DESC LIMIT ?", (limit,)).fetchall()]
+
 
 def fetch_json(url: str) -> dict:
     headers = {"Accept": "application/json", "User-Agent": "primus-forex-executor/1.0"}
@@ -153,7 +162,7 @@ class Executor:
         self.engine = ForexEngine(AssetPolicy.from_env())
         self.max_risk = min(2.50, max(0.10, float(os.getenv("FOREX_MAX_RISK_USD", "2.50"))))
 
-    def reconcile(self) -> None:
+    def reconcile(self) -> dict:
         summary = self.adapter.preflight()
         trades = self.adapter.open_trades()
         pending = self.adapter.pending_orders()
@@ -192,6 +201,8 @@ class Executor:
             raise BrokerError("margin-used circuit breaker active")
         with LOCK:
             STATE["open_positions"] = len(trades)
+        return {"summary": summary, "open_trades": trades, "pending_orders": pending,
+                "transactions": transactions}
 
     def process(self, snapshot: dict) -> dict:
         proposal = vars(self.engine.evaluate(snapshot))
@@ -265,7 +276,7 @@ class Executor:
         return closes
 
     def scan(self) -> None:
-        self.reconcile()
+        reconciliation = self.reconcile()
         payload = fetch_json(os.environ["MULTI_ASSET_FEED_URL"])
         snapshots = payload.get("snapshots", [])
         closes = self.supervise_paper(snapshots)
@@ -276,16 +287,40 @@ class Executor:
             except Exception as exc:
                 outcomes.append({"symbol": snapshot.get("symbol"), "status": "REJECTED", "reason": str(exc)[:300]})
         self.ledger.event("SCAN", {"outcomes": outcomes, "paper_closes": closes})
+        report = {"generated_at": utcnow(), "mode": "LIVE_ARMED" if live_armed(self.adapter) else
+                  "PRACTICE_ARMED" if practice_armed(self.adapter) else "PAPER_ONLY",
+                  "executor_ready": True, "last_scan": utcnow(), "last_error": "",
+                  "broker": reconciliation["summary"], "open_trades": reconciliation["open_trades"],
+                  "pending_orders": reconciliation["pending_orders"], "transactions": reconciliation["transactions"],
+                  "snapshots": snapshots, "outcomes": outcomes, "paper_closes": closes,
+                  "intents": self.ledger.recent_intents(), "events": self.ledger.recent_events(),
+                  "baseline_nav": float(self.ledger.setting("daily_baseline_nav", str(reconciliation["summary"]["nav"])))}
+        with LOCK:
+            STATE["report"] = report
         print(json.dumps({"event": "FOREX_EXECUTOR_SCAN", "outcomes": outcomes, "paper_closes": closes}), flush=True)
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path not in {"/health", "/status"}:
+        if self.path not in {"/health", "/status", "/report", "/report.json"}:
             self.send_error(404); return
         with LOCK:
             state = dict(STATE)
-        if self.path == "/health":
+        if self.path == "/report":
+            report = dict(state.get("report") or {})
+            report.update(mode=state["mode"], executor_ready=state["ok"], last_scan=state["last_scan"],
+                          last_error=state["last_error"])
+            body = render_forex_report(report).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body); return
+        if self.path == "/report.json":
+            payload = dict(state.get("report") or {})
+            payload.update(mode=state["mode"], executor_ready=state["ok"], last_scan=state["last_scan"],
+                           last_error=state["last_error"])
+            status = 200
+        elif self.path == "/health":
             payload = {"ok": True, "service": "forex-executor", "mode": state["mode"],
                        "executor_ready": state["ok"], "last_scan": state["last_scan"],
                        "last_error": state["last_error"], "open_positions": state["open_positions"]}
