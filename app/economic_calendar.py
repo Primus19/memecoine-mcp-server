@@ -17,16 +17,16 @@ LOCK = threading.RLock()
 STATE = {"ok": False, "observed_at": "", "source_url": "", "events": [], "error": "not scanned"}
 
 TRADING_ECONOMICS_SOURCE = "https://api.tradingeconomics.com/calendar"
-FRED_CALENDAR = "https://fred.stlouisfed.org/releases/calendar?od=asc&rid={rid}&ve={year}-12-31&view=year&vs={year}-01-01"
+FRED_CALENDAR = "https://fred.stlouisfed.org/releases/calendar?od=asc&rid={rid}&ve={end}&view=month&vs={start}"
 OFFICIAL_COMPOSITE_SOURCE = "https://fred.stlouisfed.org/releases/calendar"
 BLS_ARCHIVE_SOURCE = "https://www.bls.gov/schedule/news_release/bls.ics"
 OFFICIAL_SOURCES = {
     # FRED is operated by the Federal Reserve Bank of St. Louis and republishes
     # source-supplied release dates. These replace the BLS ICS endpoint, which
     # rejects Railway egress with HTTP 403.
-    "fred_employment": ("USD", FRED_CALENDAR.format(rid=50, year="{year}")),
-    "fred_cpi": ("USD", FRED_CALENDAR.format(rid=10, year="{year}")),
-    "fred_ppi": ("USD", FRED_CALENDAR.format(rid=46, year="{year}")),
+    "fred_employment": ("USD", FRED_CALENDAR.format(rid=50, start="{start}", end="{end}")),
+    "fred_cpi": ("USD", FRED_CALENDAR.format(rid=10, start="{start}", end="{end}")),
+    "fred_ppi": ("USD", FRED_CALENDAR.format(rid=46, start="{start}", end="{end}")),
     "federal_reserve": ("USD", "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"),
     "ecb": ("EUR", "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html"),
     "bank_of_england": ("GBP", "https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates"),
@@ -231,11 +231,12 @@ def parse_fred_calendar_html(body: str) -> list[dict]:
 
 def _fetch_official(name: str, now: datetime) -> tuple[dict, list[dict]]:
     currency, url = OFFICIAL_SOURCES[name]
-    if "{year}" in url:
-        url = url.format(year=now.year)
+    if "{start}" in url:
+        url = url.format(start=(now - timedelta(days=1)).date().isoformat(),
+                         end=(now + timedelta(days=45)).date().isoformat())
     request = urllib.request.Request(url, headers={"Accept": "text/html,text/calendar", "User-Agent": "primus-economic-calendar/1.2"})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=45) as response:
             body = response.read().decode("utf-8", "replace")
             status = getattr(response, "status", 200)
     except Exception as exc:
@@ -256,8 +257,15 @@ def scan_official_composite(now: datetime | None = None) -> dict:
     clock = now or datetime.now(timezone.utc)
     required = {item.strip().upper() for item in os.getenv("OFFICIAL_CALENDAR_REQUIRED_CURRENCIES", "USD,EUR,GBP,JPY").split(",") if item.strip()}
     selected = [name for name, (currency, _) in OFFICIAL_SOURCES.items() if currency in required]
-    with ThreadPoolExecutor(max_workers=len(selected)) as pool:
-        results = list(pool.map(lambda name: _fetch_official(name, clock), selected))
+    # FRED throttles concurrent calendar requests from a shared cloud egress IP.
+    # Fetch its small rolling windows sequentially and fetch other institutions
+    # concurrently.
+    fred_names = [name for name in selected if name.startswith("fred_")]
+    other_names = [name for name in selected if not name.startswith("fred_")]
+    fred_results = [_fetch_official(name, clock) for name in fred_names]
+    with ThreadPoolExecutor(max_workers=len(other_names)) as pool:
+        other_results = list(pool.map(lambda name: _fetch_official(name, clock), other_names))
+    results = fred_results + other_results
     sources = [result[0] for result in results]
     coverage = {source["currency"] for source in sources if source["ok"]}
     if not required.issubset(coverage): raise ValueError(f"official calendar coverage missing: {sorted(required - coverage)}")
