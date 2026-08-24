@@ -11,8 +11,15 @@ from unittest.mock import patch
 from app.economic_calendar import (build_request, normalize, parse_bls_ics,
                                    Handler, LOCK, STATE, ThreadingHTTPServer,
                                    parse_boe_html, parse_boj_html,
-                                   parse_ecb_html, parse_fomc_html, parse_fred_calendar_html,
+                                   parse_bea_schedule_html, parse_ecb_html, parse_fomc_html,
+                                   parse_fred_calendar_html,
                                    scan_official_composite, load_official_snapshot)
+
+
+def official_sources():
+    names = ["fred_employment", "fred_cpi", "fred_ppi", "bureau_economic_analysis",
+             "federal_reserve", "ecb", "bank_of_england", "bank_of_japan"]
+    return [{"name": name, "ok": True} for name in names]
 
 
 class CalendarTests(unittest.TestCase):
@@ -20,7 +27,7 @@ class CalendarTests(unittest.TestCase):
         clock = datetime(2026, 8, 24, 12, tzinfo=timezone.utc)
         payload = {"snapshot_generated_at": (clock - timedelta(hours=1)).isoformat(),
                    "source_url": "https://fred.stlouisfed.org/releases/calendar",
-                   "coverage": ["USD", "EUR", "GBP", "JPY"], "sources": [],
+                   "coverage": ["USD", "EUR", "GBP", "JPY"], "sources": official_sources(),
                    "events": [{"currency":"USD", "impact":"HIGH", "event":"CPI",
                                "time": (clock + timedelta(hours=2)).isoformat(),
                                "source_url":"https://fred.stlouisfed.org/releases/calendar",
@@ -37,7 +44,8 @@ class CalendarTests(unittest.TestCase):
         clock = datetime(2026, 8, 24, 12, tzinfo=timezone.utc)
         payload = {"snapshot_generated_at": (clock - timedelta(days=3)).isoformat(),
                    "source_url":"https://fred.stlouisfed.org/releases/calendar",
-                   "coverage":["USD", "EUR", "GBP", "JPY"], "events":[]}
+                   "coverage":["USD", "EUR", "GBP", "JPY"],
+                   "sources": official_sources(), "events":[]}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "snapshot.json"
             path.write_text(json.dumps(payload))
@@ -138,6 +146,38 @@ class CalendarTests(unittest.TestCase):
         self.assertEqual("USD", event["currency"])
         self.assertEqual("2026-09-04T12:30:00+00:00", event["time"])
 
+    def test_parses_bea_gdp_income_and_trade_releases_in_eastern_time(self):
+        body = '''<table><thead><tr><th>Year 2026</th></tr></thead><tbody>
+        <tr class="scheduled-releases-type-press"><td><div class="release-date">August 26</div>
+        <small class="text-muted">8:30 AM</small></td><td class="release-title">GDP (Second Estimate) and Corporate Profits, 2nd Quarter 2026</td></tr>
+        <tr class="scheduled-releases-type-press"><td><div class="release-date">August 26</div>
+        <small class="text-muted">8:30 AM</small></td><td class="release-title">Personal Income and Outlays, July 2026</td></tr>
+        <tr class="scheduled-releases-type-press"><td><div class="release-date">September 3</div>
+        <small class="text-muted">8:30 AM</small></td><td class="release-title">U.S. International Trade in Goods and Services, July 2026</td></tr>
+        <tr class="scheduled-releases-type-press"><td><div class="release-date">September 24</div>
+        <small class="text-muted">8:30 AM</small></td><td class="release-title">International Investment Position</td></tr>
+        </tbody></table>'''
+        events = parse_bea_schedule_html(body)
+        self.assertEqual(3, len(events))
+        self.assertEqual("2026-08-26T12:30:00+00:00", events[0]["time"])
+        self.assertEqual(60, events[0]["blackout_before_minutes"])
+        self.assertEqual(90, events[0]["blackout_after_minutes"])
+        self.assertTrue(all(event["source_url"] == "https://www.bea.gov/news/schedule"
+                            for event in events))
+
+    def test_snapshot_without_bea_source_fails_closed(self):
+        clock = datetime(2026, 8, 24, 12, tzinfo=timezone.utc)
+        payload = {"snapshot_generated_at": clock.isoformat(),
+                   "source_url":"https://fred.stlouisfed.org/releases/calendar",
+                   "coverage":["USD", "EUR", "GBP", "JPY"],
+                   "sources":[item for item in official_sources()
+                              if item["name"] != "bureau_economic_analysis"], "events":[]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "snapshot.json"
+            path.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "bureau_economic_analysis"):
+                load_official_snapshot(clock, path)
+
     def test_fomc_parser_does_not_leak_adjacent_year_panels(self):
         body = '''<div class="panel panel-default"><a>2026 FOMC Meetings</a>
         <div class="fomc-meeting__month"><strong>September</strong></div>
@@ -153,6 +193,7 @@ class CalendarTests(unittest.TestCase):
         clock = datetime(2026, 8, 24, tzinfo=timezone.utc)
         def fake_fetch(name, _):
             currencies = {"fred_employment":"USD", "fred_cpi":"USD", "fred_ppi":"USD",
+                          "bureau_economic_analysis":"USD",
                           "federal_reserve":"USD", "ecb":"EUR", "bank_of_england":"GBP",
                           "bank_of_japan":"JPY"}
             return ({"name":name, "currency":currencies[name], "url":"https://official.example", "ok":True, "event_count":0}, [])

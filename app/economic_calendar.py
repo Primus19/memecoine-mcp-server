@@ -22,6 +22,7 @@ TRADING_ECONOMICS_SOURCE = "https://api.tradingeconomics.com/calendar"
 FRED_CALENDAR = "https://fred.stlouisfed.org/releases/calendar?od=asc&rid={rid}&ve={end}&view=month&vs={start}"
 OFFICIAL_COMPOSITE_SOURCE = "https://fred.stlouisfed.org/releases/calendar"
 BLS_ARCHIVE_SOURCE = "https://www.bls.gov/schedule/news_release/bls.ics"
+BEA_SCHEDULE_SOURCE = "https://www.bea.gov/news/schedule"
 OFFICIAL_SOURCES = {
     # FRED is operated by the Federal Reserve Bank of St. Louis and republishes
     # source-supplied release dates. These replace the BLS ICS endpoint, which
@@ -29,6 +30,7 @@ OFFICIAL_SOURCES = {
     "fred_employment": ("USD", FRED_CALENDAR.format(rid=50, start="{start}", end="{end}")),
     "fred_cpi": ("USD", FRED_CALENDAR.format(rid=10, start="{start}", end="{end}")),
     "fred_ppi": ("USD", FRED_CALENDAR.format(rid=46, start="{start}", end="{end}")),
+    "bureau_economic_analysis": ("USD", BEA_SCHEDULE_SOURCE),
     "federal_reserve": ("USD", "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"),
     "ecb": ("EUR", "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html"),
     "bank_of_england": ("GBP", "https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates"),
@@ -233,6 +235,41 @@ def parse_fred_calendar_html(body: str) -> list[dict]:
     return events
 
 
+def parse_bea_schedule_html(body: str) -> list[dict]:
+    """Parse market-moving BEA releases from its official public schedule."""
+    year_match = re.search(r"<th[^>]*>\s*Year\s+(\d{4})\s*</th>", body, re.I)
+    if not year_match:
+        return []
+    year = int(year_match.group(1))
+    high_impact = re.compile(
+        r"\bGDP\b|Gross Domestic Product|Personal Income and Outlays|"
+        r"U\.S\. International Trade in Goods and Services",
+        re.I,
+    )
+    events = []
+    for row in re.findall(r'<tr[^>]*class="[^"]*scheduled-releases-type-press[^"]*"[^>]*>(.*?)</tr>',
+                          body, re.S | re.I):
+        date_match = re.search(r'<div[^>]*class="[^"]*release-date[^"]*"[^>]*>(.*?)</div>',
+                               row, re.S | re.I)
+        time_match = re.search(r'<small[^>]*>(\d{1,2}):(\d{2})\s*(AM|PM)</small>', row, re.I)
+        title_match = re.search(r'<td[^>]*class="[^"]*release-title[^"]*"[^>]*>(.*?)</td>',
+                                row, re.S | re.I)
+        if not date_match or not time_match or not title_match:
+            continue
+        title = _text(title_match.group(1))
+        if not high_impact.search(title):
+            continue
+        try:
+            date = datetime.strptime(f"{_text(date_match.group(1))} {year}", "%B %d %Y")
+            hour = int(time_match.group(1)) % 12 + (12 if time_match.group(3).upper() == "PM" else 0)
+            when = _utc(year, date.month, date.day, hour, int(time_match.group(2)),
+                        "America/New_York")
+        except ValueError:
+            continue
+        events.append(_event("USD", title, when, BEA_SCHEDULE_SOURCE, 60, 90))
+    return events
+
+
 def _fetch_official(name: str, now: datetime) -> tuple[dict, list[dict]]:
     currency, url = OFFICIAL_SOURCES[name]
     if "{start}" in url:
@@ -247,6 +284,7 @@ def _fetch_official(name: str, now: datetime) -> tuple[dict, list[dict]]:
         raise RuntimeError(f"official calendar source {name} failed: {exc}") from exc
     if status != 200 or not body.strip(): raise ValueError(f"{name} returned an empty or unsuccessful response")
     if name.startswith("fred_"): events = parse_fred_calendar_html(body)
+    elif name == "bureau_economic_analysis": events = parse_bea_schedule_html(body)
     elif name == "bls": events = parse_bls_ics(body)
     elif name == "federal_reserve": events = sum((parse_fomc_html(body, year) for year in {now.year, now.year + 1}), [])
     elif name == "ecb": events = parse_ecb_html(body)
@@ -300,6 +338,13 @@ def load_official_snapshot(now: datetime | None = None, path: Path | None = None
     coverage = {str(item).upper() for item in payload.get("coverage", [])}
     if not required.issubset(coverage):
         raise ValueError(f"official calendar snapshot coverage missing: {sorted(required - coverage)}")
+    required_sources = {name for name, (currency, _) in OFFICIAL_SOURCES.items()
+                        if currency in required}
+    present_sources = {str(item.get("name")) for item in payload.get("sources", [])
+                       if isinstance(item, dict) and item.get("ok") is True}
+    if not required_sources.issubset(present_sources):
+        raise ValueError(
+            f"official calendar snapshot sources missing: {sorted(required_sources - present_sources)}")
     rows = payload.get("events", [])
     if not isinstance(rows, list):
         raise ValueError("official calendar snapshot events must be a list")
