@@ -1,0 +1,135 @@
+{
+  "coverage": [
+    "EUR",
+    "GBP",
+    "JPY",
+    "USD"
+  ],
+  "events": [
+    {
+      "blackout_after_minutes": 60,
+      "blackout_before_minutes": 60,
+      "currency": "USD",
+      "event": "Employment Situation",
+      "impact": "HIGH",
+      "minutes_until": 16310,
+      "source_url": "https://fred.stlouisfed.org/releases/calendar",
+      "time": "2026-09-04T12:30:00+00:00"
+    },
+    {
+      "blackout_after_minutes": 90,
+      "blackout_before_minutes": 60,
+      "currency": "EUR",
+      "event": "ECB monetary policy decision and press conference",
+      "impact": "HIGH",
+      "minutes_until": 24935,
+      "source_url": "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html",
+      "time": "2026-09-10T12:15:00+00:00"
+    },
+    {
+      "blackout_after_minutes": 60,
+      "blackout_before_minutes": 60,
+      "currency": "USD",
+      "event": "Producer Price Index",
+      "impact": "HIGH",
+      "minutes_until": 24950,
+      "source_url": "https://fred.stlouisfed.org/releases/calendar",
+      "time": "2026-09-10T12:30:00+00:00"
+    },
+    {
+      "blackout_after_minutes": 60,
+      "blackout_before_minutes": 60,
+      "currency": "USD",
+      "event": "Consumer Price Index",
+      "impact": "HIGH",
+      "minutes_until": 26390,
+      "source_url": "https://fred.stlouisfed.org/releases/calendar",
+      "time": "2026-09-11T12:30:00+00:00"
+    },
+    {
+      "blackout_after_minutes": 60,
+      "blackout_before_minutes": 60,
+      "currency": "USD",
+      "event": "FOMC monetary policy decision",
+      "impact": "HIGH",
+      "minutes_until": 33920,
+      "source_url": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
+      "time": "2026-09-16T18:00:00+00:00"
+    },
+    {
+      "blackout_after_minutes": 360,
+      "blackout_before_minutes": 720,
+      "currency": "JPY",
+      "event": "Bank of Japan monetary policy decision window",
+      "impact": "HIGH",
+      "minutes_until": 34460,
+      "source_url": "https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm",
+      "time": "2026-09-17T03:00:00+00:00"
+    },
+    {
+      "blackout_after_minutes": 60,
+      "blackout_before_minutes": 60,
+      "currency": "GBP",
+      "event": "Bank of England MPC decision",
+      "impact": "HIGH",
+      "minutes_until": 34940,
+      "source_url": "https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates",
+      "time": "2026-09-17T11:00:00+00:00"
+    }
+  ],
+  "observed_at": "2026-08-24T04:40:03.478927+00:00",
+  "provider": "official_composite",
+  "snapshot_generated_at": "2026-08-24T04:40:21.158611+00:00",
+  "source_url": "https://fred.stlouisfed.org/releases/calendar",
+  "sources": [
+    {
+      "currency": "USD",
+      "event_count": 2,
+      "name": "fred_employment",
+      "ok": true,
+      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=50&ve=2026-10-08&view=month&vs=2026-08-23"
+    },
+    {
+      "currency": "USD",
+      "event_count": 1,
+      "name": "fred_cpi",
+      "ok": true,
+      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=10&ve=2026-10-08&view=month&vs=2026-08-23"
+    },
+    {
+      "currency": "USD",
+      "event_count": 1,
+      "name": "fred_ppi",
+      "ok": true,
+      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=46&ve=2026-10-08&view=month&vs=2026-08-23"
+    },
+    {
+      "currency": "USD",
+      "event_count": 16,
+      "name": "federal_reserve",
+      "ok": true,
+      "url": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+    },
+    {
+      "currency": "EUR",
+      "event_count": 19,
+      "name": "ecb",
+      "ok": true,
+      "url": "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html"
+    },
+    {
+      "currency": "GBP",
+      "event_count": 8,
+      "name": "bank_of_england",
+      "ok": true,
+      "url": "https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates"
+    },
+    {
+      "currency": "JPY",
+      "event_count": 16,
+      "name": "bank_of_japan",
+      "ok": true,
+      "url": "https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm"
+    }
+  ]
+}
