@@ -7,6 +7,7 @@ import os
 import statistics
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -61,6 +62,9 @@ class ResearchFeed:
         self.cg_key = os.getenv("COINGECKO_API_KEY", "")
         self.pages = max(1, min(3, int(os.getenv("RESEARCH_MARKET_PAGES", "2"))))
         self.interval = max(15, min(300, int(os.getenv("RESEARCH_SCAN_INTERVAL_SECONDS", "30"))))
+        self.http_max_retries = max(1, min(5, int(os.getenv("RESEARCH_HTTP_MAX_RETRIES", "3"))))
+        self.http_retry_backoff = max(.25, min(10.0, float(os.getenv("RESEARCH_HTTP_RETRY_BACKOFF_SECONDS", "1"))))
+        self.request_spacing = max(0.0, min(10.0, float(os.getenv("RESEARCH_REQUEST_SPACING_SECONDS", "1"))))
         self.notional = clamp(float(os.getenv("PILOT_NOTIONAL_USDC", "23.75")), 1.0, 25.0)
         self.max_loss = min(2.5, float(os.getenv("PILOT_MAX_LOSS_USDC", "2.50")))
         self.policy = OpportunityPolicy.from_env()
@@ -92,8 +96,21 @@ class ResearchFeed:
             headers["Authorization"] = f"Bearer {token}"
         if self.cg_key and url.startswith(self.cg_base):
             headers["x-cg-demo-api-key"] = self.cg_key
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as response:
-            return json.loads(response.read().decode())
+        request = urllib.request.Request(url, headers=headers)
+        for attempt in range(self.http_max_retries):
+            try:
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    return json.loads(response.read().decode())
+            except urllib.error.HTTPError as exc:
+                if exc.code != 429 or attempt + 1 >= self.http_max_retries:
+                    raise
+                retry_after = str(exc.headers.get("Retry-After", "")).strip()
+                try:
+                    delay = max(0.0, float(retry_after))
+                except ValueError:
+                    delay = self.http_retry_backoff * (2 ** attempt)
+                time.sleep(min(30.0, max(self.http_retry_backoff, delay)))
+        raise RuntimeError("HTTP retry loop exited unexpectedly")
 
     def market_page(self, page: int) -> list[dict[str, Any]]:
         query = urllib.parse.urlencode({
@@ -205,7 +222,10 @@ class ResearchFeed:
         products_payload = self.fetch(f"{self.executor_url}/api/eligible-products", self.executor_token)
         products = products_payload.get("products", [])
         markets: list[dict[str, Any]] = []
-        for page in range(1, self.pages + 1): markets.extend(self.market_page(page))
+        for page in range(1, self.pages + 1):
+            if page > 1 and self.request_spacing:
+                time.sleep(self.request_spacing)
+            markets.extend(self.market_page(page))
         by_symbol = self.unique_by_symbol(markets)
         regime = self.regime(markets)
         candidates, rejected = [], []
@@ -243,7 +263,13 @@ class ResearchFeed:
                 print(json.dumps({"event": "RESEARCH_SCAN", **self.scan_once()}), flush=True)
             except Exception as exc:
                 with self.lock:
-                    self.state["status"] = {"ok": False, "scanned_at": iso_now(), "error": type(exc).__name__, "detail": str(exc)[:1000]}
+                    previous = dict(self.state.get("status", {}))
+                    failure = {"ok": False, "scanned_at": iso_now(), "error": type(exc).__name__, "detail": str(exc)[:1000]}
+                    if previous.get("ok") is True:
+                        failure["last_successful"] = previous
+                    elif isinstance(previous.get("last_successful"), dict):
+                        failure["last_successful"] = previous["last_successful"]
+                    self.state["status"] = failure
                     self._save()
                 print(json.dumps({"event": "RESEARCH_SCAN_ERROR", "error": type(exc).__name__, "detail": str(exc)[:500]}), flush=True)
             time.sleep(self.interval)

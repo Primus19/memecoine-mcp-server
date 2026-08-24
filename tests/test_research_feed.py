@@ -1,6 +1,8 @@
 import os
 import tempfile
 import unittest
+import urllib.error
+from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -124,6 +126,25 @@ class ResearchFeedTests(unittest.TestCase):
     def test_regime_classifies_broad_short_term_decline_as_falling(self):
         markets = [self.market(id=str(i), price_change_percentage_1h_in_currency=-1, price_change_percentage_24h_in_currency=-3) for i in range(6)]
         self.assertEqual("FALLING", ResearchFeed.regime(markets)["classification"])
+
+    def test_rate_limit_retries_and_honors_retry_after(self):
+        feed = self.make_feed()
+        feed.http_max_retries = 2
+        error = urllib.error.HTTPError(
+            "https://api.example/data", 429, "Too Many Requests",
+            {"Retry-After": "0"}, BytesIO(b"rate limited"),
+        )
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self,*_): return False
+            def read(self): return b'{"ok": true}'
+
+        with patch("urllib.request.urlopen", side_effect=[error, Response()]) as request, \
+             patch("time.sleep") as sleep:
+            self.assertEqual({"ok": True}, feed.fetch("https://api.example/data"))
+        self.assertEqual(2, request.call_count)
+        sleep.assert_called_once()
 
 
 if __name__ == "__main__":

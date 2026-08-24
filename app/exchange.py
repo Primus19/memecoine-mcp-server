@@ -197,7 +197,16 @@ class Exchange:
         return sum(float(field(a.available_balance, "value") or field(a.available_balance, "amount") or 0) for a in self.accounts() if a.currency == base)
 
     def cancel_open_sell_orders(self, product_id: str) -> dict:
-        response = self.client.get("/api/v3/brokerage/orders/historical/batch", params={"product_ids": [product_id], "order_status": ["OPEN", "PENDING", "QUEUED"], "order_side": "SELL", "limit": 100})
+        # Coinbase rejects OPEN when it is combined with other order statuses.
+        # OPEN is the aggregate state for active orders, including attached
+        # bracket legs that have not reached a terminal state.  Query it alone
+        # so a managed exit can cancel venue protection before market-selling
+        # the then-available balance.
+        response = self.client.get(
+            "/api/v3/brokerage/orders/historical/batch",
+            params={"product_ids": [product_id], "order_status": ["OPEN"],
+                    "order_side": "SELL", "limit": 100},
+        )
         order_ids = [str(field(order, "order_id", "")) for order in field(response, "orders", []) if field(order, "order_id", "")]
         return {"order_ids": order_ids, "response": as_dict(self.client.cancel_orders(order_ids=order_ids)) if order_ids else {}}
 

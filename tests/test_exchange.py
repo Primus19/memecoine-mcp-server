@@ -33,6 +33,17 @@ class CapturingOrderClient:
         self.create_kwargs=kwargs
         return {"success_response":{"order_id":"order-1"}}
 
+class OpenSellClient:
+    def __init__(self):
+        self.params=None
+        self.cancelled=[]
+    def get(self,path,params):
+        self.params=params
+        return {"orders":[{"order_id":"sell-1"},{"order_id":"sell-2"}]}
+    def cancel_orders(self,*,order_ids):
+        self.cancelled=list(order_ids)
+        return {"results":[]}
+
 class ExchangeTests(unittest.TestCase):
     def test_dynamic_products_paginate_and_filter(self):
         ex=Exchange.__new__(Exchange);ex.client=ProductClient();products=ex.eligible_products()
@@ -84,6 +95,14 @@ class ExchangeTests(unittest.TestCase):
                          ex.client.create_kwargs["order_configuration"])
         self.assertEqual(ex.client.preview_kwargs["attached_order_configuration"],
                          ex.client.create_kwargs["attached_order_configuration"])
+
+    def test_managed_exit_queries_open_status_alone_before_cancelling(self):
+        ex=Exchange.__new__(Exchange);ex.client=OpenSellClient()
+        result=ex.cancel_open_sell_orders("AAA-USDC")
+        self.assertEqual(["OPEN"],ex.client.params["order_status"])
+        self.assertEqual("SELL",ex.client.params["order_side"])
+        self.assertEqual(["sell-1","sell-2"],ex.client.cancelled)
+        self.assertEqual(["sell-1","sell-2"],result["order_ids"])
 
     def test_structured_order_rejection_is_not_silently_returned(self):
         ex=Exchange.__new__(Exchange);ex.client=RejectedOrderClient()
