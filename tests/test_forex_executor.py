@@ -123,11 +123,20 @@ class ForexExecutorTests(unittest.TestCase):
                         "side":"BUY","quantity":10,"stop_price":1.0,"target_price":1.2,"maximum_loss_usd":0.5}
             ledger.add_intent(proposal, "LIVE", "SUBMITTED")
             ledger.update_intent("p1", "OPEN", "order-1", "trade-1")
-            transactions = [{"type":"ORDER_FILL", "tradesClosed":[{"tradeID":"trade-1", "realizedPL":"0.75"}]}]
+            ledger.update_excursions([{"id":"trade-1", "unrealizedPL":"0.40", "financing":"-0.01"}])
+            ledger.update_excursions([{"id":"trade-1", "unrealizedPL":"-0.20", "financing":"-0.01"}])
+            transactions = [{"type":"ORDER_FILL", "tradesClosed":[{"tradeID":"trade-1", "realizedPL":"0.75",
+                                                                      "financing":"-0.02"}]}]
             pnl = closed_trade_pnl(transactions)
             ledger.close_broker_intent("trade-1", pnl["trade-1"])
             self.assertEqual(0, ledger.open_count())
-            self.assertEqual(0.75, ledger.realized_pnl())
+            self.assertEqual(0.73, ledger.realized_pnl())
+            review = ledger.model_review(80)
+            self.assertEqual(1, review["sample_size"])
+            self.assertAlmostEqual(0.39, review["average_max_favorable_excursion_usd"])
+            self.assertAlmostEqual(-0.21, review["average_max_adverse_excursion_usd"])
+            self.assertEqual("MODEL LOCKED - COLLECTING EVIDENCE", review["status"])
+            self.assertFalse(review["parameters_changed"])
 
     def test_cancelled_market_order_is_not_counted_open(self):
         with tempfile.TemporaryDirectory() as directory:
