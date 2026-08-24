@@ -3,7 +3,7 @@ import sys
 from types import SimpleNamespace
 sys.modules.setdefault("coinbase",SimpleNamespace())
 sys.modules.setdefault("coinbase.rest",SimpleNamespace(RESTClient=object))
-from app.exchange import Exchange
+from app.exchange import CoinbaseOrderRejected,Exchange
 
 class ProductClient:
     def __init__(self): self.calls=0
@@ -15,6 +15,10 @@ class ProductClient:
 class BookClient:
     def get_product_book(self,**kwargs):
         return {"pricebook":{"bids":[{"price":"0.999","size":"100"}],"asks":[{"price":"1.001","size":"10"},{"price":"1.002","size":"20"}]}}
+
+class RejectedOrderClient:
+    def create_order(self,**kwargs):
+        return {"success":False,"error_response":{"error":"INVALID_ORDER_CONFIGURATION","message":"attached order is invalid"}}
 
 class ExchangeTests(unittest.TestCase):
     def test_dynamic_products_paginate_and_filter(self):
@@ -33,3 +37,11 @@ class ExchangeTests(unittest.TestCase):
         config=ex.buy_configuration({"notional_usdc":25,"limit_price":3}, {"base_increment":"0.01","base_min_size":.01})
         self.assertEqual(config["limit_limit_gtc"]["base_size"],"8.33")
         self.assertNotIn("quote_size",config["limit_limit_gtc"])
+
+    def test_structured_order_rejection_is_not_silently_returned(self):
+        ex=Exchange.__new__(Exchange);ex.client=RejectedOrderClient()
+        ticket={"ticket_id":"t1","product_id":"AAA-USDC","notional_usdc":25,"limit_price":1,
+                "target_price":1.3,"stop_price":.92}
+        product={"base_increment":"0.01","base_min_size":.01}
+        with self.assertRaisesRegex(CoinbaseOrderRejected,"INVALID_ORDER_CONFIGURATION"):
+            ex.submit_buy(ticket,product)

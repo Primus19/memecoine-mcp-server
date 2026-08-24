@@ -11,7 +11,7 @@ from starlette.responses import HTMLResponse,JSONResponse
 from .auth_config import OAUTH_CALLBACK_PATH, load_or_create_signing_key, oauth_callback_url, validate_public_base_url
 from .decision import build_recommendation,canonical_hash
 from .enrichment import enrich_with_coinbase
-from .exchange import Exchange
+from .exchange import CoinbaseOrderRejected,Exchange
 from .lifecycle import supervision_levels
 from .policy import OpportunityPolicy
 from .risk import TicketRejected,validate_ticket
@@ -142,8 +142,13 @@ def execute(ticket_id,recommendation_hash):
     live_quote=validate_live_execution(ticket,ex,product)
     preview=ex.preview_buy(ticket,product);store.event("ORDER_PREVIEWED",{"preview_sha256":hashlib.sha256(str(preview).encode()).hexdigest()},ticket_id)
     if not LIVE_ARMED:return {"status":"DRY_RUN_ONLY","ticket_id":ticket_id,"recommendation_hash":recommendation_hash,"live_quote":live_quote,"message":"No real order submitted"}
-    response=ex.submit_buy(ticket,product);oid=order_id(response)
-    if not oid:raise RuntimeError("Coinbase did not return an order id")
+    try:
+        response=ex.submit_buy(ticket,product);oid=order_id(response)
+        if not oid:raise CoinbaseOrderRejected("UNKNOWN: Coinbase did not return an order id")
+    except CoinbaseOrderRejected as exc:
+        store.mark_recommendation(ticket_id,"SUBMISSION_REJECTED")
+        store.event("ORDER_SUBMISSION_REJECTED",{"error":str(exc),"broker_response":exc.response},ticket_id)
+        raise
     store.add_position(ticket,oid);store.mark_recommendation(ticket_id,"SUBMITTED",order_id=oid);store.event("ORDER_SUBMITTED",{"order_id":oid,"product_id":ticket["product_id"],"notional_usdc":ticket["notional_usdc"],"recommendation_hash":recommendation_hash},ticket_id)
     final_state=wait_for_entry(ex,ticket,oid)
     return {"status":"ORDER_SUBMITTED","ticket_id":ticket_id,"order_id":oid,"live_quote":live_quote,"reconciliation":final_state}
@@ -234,7 +239,7 @@ async def rest_eligible_products(request):
 async def rest_auto_candidate(request):
     if not rest_authorized(request):return unauthorized()
     try:return JSONResponse(auto_process(await request.json()))
-    except (TicketRejected,ValueError,TypeError,KeyError) as exc:return JSONResponse({"error":"ticket_rejected","detail":str(exc)},status_code=422)
+    except (TicketRejected,CoinbaseOrderRejected,ValueError,TypeError,KeyError) as exc:return JSONResponse({"error":"ticket_rejected","detail":str(exc)},status_code=422)
     except Exception as exc:return JSONResponse({"error":str(exc)},status_code=500)
 
 @mcp.custom_route("/api/position-supervision",methods=["POST"])
