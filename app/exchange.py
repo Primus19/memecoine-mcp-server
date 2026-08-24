@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 from datetime import datetime
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
 from coinbase.rest import RESTClient
 
@@ -89,15 +89,26 @@ class Exchange:
         return products
 
     def buy_configuration(self, ticket: dict, product: dict) -> dict:
-        base_size = self.normalize_base_size(product, float(ticket["notional_usdc"])/float(ticket["limit_price"]))
+        limit_price = self.normalize_price(product, float(ticket["limit_price"]), rounding=ROUND_DOWN)
+        base_size = self.normalize_base_size(product, float(ticket["notional_usdc"]) / float(limit_price))
         if float(base_size) < float(product.get("base_min_size") or 0):
             raise RuntimeError("derived base size is below Coinbase minimum")
-        return {"limit_limit_gtc": {"base_size": base_size, "limit_price": str(ticket["limit_price"]), "post_only": False}}
+        return {"limit_limit_gtc": {"base_size": base_size, "limit_price": limit_price, "post_only": False}}
+
+    def attached_configuration(self, ticket: dict, product: dict) -> dict:
+        # Both bracket legs must obey the product quote increment. Round the
+        # profit target and protective stop upward so normalization never
+        # weakens either requested exit threshold for a long position.
+        return {"trigger_bracket_gtc": {
+            "limit_price": self.normalize_price(product, float(ticket["target_price"]), rounding=ROUND_UP),
+            "stop_trigger_price": self.normalize_price(product, float(ticket["stop_price"]), rounding=ROUND_UP),
+        }}
 
     def preview_buy(self, ticket: dict, product: dict):
         return self.client.preview_order(
             product_id=ticket["product_id"], side="BUY",
             order_configuration=self.buy_configuration(ticket, product),
+            attached_order_configuration=self.attached_configuration(ticket, product),
         )
 
     def execution_quote(self, product_id: str, quote_size: float, limit: int = 50) -> dict:
@@ -134,16 +145,32 @@ class Exchange:
             "visible_quote_filled": spent,
         }
 
+    def normalize_increment(self, value: float, increment: str, *, rounding=ROUND_DOWN) -> str:
+        raw = Decimal(str(value))
+        step = Decimal(str(increment))
+        if not raw.is_finite() or raw <= 0:
+            raise RuntimeError("Coinbase order value must be positive and finite")
+        if not step.is_finite() or step <= 0:
+            raise RuntimeError("Coinbase product increment must be positive and finite")
+        units = (raw / step).to_integral_value(rounding=rounding)
+        normalized = (units * step).quantize(step)
+        if normalized <= 0:
+            raise RuntimeError("Coinbase order value is below the product increment")
+        return format(normalized, "f")
+
     def normalize_base_size(self, product: dict, size: float) -> str:
         increment = str(product.get("base_increment") or "0.00000001")
-        value = Decimal(str(size)).quantize(Decimal(increment), rounding=ROUND_DOWN)
-        return format(value, "f")
+        return self.normalize_increment(size, increment, rounding=ROUND_DOWN)
+
+    def normalize_price(self, product: dict, price: float, *, rounding=ROUND_DOWN) -> str:
+        increment = str(product.get("quote_increment") or "0.00000001")
+        return self.normalize_increment(price, increment, rounding=rounding)
 
     def submit_buy(self, ticket: dict, product: dict) -> dict:
         response = self.client.create_order(
             client_order_id=ticket["ticket_id"], product_id=ticket["product_id"], side="BUY",
             order_configuration=self.buy_configuration(ticket, product),
-            attached_order_configuration={"trigger_bracket_gtc": {"limit_price": str(ticket["target_price"]), "stop_trigger_price": str(ticket["stop_price"])}}
+            attached_order_configuration=self.attached_configuration(ticket, product),
         )
         result = as_dict(response)
         success = as_dict(result.get("success_response"))
