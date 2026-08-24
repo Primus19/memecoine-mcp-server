@@ -216,11 +216,27 @@ def closed_trade_pnl(transactions: list[dict]) -> dict[str, float]:
     return values
 
 
-def recoverable_managed_trade(trade: dict, maximum_loss_usd: float) -> dict | None:
+def transaction_managed_intent_id(trade_id: str, transactions: list[dict]) -> str:
+    fills = [item for item in transactions if str(item.get("type", "")).upper() == "ORDER_FILL"
+             and str((item.get("tradeOpened") or {}).get("tradeID") or "") == trade_id]
+    for fill in fills:
+        order_id = str(fill.get("orderID") or "")
+        created = next((item for item in transactions
+                        if str(item.get("id") or "") == order_id
+                        and str(item.get("type", "")).upper() == "MARKET_ORDER"), {})
+        extensions = created.get("clientExtensions") or {}
+        if extensions.get("tag") == "primus-forex-v1" and extensions.get("id"):
+            return str(extensions["id"])
+    return ""
+
+
+def recoverable_managed_trade(trade: dict, maximum_loss_usd: float, transactions: list[dict] | None = None) -> dict | None:
     """Rebuild a ledger intent only for our tagged, broker-protected trade."""
     extensions = trade.get("clientExtensions") or {}
-    intent_id = str(extensions.get("id") or "")
-    if extensions.get("tag") != "primus-forex-v1" or not intent_id:
+    intent_id = str(extensions.get("id") or "") if extensions.get("tag") == "primus-forex-v1" else ""
+    if not intent_id and transactions:
+        intent_id = transaction_managed_intent_id(str(trade.get("id") or ""), transactions)
+    if not intent_id:
         return None
     stop_order, target_order = trade.get("stopLossOrder") or {}, trade.get("takeProfitOrder") or {}
     if not stop_order.get("price") or not target_order.get("price"):
@@ -309,7 +325,8 @@ class Executor:
         trades = self.adapter.open_trades()
         pending = self.adapter.pending_orders()
         prior_tx = self.ledger.setting("last_transaction_id")
-        transactions = self.adapter.transactions_since(prior_tx).get("transactions", []) if prior_tx else []
+        transactions = self.adapter.transactions_since(prior_tx).get("transactions", []) if prior_tx else \
+                       self.adapter.transactions_since("1").get("transactions", []) if trades else []
         if summary.get("last_transaction_id"):
             self.ledger.set_setting("last_transaction_id", summary["last_transaction_id"])
         self.ledger.event("BROKER_RECONCILIATION", {"summary": summary, "open_trades": trades,
@@ -325,7 +342,7 @@ class Executor:
                 trade_id = str(trade.get("id") or "")
                 if trade_id not in unexpected:
                     continue
-                recovered = recoverable_managed_trade(trade, self.max_risk)
+                recovered = recoverable_managed_trade(trade, self.max_risk, transactions)
                 if not recovered or self.ledger.has_intent(recovered["proposal_id"]):
                     continue
                 self.ledger.add_intent(recovered, "LIVE" if live_armed(self.adapter) else "PRACTICE", "OPEN")
