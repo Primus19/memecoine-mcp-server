@@ -273,7 +273,7 @@ class Executor:
         self.ledger = Ledger(path)
         base_policy = AssetPolicy.from_env()
         self.engine = ForexEngine(replace(
-            base_policy, minimum_score=float(os.getenv("FOREX_MIN_SCORE", "80"))))
+            base_policy, minimum_score=float(os.getenv("FOREX_MIN_SCORE", "75"))))
         self.max_risk = min(2.50, max(0.10, float(os.getenv("FOREX_MAX_RISK_USD", "2.50"))))
 
     def reconcile(self) -> dict:
@@ -420,12 +420,17 @@ class Executor:
         outcomes = []
         for snapshot in snapshots:
             score = round(self.engine.score(snapshot), 2)
+            alignment, alignment_points, proposed_side = self.engine.alignment(snapshot)
+            diagnostics = {"alignment": alignment, "alignment_points": alignment_points,
+                           "proposed_side": proposed_side}
             try:
                 outcomes.append({"symbol": snapshot.get("symbol"), "score": score,
-                                 "minimum_score": self.engine.policy.minimum_score, **self.process(snapshot)})
+                                 "minimum_score": self.engine.policy.minimum_score, **diagnostics,
+                                 **self.process(snapshot)})
             except Exception as exc:
                 outcomes.append({"symbol": snapshot.get("symbol"), "score": score,
                                  "minimum_score": self.engine.policy.minimum_score,
+                                 **diagnostics,
                                  "status": "REJECTED", "reason": str(exc)[:300]})
         self.ledger.event("SCAN", {"outcomes": outcomes, "paper_closes": closes})
         report = {"generated_at": utcnow(), "mode": "LIVE_ARMED" if live_armed(self.adapter) else
