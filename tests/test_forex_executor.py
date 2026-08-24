@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServer,
                                 BrokerError, Executor, closed_trade_pnl, live_armed, practice_armed, safe_quantity,
-                                validated_snapshots)
+                                recoverable_managed_trade, validated_snapshots)
 
 
 class Adapter:
@@ -28,6 +28,18 @@ class Adapter:
 
 
 class ForexExecutorTests(unittest.TestCase):
+    def test_only_tagged_and_protected_trade_can_be_recovered_after_deploy(self):
+        trade = {"id":"5", "instrument":"AUD_USD", "currentUnits":"-69", "price":"0.71429",
+                 "openTime":"2026-08-24T17:57:54Z",
+                 "clientExtensions":{"id":"intent-1", "tag":"primus-forex-v1"},
+                 "stopLossOrder":{"price":"0.71608"}, "takeProfitOrder":{"price":"0.71072"}}
+        proposal = recoverable_managed_trade(trade, .5)
+        self.assertEqual("intent-1", proposal["proposal_id"])
+        self.assertEqual("SELL", proposal["side"])
+        self.assertEqual(69, proposal["quantity"])
+        self.assertIsNone(recoverable_managed_trade({**trade, "clientExtensions":{"id":"intent-1", "tag":"external"}}, .5))
+        self.assertIsNone(recoverable_managed_trade({**trade, "stopLossOrder":{}}, .5))
+
     def test_feed_readiness_requires_nonempty_fresh_calendar_verified_snapshots(self):
         now = datetime.now(timezone.utc)
         valid = {"scanned_at": now.isoformat(),
