@@ -198,9 +198,12 @@ def parse_boj_html(body: str, year: int) -> list[dict]:
 def _fetch_official(name: str, now: datetime) -> tuple[dict, list[dict]]:
     currency, url = OFFICIAL_SOURCES[name]
     request = urllib.request.Request(url, headers={"Accept": "text/html,text/calendar", "User-Agent": "primus-economic-calendar/1.2"})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        body = response.read().decode("utf-8", "replace")
-        status = getattr(response, "status", 200)
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = response.read().decode("utf-8", "replace")
+            status = getattr(response, "status", 200)
+    except Exception as exc:
+        raise RuntimeError(f"official calendar source {name} failed: {exc}") from exc
     if status != 200 or not body.strip(): raise ValueError(f"{name} returned an empty or unsuccessful response")
     if name == "bls": events = parse_bls_ics(body)
     elif name == "federal_reserve": events = sum((parse_fomc_html(body, year) for year in {now.year, now.year + 1}), [])
