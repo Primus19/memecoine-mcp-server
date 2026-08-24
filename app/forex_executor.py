@@ -335,6 +335,8 @@ class Executor:
         return closes
 
     def scan(self) -> None:
+        if not 0 <= self.engine.policy.minimum_score <= 100:
+            raise BrokerError(f"ASSET_MIN_SCORE must be between 0 and 100; got {self.engine.policy.minimum_score:g}")
         reconciliation = self.reconcile()
         payload = fetch_json(os.environ["MULTI_ASSET_FEED_URL"])
         snapshots = validated_snapshots(payload)
