@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServer,
-                                closed_trade_pnl, live_armed, practice_armed, safe_quantity,
+                                BrokerError, Executor, closed_trade_pnl, live_armed, practice_armed, safe_quantity,
                                 validated_snapshots)
 
 
@@ -137,6 +137,12 @@ class ForexExecutorTests(unittest.TestCase):
             ledger.add_intent(proposal, "LIVE", "SUBMITTING")
             ledger.update_intent("p1", "CANCELLED")
             self.assertEqual(0, ledger.open_count())
+
+    def test_impossible_score_threshold_fails_readiness(self):
+        executor = object.__new__(Executor)
+        executor.engine = type("Engine", (), {"policy": type("Policy", (), {"minimum_score": 101.0})()})()
+        with self.assertRaisesRegex(BrokerError, "between 0 and 100"):
+            executor.scan()
 
 
 if __name__ == "__main__": unittest.main()
