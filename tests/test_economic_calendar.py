@@ -1,15 +1,41 @@
 import unittest
 import os
+import json
+import threading
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from app.economic_calendar import (build_request, normalize, parse_bls_ics,
+                                   Handler, LOCK, STATE, ThreadingHTTPServer,
                                    parse_boe_html, parse_boj_html,
                                    parse_ecb_html, parse_fomc_html,
                                    scan_official_composite)
 
 
 class CalendarTests(unittest.TestCase):
+    def test_health_is_liveness_even_before_calendar_is_ready(self):
+        with LOCK:
+            original = dict(STATE)
+            STATE.update(ok=False, observed_at=None, error="upstream unavailable")
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.server_port}/health", timeout=2) as response:
+                payload = json.loads(response.read())
+            self.assertEqual(200, response.status)
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["calendar_ready"])
+            self.assertEqual("forex-economic-calendar", payload["service"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            with LOCK:
+                STATE.clear()
+                STATE.update(original)
+
     def test_normalizes_only_timestamped_high_impact_currency_events(self):
         future=(datetime.now(timezone.utc)+timedelta(minutes=90)).isoformat()
         result=normalize({"events":[{"currency":"USD","impact":"high","time":future,"title":"CPI"},
