@@ -150,7 +150,7 @@ def execute(ticket_id,recommendation_hash):
         response=ex.submit_buy(ticket,product);oid=order_id(response)
         if not oid:raise CoinbaseOrderRejected("UNKNOWN: Coinbase did not return an order id")
     except CoinbaseOrderRejected as exc:
-        store.mark_recommendation(ticket_id,"SUBMISSION_REJECTED")
+        store.mark_recommendation(ticket_id,"SUBMISSION_REJECTED",rejection_reason=str(exc)[:500])
         store.event("ORDER_SUBMISSION_REJECTED",{"error":str(exc),"broker_response":exc.response},ticket_id)
         raise
     store.add_position(ticket,oid);store.mark_recommendation(ticket_id,"SUBMITTED",order_id=oid);store.event("ORDER_SUBMITTED",{"order_id":oid,"product_id":ticket["product_id"],"notional_usdc":ticket["notional_usdc"],"recommendation_hash":recommendation_hash},ticket_id)
