@@ -95,6 +95,13 @@ class Ledger:
     def open_count(self) -> int:
         return int(self.db.execute("SELECT COUNT(*) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTED','OPEN')").fetchone()[0])
 
+    def open_risk(self) -> float:
+        row = self.db.execute("SELECT COALESCE(SUM(maximum_loss_usd),0) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTED','OPEN')").fetchone()
+        return float(row[0] or 0)
+
+    def open_symbols(self) -> list[str]:
+        return [str(row[0]) for row in self.db.execute("SELECT symbol FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTED','OPEN')").fetchall()]
+
     def has_intent(self, intent_id: str) -> bool:
         return self.db.execute("SELECT 1 FROM intents WHERE id=?", (intent_id,)).fetchone() is not None
 
@@ -283,7 +290,8 @@ def practice_armed(adapter: OandaAdapter) -> bool:
                 os.getenv("FOREX_PRACTICE_ACK") == "I_ACCEPT_PRACTICE_ORDER_EXECUTION"))
 
 
-def safe_quantity(adapter: OandaAdapter, proposal: dict, risk_usd: float) -> float:
+def safe_quantity(adapter: OandaAdapter, proposal: dict, risk_usd: float,
+                  margin_budget_usd: float | None = None) -> float:
     quote = adapter.price(proposal["symbol"])
     if quote.get("status") != "tradeable":
         raise MultiAssetRejected("broker reports instrument non-tradeable")
@@ -302,7 +310,8 @@ def safe_quantity(adapter: OandaAdapter, proposal: dict, risk_usd: float) -> flo
     margin_rate = float(metadata.get("marginRate") or 1)
     unit_notional_home = mid * factor
     notional_cap = max(1.0, float(os.getenv("FOREX_MAX_NOTIONAL_USD", "50")))
-    margin_cap = max(0.50, float(os.getenv("FOREX_MAX_MARGIN_USED_USD", "5")))
+    configured_margin_cap = max(0.50, float(os.getenv("FOREX_MAX_MARGIN_USED_USD", "5")))
+    margin_cap = configured_margin_cap if margin_budget_usd is None else max(0.0, min(configured_margin_cap, margin_budget_usd))
     units = min(units, int(notional_cap / unit_notional_home), int(margin_cap / (unit_notional_home * margin_rate)))
     if units < 1:
         raise MultiAssetRejected("risk cap cannot support minimum unit")
@@ -320,6 +329,14 @@ class Executor:
             base_policy, minimum_score=float(os.getenv("FOREX_MIN_SCORE", "75"))))
         self.max_risk = min(2.50, max(0.10, float(os.getenv("FOREX_MAX_RISK_USD", "2.50"))))
 
+    @staticmethod
+    def max_positions() -> int:
+        return max(1, min(2, int(os.getenv("FOREX_MAX_OPEN_POSITIONS", "2"))))
+
+    @staticmethod
+    def currencies(symbol: str) -> set[str]:
+        return {part for part in str(symbol).upper().split("_") if part}
+
     def reconcile(self) -> dict:
         summary = self.adapter.preflight()
         trades = self.adapter.open_trades()
@@ -331,7 +348,7 @@ class Executor:
             self.ledger.set_setting("last_transaction_id", summary["last_transaction_id"])
         self.ledger.event("BROKER_RECONCILIATION", {"summary": summary, "open_trades": trades,
                                                      "pending_orders": pending, "transactions": transactions})
-        if len(trades) > int(os.getenv("FOREX_MAX_OPEN_POSITIONS", "1")):
+        if len(trades) > self.max_positions():
             raise BrokerError("broker position count exceeds limit")
         if live_armed(self.adapter) or practice_armed(self.adapter):
             broker_positions = self.ledger.broker_positions()
@@ -397,24 +414,37 @@ class Executor:
         mode = "LIVE" if live_armed(self.adapter) else "PRACTICE" if practice_armed(self.adapter) else "PAPER_ONLY"
         if mode in {"LIVE", "PRACTICE"} and not calendar_ok:
             raise MultiAssetRejected("verified economic calendar evidence required for broker execution")
-        if self.ledger.open_count() >= int(os.getenv("FOREX_MAX_OPEN_POSITIONS", "1")):
+        if self.ledger.open_count() >= self.max_positions():
             raise MultiAssetRejected("position limit reached")
+        overlaps = [symbol for symbol in self.ledger.open_symbols()
+                    if self.currencies(symbol) & self.currencies(str(proposal["symbol"]))]
+        if overlaps:
+            raise MultiAssetRejected("currency-overlap guard active")
         if self.ledger.symbol_in_cooldown(str(proposal["symbol"]), int(os.getenv("FOREX_SYMBOL_COOLDOWN_SECONDS", "3600"))):
             raise MultiAssetRejected("symbol cooldown active")
         proposal["maximum_loss_usd"] = self.max_risk
-        proposal["quantity"] = safe_quantity(self.adapter, proposal, self.max_risk)
+        configured_portfolio_cap = max(self.max_risk, float(os.getenv("FOREX_MAX_COMBINED_RISK_USD", "1.00")))
+        portfolio_risk_cap = max(self.max_risk, min(1.0, configured_portfolio_cap))
+        if self.ledger.open_risk() + self.max_risk > portfolio_risk_cap + 1e-9:
+            raise MultiAssetRejected("combined portfolio risk cap reached")
         intent_id = proposal["proposal_id"]
         if self.ledger.has_intent(intent_id):
             return {"status": "DUPLICATE_SUPPRESSED", "id": intent_id}
         if mode == "PAPER_ONLY":
+            proposal["quantity"] = safe_quantity(self.adapter, proposal, self.max_risk)
             self.ledger.add_intent(proposal, "PAPER_ONLY", "PAPER_OPEN")
             self.ledger.event("PAPER_FILL", proposal)
             return {"status": "PAPER_FILL", "id": intent_id}
         preflight = self.adapter.preflight()
         if preflight["balance"] <= 0 or preflight["margin_available"] <= 0:
             raise MultiAssetRejected("live account has no available capital")
-        if preflight["open_trade_count"] >= int(os.getenv("FOREX_MAX_OPEN_POSITIONS", "1")):
+        if preflight["open_trade_count"] >= self.max_positions():
             raise MultiAssetRejected("broker position limit reached")
+        margin_cap = float(os.getenv("FOREX_MAX_MARGIN_USED_USD", "5"))
+        margin_remaining = margin_cap - float(preflight.get("margin_used") or 0)
+        if margin_remaining <= 0:
+            raise MultiAssetRejected("combined margin cap reached")
+        proposal["quantity"] = safe_quantity(self.adapter, proposal, self.max_risk, margin_remaining)
         self.ledger.add_intent(proposal, mode, "SUBMITTING")
         response = self.adapter.create_order(proposal, client_order_id=intent_id.replace("-", "")[:32])
         rejected = response.get("orderRejectTransaction")
