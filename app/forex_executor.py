@@ -28,6 +28,24 @@ def utcnow() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def validated_snapshots(payload: dict, now: datetime | None = None) -> list[dict]:
+    snapshots = payload.get("snapshots", [])
+    if not isinstance(snapshots, list) or not snapshots:
+        raise MultiAssetRejected("market feed returned no tradable snapshots")
+    try:
+        scanned_at = datetime.fromisoformat(str(payload.get("scanned_at", "")).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise MultiAssetRejected("market feed scan timestamp is missing or invalid") from exc
+    if scanned_at.tzinfo is None:
+        scanned_at = scanned_at.replace(tzinfo=UTC)
+    max_age = max(30, int(os.getenv("FOREX_MARKET_FEED_MAX_AGE_SECONDS", "180")))
+    if ((now or datetime.now(UTC)) - scanned_at.astimezone(UTC)).total_seconds() > max_age:
+        raise MultiAssetRejected("market feed snapshot is stale")
+    if any(item.get("calendar_verified") is not True for item in snapshots):
+        raise MultiAssetRejected("market feed lacks verified economic calendar evidence")
+    return snapshots
+
+
 class Ledger:
     def __init__(self, path: str):
         self.db = sqlite3.connect(path, check_same_thread=False)
@@ -278,7 +296,7 @@ class Executor:
     def scan(self) -> None:
         reconciliation = self.reconcile()
         payload = fetch_json(os.environ["MULTI_ASSET_FEED_URL"])
-        snapshots = payload.get("snapshots", [])
+        snapshots = validated_snapshots(payload)
         closes = self.supervise_paper(snapshots)
         outcomes = []
         for snapshot in snapshots:
