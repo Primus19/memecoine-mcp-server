@@ -278,15 +278,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path not in {"/health", "/events"}: self.send_error(404); return
         with LOCK: value = dict(STATE)
-        body = json.dumps(value if self.path == "/events" else {"ok":value["ok"],"observed_at":value["observed_at"],"error":value["error"]}).encode()
-        self.send_response(200 if value["ok"] else 503); self.send_header("Content-Type","application/json")
+        if self.path == "/health":
+            body = json.dumps({"ok": True, "service": "forex-economic-calendar",
+                               "calendar_ready": value["ok"], "observed_at": value["observed_at"],
+                               "error": value["error"]}).encode()
+        else:
+            body = json.dumps(value).encode()
+        self.send_response(200 if self.path == "/health" or value["ok"] else 503); self.send_header("Content-Type","application/json")
         self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
     def log_message(self,*_): return
 
 
 def main() -> None:
     if os.getenv("ECONOMIC_CALENDAR_ENABLED","false").lower() != "true": raise SystemExit("ECONOMIC_CALENDAR_ENABLED is not true")
-    threading.Thread(target=ThreadingHTTPServer(("0.0.0.0",int(os.getenv("PORT","8080"))),Handler).serve_forever,daemon=True).start()
+    port = int(os.environ.get("PORT", "8080"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(json.dumps({"event": "ECONOMIC_CALENDAR_HTTP_READY", "host": "0.0.0.0", "port": port}), flush=True)
     interval=max(60,int(os.getenv("ECONOMIC_CALENDAR_INTERVAL_SECONDS","300")))
     while True:
         try: scan(); print(json.dumps({"event":"ECONOMIC_CALENDAR_SCAN","ok":True,"event_count":len(STATE["events"])}),flush=True)

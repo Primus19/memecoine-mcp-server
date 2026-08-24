@@ -265,6 +265,12 @@ feed. Configure `ECONOMIC_CALENDAR_UPSTREAM_URL`, optional
 `ECONOMIC_CALENDAR_UPSTREAM_TOKEN`, and point the market feed's
 `ECONOMIC_CALENDAR_URL` to this service's `/events` endpoint.
 
+For the Railway service named `forex-economic-calendar`, set its config file
+path to `/railway.economic-calendar.json`. The repository then owns the custom
+start command, `/health` healthcheck, 120-second timeout, dedicated Dockerfile,
+and exposed port 8080. The process binds to `0.0.0.0` and reads Railway's
+`PORT` variable, defaulting to 8080 for local runs.
+
 The recommended no-subscription mode is the fail-closed official composite. It
 fetches the BLS calendar plus Federal Reserve, ECB, Bank of England and Bank of
 Japan policy schedules concurrently, normalizes local release times to UTC,
@@ -281,9 +287,11 @@ ECONOMIC_CALENDAR_LOOKAHEAD_DAYS=7
 ECONOMIC_CALENDAR_INTERVAL_SECONDS=300
 ```
 
-No API key is required. If any required official source is unreachable or its
-format is no longer recognized, `/health` and `/events` fail closed rather than
-silently treating the week as event-free.
+No API key is required. `/health` is a process-liveness endpoint and always
+returns HTTP 200 while the server is running; its `calendar_ready` field shows
+whether verified calendar data is available. If any required official source
+is unreachable or its format is no longer recognized, `/events` returns HTTP
+503 rather than silently treating the week as event-free.
 
 The first-class Trading Economics adapter remains available as an optional
 paid fallback. It requests high-importance events for a bounded set of
