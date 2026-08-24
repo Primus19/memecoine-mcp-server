@@ -1,0 +1,32 @@
+name: refresh official calendar
+
+on:
+  schedule:
+    - cron: "17 */12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-official-calendar
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m scripts.update_official_calendar_snapshot
+      - run: python -m unittest tests.test_economic_calendar -v
+      - name: Commit validated snapshot
+        run: |
+          if git diff --quiet -- app/official_calendar_snapshot.json; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/official_calendar_snapshot.json
+          git commit -m "Refresh official economic calendar snapshot"
+          git push
