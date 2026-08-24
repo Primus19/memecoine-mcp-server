@@ -216,6 +216,34 @@ def closed_trade_pnl(transactions: list[dict]) -> dict[str, float]:
     return values
 
 
+def recoverable_managed_trade(trade: dict, maximum_loss_usd: float) -> dict | None:
+    """Rebuild a ledger intent only for our tagged, broker-protected trade."""
+    extensions = trade.get("clientExtensions") or {}
+    intent_id = str(extensions.get("id") or "")
+    if extensions.get("tag") != "primus-forex-v1" or not intent_id:
+        return None
+    stop_order, target_order = trade.get("stopLossOrder") or {}, trade.get("takeProfitOrder") or {}
+    if not stop_order.get("price") or not target_order.get("price"):
+        return None
+    units = float(trade.get("currentUnits") or 0)
+    entry = float(trade.get("price") or 0)
+    if not units or entry <= 0:
+        return None
+    return {
+        "proposal_id": intent_id,
+        "expires_at": str(trade.get("openTime") or utcnow()),
+        "symbol": str(trade.get("instrument") or ""),
+        "side": "BUY" if units > 0 else "SELL",
+        "reference_price": entry,
+        "quantity": abs(units),
+        "stop_price": float(stop_order["price"]),
+        "target_price": float(target_order["price"]),
+        "maximum_loss_usd": maximum_loss_usd,
+        "score": None,
+        "model_version": "FOREX_TREND_1.1",
+    }
+
+
 def fetch_json(url: str) -> dict:
     headers = {"Accept": "application/json", "User-Agent": "primus-forex-executor/1.0"}
     token = os.getenv("MULTI_ASSET_FEED_BEARER_TOKEN", "").strip()
@@ -293,6 +321,19 @@ class Executor:
             expected = {str(item.get("broker_trade_id") or "") for item in broker_positions if item.get("broker_trade_id")}
             actual = {str(item.get("id") or "") for item in trades}
             unexpected = actual - expected
+            for trade in trades:
+                trade_id = str(trade.get("id") or "")
+                if trade_id not in unexpected:
+                    continue
+                recovered = recoverable_managed_trade(trade, self.max_risk)
+                if not recovered or self.ledger.has_intent(recovered["proposal_id"]):
+                    continue
+                self.ledger.add_intent(recovered, "LIVE" if live_armed(self.adapter) else "PRACTICE", "OPEN")
+                self.ledger.update_intent(recovered["proposal_id"], "OPEN", trade_id=trade_id)
+                self.ledger.event("BROKER_TRADE_RECOVERED", {"intent_id": recovered["proposal_id"],
+                                  "trade_id": trade_id, "symbol": recovered["symbol"]})
+                unexpected.remove(trade_id)
+            broker_positions = self.ledger.broker_positions()
             if unexpected: raise BrokerError("unexpected broker trade detected; entries paused")
             self.ledger.update_excursions(trades)
             pnl_by_trade = closed_trade_pnl(transactions)
