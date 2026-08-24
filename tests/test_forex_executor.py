@@ -46,6 +46,25 @@ class ForexExecutorTests(unittest.TestCase):
             with LOCK:
                 STATE.clear(); STATE.update(original)
 
+    def test_report_routes_disable_caching_and_raw_broker_data_is_not_required(self):
+        with LOCK:
+            original = dict(STATE)
+            STATE.update(ok=True, mode="PRACTICE_ARMED", last_scan="2026-08-24T03:00:00+00:00",
+                         last_error="", open_positions=0, report={"broker": {"nav": 1000}, "snapshots": []})
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/report.json", timeout=2) as response:
+                payload = json.loads(response.read())
+                self.assertEqual("no-store", response.headers["Cache-Control"])
+            self.assertNotIn("transactions", payload)
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/report", timeout=2) as response:
+                self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+        finally:
+            server.shutdown(); server.server_close()
+            with LOCK:
+                STATE.clear(); STATE.update(original)
+
     def test_live_requires_all_four_independent_gates(self):
         values = {
             "FOREX_LIVE_ENABLED": "true",
