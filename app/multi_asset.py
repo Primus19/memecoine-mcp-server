@@ -136,19 +136,27 @@ class StrategyEngine:
 class ForexEngine(StrategyEngine):
     asset_class = "FOREX"
 
+    @staticmethod
+    def score(snapshot: dict[str, Any]) -> float:
+        one = float(snapshot.get("change_1h_pct") or 0)
+        day = float(snapshot.get("change_24h_pct") or 0)
+        trend = float(snapshot.get("trend_strength") or 0)
+        liquidity = float(snapshot.get("liquidity_score") or 0)
+        return min(100.0, 25 + min(25, abs(trend) * 25) + min(20, liquidity * 20)
+                   + (15 if one * day > 0 else 0)
+                   + (15 if snapshot.get("session_liquid") is True else 0))
+
     def evaluate(self, snapshot: dict[str, Any]) -> Proposal:
         failures = self.common_checks(snapshot)
         if snapshot.get("economic_event_within_minutes", 999) < 30:
             failures.append("high-impact economic event too close")
         one = float(snapshot.get("change_1h_pct") or 0)
         day = float(snapshot.get("change_24h_pct") or 0)
-        trend = float(snapshot.get("trend_strength") or 0)
-        liquidity = float(snapshot.get("liquidity_score") or 0)
-        score = min(100.0, 25 + min(25, abs(trend) * 25) + min(20, liquidity * 20) + (15 if one * day > 0 else 0) + (15 if snapshot.get("session_liquid") is True else 0))
+        score = self.score(snapshot)
         if one == 0 or day == 0 or one * day <= 0:
             failures.append("1h and 24h direction not aligned")
         if score < self.policy.minimum_score:
-            failures.append("score below policy minimum")
+            failures.append(f"score {score:.2f} below policy minimum {self.policy.minimum_score:.2f}")
         if failures:
             raise MultiAssetRejected("; ".join(failures))
         return self.proposal(snapshot, strategy="FOREX_TREND", score=score, side="BUY" if one > 0 else "SELL")
