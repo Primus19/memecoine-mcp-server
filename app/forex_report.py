@@ -27,6 +27,7 @@ def render_forex_report(report: dict) -> str:
     outcomes = report.get("outcomes") or []
     intents = report.get("intents") or []
     events = report.get("events") or []
+    review = report.get("model_review") or {}
     balance = float(broker.get("balance") or 0)
     nav = float(broker.get("nav") or balance)
     baseline = float(report.get("capital_baseline_nav") or report.get("baseline_nav") or nav)
@@ -79,5 +80,6 @@ def render_forex_report(report: dict) -> str:
 <div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px;overflow-x:auto"><h2>Latest decisions</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th>Pair</th><th>Action</th><th>Score / minimum</th><th>Reason or signal ID</th></tr>{rows(outcome_rows, [("symbol","Pair"),("status","Action"),("score","Score"),("reason","Reason")])}</table></div>
 <div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px;overflow-x:auto"><h2>Auditable positions and intents</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th>Created</th><th>Pair</th><th>Side</th><th>Mode</th><th>Status</th><th>Max loss</th><th>Realized P&amp;L</th></tr>{rows(intent_rows, [("created","Created"),("symbol","Pair"),("side","Side"),("mode","Mode"),("status","Status"),("risk","Max loss"),("pnl","P&amp;L")])}</table></div>
 <div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px;overflow-x:auto"><h2>Append-only audit trail</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th>Time</th><th>Event</th><th>Record hash</th></tr>{rows(event_rows, [("time","Time"),("type","Event"),("hash","Hash")])}</table></div>
+<div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px"><h2>Model quality and guarded improvement</h2><p><b>Version:</b> {html.escape(str(review.get("model_version") or "FOREX_TREND_1.1"))}. <b>Closed sample:</b> {int(review.get("sample_size") or 0)}. <b>Wins/losses:</b> {int(review.get("wins") or 0)}/{int(review.get("losses") or 0)}. <b>Net expectancy:</b> {_money(review.get("net_expectancy_usd"))}. <b>Profit factor:</b> {html.escape(str(review.get("profit_factor") if review.get("profit_factor") is not None else "N/A"))}.</p><p><b>Status:</b> {html.escape(str(review.get("status") or "MODEL LOCKED - COLLECTING EVIDENCE"))}. Parameters are never changed from a handful of trades. A challenger becomes eligible only after the documented sample and prospective-performance gates pass.</p></div>
 <div style="background:#fffbeb;border:1px solid #f59e0b;border-radius:12px;padding:16px"><b>Risk notice</b><p style="margin-bottom:0">No strategy can guarantee profit. Live Forex trading can lose money rapidly. Broker balances, fills, stops, financing charges and open trades must be independently verified.</p></div>
 </div></body></html>'''
