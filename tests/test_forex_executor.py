@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServer,
-                                live_armed, practice_armed, safe_quantity)
+                                live_armed, practice_armed, safe_quantity,
+                                validated_snapshots)
 
 
 class Adapter:
@@ -27,6 +28,20 @@ class Adapter:
 
 
 class ForexExecutorTests(unittest.TestCase):
+    def test_feed_readiness_requires_nonempty_fresh_calendar_verified_snapshots(self):
+        now = datetime.now(timezone.utc)
+        valid = {"scanned_at": now.isoformat(),
+                 "snapshots": [{"symbol": "EUR_USD", "calendar_verified": True}]}
+        self.assertEqual("EUR_USD", validated_snapshots(valid, now)[0]["symbol"])
+        with self.assertRaisesRegex(Exception, "no tradable snapshots"):
+            validated_snapshots({"scanned_at": now.isoformat(), "snapshots": []}, now)
+        stale = dict(valid, scanned_at="2020-01-01T00:00:00+00:00")
+        with self.assertRaisesRegex(Exception, "stale"):
+            validated_snapshots(stale, now)
+        unverified = dict(valid, snapshots=[{"symbol": "EUR_USD", "calendar_verified": False}])
+        with self.assertRaisesRegex(Exception, "verified economic calendar"):
+            validated_snapshots(unverified, now)
+
     def test_health_is_liveness_when_executor_is_not_ready(self):
         with LOCK:
             original = dict(STATE)
