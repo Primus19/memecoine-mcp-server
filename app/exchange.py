@@ -7,6 +7,14 @@ from decimal import Decimal, ROUND_DOWN
 from coinbase.rest import RESTClient
 
 
+class CoinbaseOrderRejected(RuntimeError):
+    """Coinbase returned a structured rejection instead of an order id."""
+
+    def __init__(self, detail: str, *, response: dict | None = None):
+        super().__init__(detail)
+        self.response = response or {}
+
+
 def as_dict(value: Any) -> dict:
     if value is None:
         return {}
@@ -137,7 +145,17 @@ class Exchange:
             order_configuration=self.buy_configuration(ticket, product),
             attached_order_configuration={"trigger_bracket_gtc": {"limit_price": str(ticket["target_price"]), "stop_trigger_price": str(ticket["stop_price"])}}
         )
-        return as_dict(response)
+        result = as_dict(response)
+        success = as_dict(result.get("success_response"))
+        order_id = str(success.get("order_id") or result.get("order_id") or "").strip()
+        if order_id:
+            return result
+        error = as_dict(result.get("error_response"))
+        code = str(error.get("error") or error.get("error_code") or "UNKNOWN")
+        message = str(error.get("message") or error.get("error_details") or "Coinbase returned no order id")
+        # Preserve the useful broker diagnosis without leaking the whole raw
+        # response into logs or reports.
+        raise CoinbaseOrderRejected(f"{code}: {message}", response={"error": code, "message": message})
 
     def get_order(self, order_id: str) -> dict:
         response = self.client.get_order(order_id)
