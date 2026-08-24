@@ -1,6 +1,6 @@
 import unittest
 
-from app.lifecycle import supervision_levels
+from app.lifecycle import profit_protection_challenger,supervision_levels
 
 
 class LifecycleTests(unittest.TestCase):
@@ -25,6 +25,20 @@ class LifecycleTests(unittest.TestCase):
     def test_falling_regime_is_immediate_exit(self):
         result=supervision_levels(self.ticket,entry=100,mark=105,high_water=110,regime="FALLING")
         self.assertEqual("FALLING_REGIME",result["exit_reason"])
+
+    def test_profit_protection_challenger_is_shadow_only_and_locks_break_even(self):
+        result=profit_protection_challenger(self.ticket,entry=100,mark=102,high_water=104)
+        self.assertTrue(result["shadow_only"])
+        self.assertTrue(result["break_even_active"])
+        self.assertFalse(result["trail_active"])
+        self.assertEqual(100,result["effective_stop_price"])
+        self.assertFalse(result["would_exit"])
+
+    def test_profit_protection_challenger_trails_after_five_percent(self):
+        result=profit_protection_challenger(self.ticket,entry=100,mark=100.7,high_water=105)
+        self.assertTrue(result["trail_active"])
+        self.assertAlmostEqual(100.8,result["effective_stop_price"])
+        self.assertTrue(result["would_exit"])
 
 
 if __name__=="__main__":unittest.main()
