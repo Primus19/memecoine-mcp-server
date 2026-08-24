@@ -98,7 +98,8 @@ def main():
     if os.getenv("MULTI_ASSET_FEED_ENABLED", "false").lower() != "true": raise SystemExit("MULTI_ASSET_FEED_ENABLED is not true")
     threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler).serve_forever, daemon=True).start()
     interval = max(30, int(os.getenv("MULTI_ASSET_FEED_INTERVAL_SECONDS", "60")))
-    symbols = [s.strip().upper() for s in os.getenv("FOREX_SYMBOLS", "EUR_USD,GBP_USD,USD_JPY,AUD_USD,USD_CAD").split(",") if s.strip()]
+    default_symbols = "EUR_USD,GBP_USD,USD_JPY,AUD_USD,USD_CAD,USD_CHF,NZD_USD,EUR_JPY,GBP_JPY,EUR_GBP"
+    symbols = [s.strip().upper() for s in os.getenv("FOREX_SYMBOLS", default_symbols).split(",") if s.strip()]
     while True:
         try:
             adapter = OandaAdapter()
