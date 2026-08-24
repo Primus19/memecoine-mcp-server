@@ -227,12 +227,16 @@ FOREX_LEDGER_PATH=/app/data/forex.sqlite3
 MULTI_ASSET_FEED_URL=https://multi-asset-market-feed-production.up.railway.app/snapshots
 FOREX_MIN_SCORE=75
 FOREX_MAX_RISK_USD=2.50
-FOREX_MAX_OPEN_POSITIONS=1
+FOREX_MAX_OPEN_POSITIONS=2
 FOREX_DAILY_LOSS_LIMIT_USD=2.50
 FOREX_MAX_NOTIONAL_USD=50.00
 FOREX_MAX_MARGIN_USED_USD=5.00
 FOREX_MAX_ENTRY_DRIFT_BPS=15
 ```
+
+The executor hard-caps this setting at two positions. A second position is
+accepted only when it shares no currency with an existing position and the
+combined planned loss and margin remain within their account-level limits.
 
 Use `/railway.forex-executor.json` as the custom Railway config path for both
 Forex executor services. `/health` is process liveness and remains HTTP 200
@@ -253,6 +257,31 @@ trade is reviewed net of financing, with win rate, expectancy, profit factor,
 maximum favorable/adverse excursion, profit capture and symbol breakdowns.
 The champion remains locked for at least 30 closed trades. Any later change
 must be evaluated as a prospective challenger and cannot loosen risk controls.
+
+## Emerging meme-coin tier
+
+The established meme-coin tier remains unchanged at a minimum $25 million
+market cap, $5 million 24-hour volume and model score 78. An additional
+emerging tier can consider lower-volume markets without giving them the same
+capital allocation:
+
+```text
+LIVE_EMERGING_MEME_ENABLED=true
+LIVE_EMERGING_MIN_SCORE=84
+LIVE_EMERGING_MIN_MARKET_CAP_USD=10000000
+LIVE_EMERGING_MIN_VOLUME_24H_USD=1000000
+LIVE_EMERGING_MAX_SPREAD_BPS=30
+LIVE_EMERGING_MAX_SLIPPAGE_BPS=30
+PILOT_EMERGING_NOTIONAL_USDC=5.00
+PILOT_EMERGING_MAX_LOSS_USDC=0.25
+```
+
+Emerging candidates must still pass identity, safety, catalyst, turnover,
+momentum, regime and execution-quality gates. Their order size is fixed at $5,
+planned loss is capped at $0.25 and the model threshold is higher than the
+established tier. Rejected candidates are retained as shadow observations so
+future threshold changes can be evaluated against outcomes rather than trade
+frequency alone.
 
 Live mode additionally requires all four values below plus a current verified
 economic-calendar response. Missing or inconsistent values fail closed:
