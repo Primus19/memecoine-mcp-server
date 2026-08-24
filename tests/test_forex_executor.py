@@ -1,10 +1,14 @@
 import os
+import json
+import threading
+import urllib.request
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from app.forex_executor import Ledger, live_armed, practice_armed, safe_quantity
+from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServer,
+                                live_armed, practice_armed, safe_quantity)
 
 
 class Adapter:
@@ -23,6 +27,25 @@ class Adapter:
 
 
 class ForexExecutorTests(unittest.TestCase):
+    def test_health_is_liveness_when_executor_is_not_ready(self):
+        with LOCK:
+            original = dict(STATE)
+            STATE.update(ok=False, mode="PRACTICE_ARMED", last_scan="", last_error="feed unavailable", open_positions=0)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/health", timeout=2) as response:
+                payload = json.loads(response.read())
+            self.assertEqual(200, response.status)
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["executor_ready"])
+            self.assertEqual("PRACTICE_ARMED", payload["mode"])
+        finally:
+            server.shutdown(); server.server_close()
+            with LOCK:
+                STATE.clear(); STATE.update(original)
+
     def test_live_requires_all_four_independent_gates(self):
         values = {
             "FOREX_LIVE_ENABLED": "true",

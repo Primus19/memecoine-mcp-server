@@ -20,15 +20,20 @@ class BrokerAdapterTests(unittest.TestCase):
 
     @patch("app.broker_adapters.request_json")
     def test_oanda_order_has_attached_protection_and_client_id(self, request):
-        request.return_value = {"orderCreateTransaction": {"id": "11"}}
+        request.side_effect = [
+            {"instruments": [{"name": "EUR_USD", "displayPrecision": 5}]},
+            {"orderCreateTransaction": {"id": "11"}},
+        ]
         with patch.dict(os.environ, {"OANDA_API_TOKEN": "x", "OANDA_ACCOUNT_ID": "101-001-123-001"}):
             adapter = OandaAdapter()
             adapter.create_order({"quantity": 100, "side": "BUY", "symbol": "EUR_USD",
+                                  "reference_price": 1.10,
                                   "stop_price": 1.09, "target_price": 1.12}, client_order_id="intent123")
         payload = request.call_args.kwargs["payload"]["order"]
         self.assertEqual("intent123", payload["clientExtensions"]["id"])
         self.assertEqual("1.09", payload["stopLossOnFill"]["price"])
         self.assertEqual("1.12", payload["takeProfitOnFill"]["price"])
+        self.assertEqual("1.10165", payload["priceBound"])
 
     def test_alpaca_rejects_undefined_risk_option(self):
         with patch.dict(os.environ, {"ALPACA_API_KEY": "x", "ALPACA_API_SECRET": "y"}):

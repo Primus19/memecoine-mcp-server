@@ -96,7 +96,11 @@ class Ledger:
 
 
 def fetch_json(url: str) -> dict:
-    with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "primus-forex-executor/1.0"}), timeout=20) as response:
+    headers = {"Accept": "application/json", "User-Agent": "primus-forex-executor/1.0"}
+    token = os.getenv("MULTI_ASSET_FEED_BEARER_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as response:
         return json.loads(response.read().decode())
 
 
@@ -280,8 +284,17 @@ class Handler(BaseHTTPRequestHandler):
         if self.path not in {"/health", "/status"}:
             self.send_error(404); return
         with LOCK:
-            body = json.dumps(STATE).encode()
-        self.send_response(200 if STATE["ok"] else 503)
+            state = dict(STATE)
+        if self.path == "/health":
+            payload = {"ok": True, "service": "forex-executor", "mode": state["mode"],
+                       "executor_ready": state["ok"], "last_scan": state["last_scan"],
+                       "last_error": state["last_error"], "open_positions": state["open_positions"]}
+            status = 200
+        else:
+            payload = state
+            status = 200 if state["ok"] else 503
+        body = json.dumps(payload).encode()
+        self.send_response(status)
         self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body)))
         self.end_headers(); self.wfile.write(body)
     def log_message(self, *_): return
@@ -293,7 +306,11 @@ def main() -> None:
     executor = Executor()
     with LOCK:
         STATE["mode"] = "LIVE_ARMED" if live_armed(executor.adapter) else "PRACTICE_ARMED" if practice_armed(executor.adapter) else "PAPER_ONLY"
-    threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler).serve_forever, daemon=True).start()
+    port = int(os.environ.get("PORT", "8080"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(json.dumps({"event": "FOREX_EXECUTOR_HTTP_READY", "host": "0.0.0.0", "port": port,
+                      "mode": STATE["mode"]}), flush=True)
     interval = max(15, int(os.getenv("FOREX_EXECUTOR_INTERVAL_SECONDS", "30")))
     while True:
         try:
