@@ -286,12 +286,19 @@ and exposed port 8080. The process binds to `0.0.0.0` and reads Railway's
 `PORT` variable, defaulting to 8080 for local runs.
 
 The recommended no-subscription mode is the fail-closed official composite. It
-fetches the BLS calendar plus Federal Reserve, ECB, Bank of England and Bank of
-Japan policy schedules concurrently, normalizes local release times to UTC,
-and attests coverage separately from the event list. A quiet lookahead window
-is therefore valid only when all required currency sources were successfully
-fetched. BOJ decisions use an extended event-specific blackout because their
-exact release time is not promised:
+fetches FRED Employment Situation, CPI and PPI calendars plus Federal Reserve,
+ECB, Bank of England and Bank of Japan policy schedules, normalizes local
+release times to UTC, and attests coverage separately from the event list. A
+quiet lookahead window is therefore valid only when all required currency
+sources were successfully fetched. BOJ decisions use an extended
+event-specific blackout because their exact release time is not promised.
+
+Railway may throttle or time out some official calendar sites. The scheduled
+`refresh-official-calendar.yml` workflow therefore validates the same sources
+from GitHub every 12 hours and commits a 31-day normalized snapshot. Railway
+uses that snapshot only when the direct refresh fails, only while it is less
+than 36 hours old, and only when all required currency coverage and HTTPS
+source checks pass. A stale or incomplete snapshot still fails closed:
 
 ```text
 ECONOMIC_CALENDAR_ENABLED=true
@@ -299,6 +306,7 @@ ECONOMIC_CALENDAR_PROVIDER=official_composite
 OFFICIAL_CALENDAR_REQUIRED_CURRENCIES=USD,EUR,GBP,JPY
 ECONOMIC_CALENDAR_LOOKAHEAD_DAYS=7
 ECONOMIC_CALENDAR_INTERVAL_SECONDS=300
+OFFICIAL_CALENDAR_SNAPSHOT_MAX_AGE_SECONDS=129600
 ```
 
 No API key is required. `/health` is a process-liveness endpoint and always
