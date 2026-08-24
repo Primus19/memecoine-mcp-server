@@ -20,6 +20,19 @@ class RejectedOrderClient:
     def create_order(self,**kwargs):
         return {"success":False,"error_response":{"error":"INVALID_ORDER_CONFIGURATION","message":"attached order is invalid"}}
 
+class CapturingOrderClient:
+    def __init__(self):
+        self.preview_kwargs=None
+        self.create_kwargs=None
+
+    def preview_order(self,**kwargs):
+        self.preview_kwargs=kwargs
+        return {"preview_id":"preview-1"}
+
+    def create_order(self,**kwargs):
+        self.create_kwargs=kwargs
+        return {"success_response":{"order_id":"order-1"}}
+
 class ExchangeTests(unittest.TestCase):
     def test_dynamic_products_paginate_and_filter(self):
         ex=Exchange.__new__(Exchange);ex.client=ProductClient();products=ex.eligible_products()
@@ -37,6 +50,40 @@ class ExchangeTests(unittest.TestCase):
         config=ex.buy_configuration({"notional_usdc":25,"limit_price":3}, {"base_increment":"0.01","base_min_size":.01})
         self.assertEqual(config["limit_limit_gtc"]["base_size"],"8.33")
         self.assertNotIn("quote_size",config["limit_limit_gtc"])
+
+    def test_buy_and_bracket_prices_use_product_quote_increment(self):
+        ex=Exchange.__new__(Exchange)
+        ticket={"ticket_id":"t1","product_id":"AAA-USDC","notional_usdc":25,"limit_price":.176749,
+                "target_price":.229814,"stop_price":.162609}
+        product={"base_increment":"0.01","quote_increment":"0.0001","base_min_size":.01}
+        buy=ex.buy_configuration(ticket,product)["limit_limit_gtc"]
+        bracket=ex.attached_configuration(ticket,product)["trigger_bracket_gtc"]
+        self.assertEqual(buy["limit_price"],"0.1767")
+        self.assertEqual(buy["base_size"],"141.48")
+        self.assertEqual(bracket["limit_price"],"0.2299")
+        self.assertEqual(bracket["stop_trigger_price"],"0.1627")
+
+    def test_increment_normalization_supports_non_power_of_ten_steps(self):
+        ex=Exchange.__new__(Exchange)
+        self.assertEqual(ex.normalize_price({"quote_increment":"0.05"},1.03),"1.00")
+        bracket=ex.attached_configuration(
+            {"target_price":1.03,"stop_price":.97},
+            {"quote_increment":"0.05"},
+        )["trigger_bracket_gtc"]
+        self.assertEqual(bracket["limit_price"],"1.05")
+        self.assertEqual(bracket["stop_trigger_price"],"1.00")
+
+    def test_preview_and_submission_use_identical_price_payloads(self):
+        ex=Exchange.__new__(Exchange);ex.client=CapturingOrderClient()
+        ticket={"ticket_id":"t1","product_id":"AAA-USDC","notional_usdc":25,"limit_price":.176749,
+                "target_price":.229814,"stop_price":.162609}
+        product={"base_increment":"0.01","quote_increment":"0.0001","base_min_size":.01}
+        ex.preview_buy(ticket,product)
+        ex.submit_buy(ticket,product)
+        self.assertEqual(ex.client.preview_kwargs["order_configuration"],
+                         ex.client.create_kwargs["order_configuration"])
+        self.assertEqual(ex.client.preview_kwargs["attached_order_configuration"],
+                         ex.client.create_kwargs["attached_order_configuration"])
 
     def test_structured_order_rejection_is_not_silently_returned(self):
         ex=Exchange.__new__(Exchange);ex.client=RejectedOrderClient()
