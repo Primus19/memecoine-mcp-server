@@ -290,8 +290,10 @@ class Executor:
         report = {"generated_at": utcnow(), "mode": "LIVE_ARMED" if live_armed(self.adapter) else
                   "PRACTICE_ARMED" if practice_armed(self.adapter) else "PAPER_ONLY",
                   "executor_ready": True, "last_scan": utcnow(), "last_error": "",
-                  "broker": reconciliation["summary"], "open_trades": reconciliation["open_trades"],
-                  "pending_orders": reconciliation["pending_orders"], "transactions": reconciliation["transactions"],
+                  "broker": reconciliation["summary"],
+                  "open_trade_count": len(reconciliation["open_trades"]),
+                  "pending_order_count": len(reconciliation["pending_orders"]),
+                  "transaction_count_since_prior_scan": len(reconciliation["transactions"]),
                   "snapshots": snapshots, "outcomes": outcomes, "paper_closes": closes,
                   "intents": self.ledger.recent_intents(), "events": self.ledger.recent_events(),
                   "baseline_nav": float(self.ledger.setting("daily_baseline_nav", str(reconciliation["summary"]["nav"])))}
@@ -313,6 +315,9 @@ class Handler(BaseHTTPRequestHandler):
             body = render_forex_report(report).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers(); self.wfile.write(body); return
         if self.path == "/report.json":
@@ -330,7 +335,10 @@ class Handler(BaseHTTPRequestHandler):
             status = 200 if state["ok"] else 503
         body = json.dumps(payload).encode()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers(); self.wfile.write(body)
     def log_message(self, *_): return
 

@@ -32,6 +32,7 @@ def render_forex_report(report: dict) -> str:
     baseline = float(report.get("baseline_nav") or nav)
     pnl = nav - baseline
     margin = float(broker.get("margin_used") or 0)
+    pending = int(report.get("pending_order_count") or 0)
     calendar_ok = sum(1 for row in snapshots if row.get("calendar_verified") is True)
     status_color = "#16a34a" if ready else "#dc2626"
 
@@ -69,7 +70,7 @@ def render_forex_report(report: dict) -> str:
 <div style="flex:1;min-width:180px;background:white;padding:16px;border-radius:12px"><small>Margin used</small><div style="font-size:24px;font-weight:bold">{_money(margin)}</div></div>
 <div style="flex:1;min-width:180px;background:white;padding:16px;border-radius:12px"><small>Calendar coverage</small><div style="font-size:24px;font-weight:bold">{calendar_ok}/{len(snapshots)}</div></div>
 </div>
-<div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px"><h2>Risk and readiness</h2><p><b>Execution:</b> {"Enabled by all independent gates" if mode == "LIVE_ARMED" else "No live order authorization"}. <b>Open broker trades:</b> {int(broker.get("open_trade_count") or 0)}. <b>Margin available:</b> {_money(broker.get("margin_available"))}. <b>Last scan:</b> {html.escape(str(report.get("last_scan") or "never"))}.</p><p style="color:#b91c1c"><b>Current error:</b> {html.escape(str(report.get("last_error") or "None"))}</p></div>
+<div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px"><h2>Risk and readiness</h2><p><b>Execution:</b> {"Enabled by all independent gates" if mode == "LIVE_ARMED" else "No live order authorization"}. <b>Open broker trades:</b> {int(broker.get("open_trade_count") or report.get("open_trade_count") or 0)}. <b>Pending orders:</b> {pending}. <b>Margin available:</b> {_money(broker.get("margin_available"))}. <b>Last scan:</b> {html.escape(str(report.get("last_scan") or "never"))}.</p><p style="color:#b91c1c"><b>Current error:</b> {html.escape(str(report.get("last_error") or "None"))}</p></div>
 <div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px;overflow-x:auto"><h2>Market and calendar</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th>Pair</th><th>Price</th><th>1h</th><th>24h</th><th>Spread</th><th>Calendar</th></tr>{rows(snapshot_rows, [("symbol","Pair"),("price","Price"),("1h","1h"),("24h","24h"),("spread","Spread"),("calendar","Calendar")])}</table></div>
 <div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px;overflow-x:auto"><h2>Latest decisions</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th>Pair</th><th>Action</th><th>Reason or signal ID</th></tr>{rows(outcome_rows, [("symbol","Pair"),("status","Action"),("reason","Reason")])}</table></div>
 <div style="background:white;border-radius:12px;padding:18px;margin-bottom:14px;overflow-x:auto"><h2>Auditable positions and intents</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th>Created</th><th>Pair</th><th>Side</th><th>Mode</th><th>Status</th><th>Max loss</th><th>Realized P&amp;L</th></tr>{rows(intent_rows, [("created","Created"),("symbol","Pair"),("side","Side"),("mode","Mode"),("status","Status"),("risk","Max loss"),("pnl","P&amp;L")])}</table></div>
