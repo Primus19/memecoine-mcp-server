@@ -12,9 +12,11 @@ from datetime import datetime, timedelta, timezone
 from html import unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
+from pathlib import Path
 
 LOCK = threading.RLock()
 STATE = {"ok": False, "observed_at": "", "source_url": "", "events": [], "error": "not scanned"}
+SNAPSHOT_PATH = Path(__file__).with_name("official_calendar_snapshot.json")
 
 TRADING_ECONOMICS_SOURCE = "https://api.tradingeconomics.com/calendar"
 FRED_CALENDAR = "https://fred.stlouisfed.org/releases/calendar?od=asc&rid={rid}&ve={end}&view=month&vs={start}"
@@ -131,11 +133,13 @@ def parse_bls_ics(body: str) -> list[dict]:
 
 
 def parse_fomc_html(body: str, year: int) -> list[dict]:
-    panel = re.search(rf">{year} FOMC Meetings</a>(.*?)(?=>{year + 1} FOMC Meetings</a>|</main>)", body, re.S | re.I)
-    if not panel: return []
+    heading = re.search(rf">\s*{year} FOMC Meetings\s*</a>", body, re.I)
+    if not heading: return []
+    end = body.find('<div class="panel panel-default"', heading.end())
+    panel = body[heading.end():end if end >= 0 else len(body)]
     events = []
     pattern = re.compile(r'fomc-meeting__month[^>]*><strong>([^<]+)</strong>.*?fomc-meeting__date[^>]*>([^<]+)', re.S)
-    for month_name, days in pattern.findall(panel.group(1)):
+    for month_name, days in pattern.findall(panel):
         nums = re.findall(r"\d+", days)
         if not nums: continue
         try:
@@ -282,6 +286,40 @@ def scan_official_composite(now: datetime | None = None) -> dict:
             "sources": sources, "events": events}
 
 
+def load_official_snapshot(now: datetime | None = None, path: Path | None = None) -> dict:
+    clock = now or datetime.now(timezone.utc)
+    snapshot_path = path or Path(os.getenv("OFFICIAL_CALENDAR_SNAPSHOT_PATH", str(SNAPSHOT_PATH)))
+    payload = json.loads(snapshot_path.read_text())
+    generated = datetime.fromisoformat(str(payload["snapshot_generated_at"]).replace("Z", "+00:00"))
+    max_age = min(72 * 3600, max(3600, int(os.getenv("OFFICIAL_CALENDAR_SNAPSHOT_MAX_AGE_SECONDS", "129600"))))
+    age = (clock - generated.astimezone(timezone.utc)).total_seconds()
+    if age < -300 or age > max_age:
+        raise ValueError(f"official calendar snapshot stale ({round(age)} seconds old)")
+    required = {item.strip().upper() for item in os.getenv(
+        "OFFICIAL_CALENDAR_REQUIRED_CURRENCIES", "USD,EUR,GBP,JPY").split(",") if item.strip()}
+    coverage = {str(item).upper() for item in payload.get("coverage", [])}
+    if not required.issubset(coverage):
+        raise ValueError(f"official calendar snapshot coverage missing: {sorted(required - coverage)}")
+    rows = payload.get("events", [])
+    if not isinstance(rows, list):
+        raise ValueError("official calendar snapshot events must be a list")
+    events = []
+    floor, ceiling = clock - timedelta(days=1), clock + timedelta(days=31)
+    for raw in rows:
+        event = dict(raw)
+        stamp = datetime.fromisoformat(str(event["time"]).replace("Z", "+00:00"))
+        if not str(event.get("source_url", "")).startswith("https://"):
+            raise ValueError("official calendar snapshot contains an invalid source URL")
+        if floor <= stamp <= ceiling:
+            event["minutes_until"] = round((stamp - clock).total_seconds() / 60)
+            events.append(event)
+    events.sort(key=lambda event: event["time"])
+    return {"observed_at": clock.isoformat(), "source_url": str(payload["source_url"]),
+            "provider": "official_snapshot", "coverage": sorted(coverage),
+            "sources": payload.get("sources", []), "events": events,
+            "snapshot_generated_at": generated.isoformat()}
+
+
 def normalize(payload: object, source_url: str, provider: str = "generic") -> dict:
     if isinstance(payload, dict):
         rows = payload.get("events", payload.get("economicCalendar", []))
@@ -311,7 +349,11 @@ def normalize(payload: object, source_url: str, provider: str = "generic") -> di
 def scan() -> None:
     provider = os.getenv("ECONOMIC_CALENDAR_PROVIDER", "generic").strip().lower()
     if provider == "official_composite":
-        value = scan_official_composite()
+        try:
+            value = scan_official_composite()
+        except Exception as upstream_error:
+            value = load_official_snapshot()
+            value["upstream_warning"] = str(upstream_error)[:500]
     else:
         url, headers, public_source, provider = build_request()
         with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as response:
