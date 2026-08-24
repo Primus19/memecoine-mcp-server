@@ -105,6 +105,7 @@ class OandaAdapter:
             "positionFill": "DEFAULT",
             "priceBound": f"{price_bound:.{precision}f}",
             "clientExtensions": {"id": client_order_id, "tag": "primus-forex-v1"},
+            "tradeClientExtensions": {"id": client_order_id, "tag": "primus-forex-v1"},
             "stopLossOnFill": {"price": f'{float(proposal["stop_price"]):.{precision}f}', "timeInForce": "GTC"},
             "takeProfitOnFill": {"price": f'{float(proposal["target_price"]):.{precision}f}', "timeInForce": "GTC"},
         }
