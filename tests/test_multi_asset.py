@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from app.multi_asset import AssetPolicy, MultiAssetEngine, MultiAssetRejected, PaperLedger
+from app.multi_asset import AssetPolicy, ForexEngine, MultiAssetEngine, MultiAssetRejected, PaperLedger
 
 
 class MultiAssetTests(unittest.TestCase):
@@ -35,6 +35,37 @@ class MultiAssetTests(unittest.TestCase):
         self.assertEqual("PAPER_FILL", result["type"])
         self.assertEqual("PAPER_ONLY", result["mode"])
         self.assertLessEqual(result["maximum_loss_usd"], 2.5)
+
+    def test_forex_aligned_liquid_signal_reaches_calibrated_threshold(self):
+        snapshot = {**self.base("FOREX", "EUR_USD"), "change_1h_pct": .02,
+                    "change_24h_pct": .20, "trend_strength": .01,
+                    "liquidity_score": 1, "session_liquid": True,
+                    "economic_event_within_minutes": 120}
+        engine = ForexEngine(AssetPolicy(minimum_score=75, max_risk_usd=.5))
+        proposal = engine.evaluate(snapshot)
+        self.assertEqual("FOREX_TREND_CONTINUATION", proposal.strategy)
+        self.assertEqual("BUY", proposal.side)
+        self.assertGreaterEqual(proposal.score, 75)
+
+    def test_forex_controlled_pullback_gets_partial_credit_but_needs_strong_trend(self):
+        snapshot = {**self.base("FOREX", "EUR_USD"), "change_1h_pct": -.05,
+                    "change_24h_pct": .40, "trend_strength": .30,
+                    "liquidity_score": 1, "session_liquid": True,
+                    "economic_event_within_minutes": 120}
+        engine = ForexEngine(AssetPolicy(minimum_score=75, max_risk_usd=.5))
+        proposal = engine.evaluate(snapshot)
+        self.assertEqual("FOREX_TREND_PULLBACK", proposal.strategy)
+        self.assertEqual("BUY", proposal.side)
+        self.assertEqual(("CONTROLLED_PULLBACK", 8.0, "BUY"), engine.alignment(snapshot))
+
+    def test_forex_rejects_materially_contradictory_timeframes(self):
+        snapshot = {**self.base("FOREX", "EUR_USD"), "change_1h_pct": -.20,
+                    "change_24h_pct": .40, "trend_strength": .30,
+                    "liquidity_score": 1, "session_liquid": True,
+                    "economic_event_within_minutes": 120}
+        engine = ForexEngine(AssetPolicy(minimum_score=75, max_risk_usd=.5))
+        with self.assertRaisesRegex(MultiAssetRejected, "contradict"):
+            engine.evaluate(snapshot)
 
     def test_option_engine_rejects_undefined_risk_structure(self):
         snapshot = {**self.base("OPTION", "SPY"), "structure": "SHORT_CALL",
