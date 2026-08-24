@@ -174,6 +174,22 @@ class ForexExecutorTests(unittest.TestCase):
             ledger.update_intent("p1", "CANCELLED")
             self.assertEqual(0, ledger.open_count())
 
+    def test_open_risk_and_currency_symbols_support_guarded_second_trade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(directory + "/forex.sqlite3")
+            proposal = {"proposal_id":"p1","expires_at":"2999-01-01T00:00:00Z","symbol":"AUD_USD","reference_price":.7,
+                        "side":"SELL","quantity":10,"stop_price":.71,"target_price":.68,"maximum_loss_usd":.5}
+            ledger.add_intent(proposal,"LIVE","OPEN")
+            self.assertEqual(.5,ledger.open_risk())
+            self.assertEqual(["AUD_USD"],ledger.open_symbols())
+
+    def test_default_forex_limit_allows_at_most_two_positions(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FOREX_MAX_OPEN_POSITIONS",None)
+            self.assertEqual(2,Executor.max_positions())
+        with patch.dict(os.environ,{"FOREX_MAX_OPEN_POSITIONS":"8"},clear=False):
+            self.assertEqual(2,Executor.max_positions())
+
     def test_impossible_score_threshold_fails_readiness(self):
         executor = object.__new__(Executor)
         executor.engine = type("Engine", (), {"policy": type("Policy", (), {"minimum_score": 101.0})()})()
