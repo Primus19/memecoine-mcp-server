@@ -9,16 +9,16 @@ from unittest.mock import patch
 from app.economic_calendar import (build_request, normalize, parse_bls_ics,
                                    Handler, LOCK, STATE, ThreadingHTTPServer,
                                    parse_boe_html, parse_boj_html,
-                                   parse_ecb_html, parse_fomc_html,
+                                   parse_ecb_html, parse_fomc_html, parse_fred_calendar_html,
                                    scan_official_composite)
 
 
 class CalendarTests(unittest.TestCase):
     def test_official_fetch_error_names_the_failed_source(self):
         with patch("urllib.request.urlopen", side_effect=OSError("blocked")):
-            with self.assertRaisesRegex(RuntimeError, "official calendar source bls failed"):
+            with self.assertRaisesRegex(RuntimeError, "official calendar source fred_employment failed"):
                 from app.economic_calendar import _fetch_official
-                _fetch_official("bls", datetime(2026, 8, 24, tzinfo=timezone.utc))
+                _fetch_official("fred_employment", datetime(2026, 8, 24, tzinfo=timezone.utc))
 
     def test_health_is_liveness_even_before_calendar_is_ready(self):
         with LOCK:
@@ -85,7 +85,7 @@ class CalendarTests(unittest.TestCase):
             url, _, source, provider = build_request()
         self.assertEqual("official-composite://calendar", url)
         self.assertEqual("official_composite", provider)
-        self.assertTrue(source.startswith("https://www.bls.gov/"))
+        self.assertTrue(source.startswith("https://fred.stlouisfed.org/"))
 
     def test_parses_official_source_shapes(self):
         bls = """BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART;TZID=America/New_York:20260904T083000\nSUMMARY:Employment Situation\nEND:VEVENT\nEND:VCALENDAR"""
@@ -101,11 +101,19 @@ class CalendarTests(unittest.TestCase):
         self.assertEqual("JPY", jpy["currency"])
         self.assertEqual(720, jpy["blackout_before_minutes"])
 
+    def test_parses_fred_release_calendar_in_central_time(self):
+        body = '''<table><tr class="odd"><td><span>Friday September 04, 2026</span></td></tr>
+        <tr><td>7:30 am</td><td><a href="/release?rid=50">Employment Situation</a></td></tr></table>'''
+        event = parse_fred_calendar_html(body)[0]
+        self.assertEqual("USD", event["currency"])
+        self.assertEqual("2026-09-04T12:30:00+00:00", event["time"])
+
     def test_composite_verifies_coverage_even_when_window_is_quiet(self):
         clock = datetime(2026, 8, 24, tzinfo=timezone.utc)
         def fake_fetch(name, _):
-            currencies = {"bls":"USD", "federal_reserve":"USD", "ecb":"EUR",
-                          "bank_of_england":"GBP", "bank_of_japan":"JPY"}
+            currencies = {"fred_employment":"USD", "fred_cpi":"USD", "fred_ppi":"USD",
+                          "federal_reserve":"USD", "ecb":"EUR", "bank_of_england":"GBP",
+                          "bank_of_japan":"JPY"}
             return ({"name":name, "currency":currencies[name], "url":"https://official.example", "ok":True, "event_count":0}, [])
         with patch("app.economic_calendar._fetch_official", side_effect=fake_fetch), patch.dict(
                 os.environ, {"OFFICIAL_CALENDAR_REQUIRED_CURRENCIES":"USD,EUR,GBP,JPY"}, clear=True):

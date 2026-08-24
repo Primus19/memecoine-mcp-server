@@ -17,9 +17,16 @@ LOCK = threading.RLock()
 STATE = {"ok": False, "observed_at": "", "source_url": "", "events": [], "error": "not scanned"}
 
 TRADING_ECONOMICS_SOURCE = "https://api.tradingeconomics.com/calendar"
-OFFICIAL_COMPOSITE_SOURCE = "https://www.bls.gov/schedule/news_release/bls.ics"
+FRED_CALENDAR = "https://fred.stlouisfed.org/releases/calendar?od=asc&rid={rid}&ve={year}-12-31&view=year&vs={year}-01-01"
+OFFICIAL_COMPOSITE_SOURCE = "https://fred.stlouisfed.org/releases/calendar"
+BLS_ARCHIVE_SOURCE = "https://www.bls.gov/schedule/news_release/bls.ics"
 OFFICIAL_SOURCES = {
-    "bls": ("USD", OFFICIAL_COMPOSITE_SOURCE),
+    # FRED is operated by the Federal Reserve Bank of St. Louis and republishes
+    # source-supplied release dates. These replace the BLS ICS endpoint, which
+    # rejects Railway egress with HTTP 403.
+    "fred_employment": ("USD", FRED_CALENDAR.format(rid=50, year="{year}")),
+    "fred_cpi": ("USD", FRED_CALENDAR.format(rid=10, year="{year}")),
+    "fred_ppi": ("USD", FRED_CALENDAR.format(rid=46, year="{year}")),
     "federal_reserve": ("USD", "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"),
     "ecb": ("EUR", "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html"),
     "bank_of_england": ("GBP", "https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates"),
@@ -119,7 +126,7 @@ def parse_bls_ics(body: str) -> list[dict]:
         except (ValueError, KeyError):
             continue
         events.append(_event("USD", summary.group(1).replace("\\,", ","), when,
-                             OFFICIAL_SOURCES["bls"][1]))
+                             BLS_ARCHIVE_SOURCE))
     return events
 
 
@@ -195,8 +202,37 @@ def parse_boj_html(body: str, year: int) -> list[dict]:
     return events
 
 
+def parse_fred_calendar_html(body: str) -> list[dict]:
+    events, current_date = [], None
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", body, re.S | re.I):
+        date_match = re.search(
+            r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+"
+            r"([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4})", _text(row), re.I)
+        if date_match:
+            try:
+                current_date = datetime.strptime(
+                    " ".join(date_match.group(2, 3, 4)), "%B %d %Y")
+            except ValueError:
+                current_date = None
+            continue
+        if current_date is None:
+            continue
+        time_match = re.search(r"(\d{1,2}):(\d{2})\s*(am|pm)", _text(row), re.I)
+        name_match = re.search(r'<a[^>]+href="/release\?rid=\d+"[^>]*>(.*?)</a>', row, re.S | re.I)
+        if not time_match or not name_match:
+            continue
+        hour = int(time_match.group(1)) % 12 + (12 if time_match.group(3).lower() == "pm" else 0)
+        when = _utc(current_date.year, current_date.month, current_date.day,
+                    hour, int(time_match.group(2)), "America/Chicago")
+        events.append(_event("USD", _text(name_match.group(1)), when,
+                             "https://fred.stlouisfed.org/releases/calendar", 60, 60))
+    return events
+
+
 def _fetch_official(name: str, now: datetime) -> tuple[dict, list[dict]]:
     currency, url = OFFICIAL_SOURCES[name]
+    if "{year}" in url:
+        url = url.format(year=now.year)
     request = urllib.request.Request(url, headers={"Accept": "text/html,text/calendar", "User-Agent": "primus-economic-calendar/1.2"})
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
@@ -205,7 +241,8 @@ def _fetch_official(name: str, now: datetime) -> tuple[dict, list[dict]]:
     except Exception as exc:
         raise RuntimeError(f"official calendar source {name} failed: {exc}") from exc
     if status != 200 or not body.strip(): raise ValueError(f"{name} returned an empty or unsuccessful response")
-    if name == "bls": events = parse_bls_ics(body)
+    if name.startswith("fred_"): events = parse_fred_calendar_html(body)
+    elif name == "bls": events = parse_bls_ics(body)
     elif name == "federal_reserve": events = sum((parse_fomc_html(body, year) for year in {now.year, now.year + 1}), [])
     elif name == "ecb": events = parse_ecb_html(body)
     elif name == "bank_of_england": events = sum((parse_boe_html(body, year) for year in {now.year, now.year + 1}), [])
