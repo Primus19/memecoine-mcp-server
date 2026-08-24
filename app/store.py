@@ -1,6 +1,6 @@
 from __future__ import annotations
 import hashlib,json,sqlite3
-from datetime import datetime,timezone
+from datetime import datetime,timedelta,timezone
 from pathlib import Path
 from cryptography.fernet import Fernet
 
@@ -41,10 +41,25 @@ class Store:
         # Only the immutable pilot baseline and realized trading P&L compound.
         # Deposits are audited but never silently expand the trading mandate.
         return max(0,sum(float(self.setting(k,"0") or 0) for k in ("pilot_baseline_usdc","realized_pnl_usdc")))
+    def reconciled_equity(self,open_trade_pnl=0.0):
+        """Return risk equity from authorized capital plus fill-derived P&L.
+
+        Coinbase account balances and fill history are separate API snapshots.
+        Immediately after an exit fill, sale proceeds can be absent from the
+        balance snapshot even though the fills already show no remaining asset.
+        Risk controls must not treat that temporary settlement gap as a loss.
+        """
+        return self.permitted_capital()+float(open_trade_pnl)
     def add_realized_pnl(self,pnl):
         self.set_setting("realized_pnl_usdc",float(self.setting("realized_pnl_usdc","0") or 0)+pnl)
     def sync_external_flow(self,actual):
         if self.open_position(): return None
+        grace_until=self.setting("settlement_grace_until")
+        if grace_until:
+            try:
+                if datetime.now(timezone.utc)<datetime.fromisoformat(grace_until.replace("Z","+00:00")):
+                    return {"status":"SETTLEMENT_GRACE","until":grace_until}
+            except ValueError: pass
         expected=self.permitted_capital()+float(self.setting("net_external_flows_usdc","0") or 0)
         delta=actual-expected
         if abs(delta)<.01:return None
@@ -69,8 +84,9 @@ class Store:
         self.db.execute("UPDATE positions SET status=?,updated_at=?,closed_at=CASE WHEN ?='CLOSED' THEN ? ELSE closed_at END,realized_pnl=COALESCE(?,realized_pnl) WHERE ticket_id=?",(status,utcnow(),status,utcnow(),pnl,ticket_id)); self.db.commit()
     def record_closed_trade(self,ticket_id,pnl,return_pct):
         self.add_realized_pnl(pnl); losses=int(self.setting("consecutive_losses","0") or 0); losses=losses+1 if pnl<0 else 0; self.set_setting("consecutive_losses",losses)
-        self.update_position(ticket_id,"CLOSED",pnl); self.mark_recommendation(ticket_id,"CLOSED",net_return=return_pct,realized_pnl=pnl,closed_at=utcnow()); self.event("POSITION_CLOSED",{"realized_pnl_usdc":pnl,"net_return_pct":return_pct,"consecutive_losses":losses},ticket_id); return {"pnl":pnl,"return_pct":return_pct}
-    def update_equity_controls(self,equity):
+        self.update_position(ticket_id,"CLOSED",pnl); self.mark_recommendation(ticket_id,"CLOSED",net_return=return_pct,realized_pnl=pnl,closed_at=utcnow()); self.set_setting("settlement_grace_until",(datetime.now(timezone.utc)+timedelta(seconds=60)).isoformat()); self.event("POSITION_CLOSED",{"realized_pnl_usdc":pnl,"net_return_pct":return_pct,"consecutive_losses":losses},ticket_id)
+        controls=self.update_equity_controls(self.reconciled_equity(),source="REALIZED_CAPITAL"); return {"pnl":pnl,"return_pct":return_pct,"controls":controls}
+    def update_equity_controls(self,equity,source="RECONCILED_EQUITY"):
         today=str(datetime.now(timezone.utc).date())
         if self.setting("daily_start_date")!=today:self.set_setting("daily_start_date",today);self.set_setting("daily_start_equity_usdc",equity)
         peak=max(float(self.setting("peak_equity_usdc","0") or 0),equity);self.set_setting("peak_equity_usdc",peak); daily=float(self.setting("daily_start_equity_usdc",str(equity)) or equity)
@@ -79,7 +95,7 @@ class Store:
         if ddd>=.15:reasons.append("daily drawdown reached 15%")
         if dd>=.25:reasons.append("peak drawdown reached 25%")
         if reasons and not self.paused():self.event("PAUSED",{"reason":"; ".join(reasons),"automatic":True})
-        return {"peak_equity_usdc":peak,"drawdown_pct":dd*100,"daily_drawdown_pct":ddd*100,"consecutive_losses":losses,"circuit_breakers":reasons}
+        return {"equity_usdc":equity,"equity_source":source,"peak_equity_usdc":peak,"drawdown_pct":dd*100,"daily_drawdown_pct":ddd*100,"consecutive_losses":losses,"circuit_breakers":reasons}
     def model_review(self,trigger,key):
         old=self.db.execute("SELECT payload FROM reviews WHERE review_key=?",(key,)).fetchone()
         if old:return json.loads(old[0])

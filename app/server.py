@@ -46,23 +46,26 @@ def run_preflight():
 def reconcile():
     position=store.open_position(); ex=exchange();pf=ex.preflight()
     if not position:
-        flow=store.sync_external_flow(pf["usdc_total"]);controls=store.update_equity_controls(store.permitted_capital());return {"open_position":None,"usdc_total":pf["usdc_total"],"capital_flow":flow,"controls":controls}
+        flow=store.sync_external_flow(pf["usdc_total"]);controls=store.update_equity_controls(store.reconciled_equity(),source="PERMITTED_CAPITAL");return {"open_position":None,"usdc_total":pf["usdc_total"],"capital_flow":flow,"controls":controls}
     fills=ex.fills(position["product_id"],position["opened_at"]);summary=summarize_fills(fills);product=ex.product(position["product_id"]);mark_value=summary["net_qty"]*product["price"]
-    equity=pf["usdc_total"]+mark_value;controls=store.update_equity_controls(equity)
     order=ex.get_order(position["order_id"]) if position.get("order_id") else {};order_status=str(order.get("status","")).upper()
     if summary["buy_qty"]<=0 and order_status in {"CANCELLED","FAILED","EXPIRED"}:
         store.update_position(position["ticket_id"],order_status);store.mark_recommendation(position["ticket_id"],order_status)
         store.event("ENTRY_"+order_status,{"order_id":position.get("order_id")},position["ticket_id"])
+        controls=store.update_equity_controls(store.reconciled_equity(),source="PERMITTED_CAPITAL")
         return {"open_position":None,"entry_status":order_status,"usdc_total":pf["usdc_total"],"controls":controls}
     if summary["buy_qty"]>0 and summary["net_qty"]<=max(1e-12,float(product.get("base_min_size") or 0)/10) and summary["sell_qty"]>0:
         pnl=summary["sell_value_usdc"]-summary["buy_cost_usdc"];ret=100*pnl/summary["buy_cost_usdc"] if summary["buy_cost_usdc"] else 0
-        closed=store.record_closed_trade(position["ticket_id"],pnl,ret);review=store.model_review("trade_close","trade:"+position["ticket_id"]);store.update_equity_controls(pf["usdc_total"])
-        return {"open_position":None,"closed_trade":closed,"fill_summary":summary,"model_review":review,"controls":controls}
+        closed=store.record_closed_trade(position["ticket_id"],pnl,ret);review=store.model_review("trade_close","trade:"+position["ticket_id"]);controls=closed["controls"]
+        reconciliation={"risk_equity_usdc":store.reconciled_equity(),"account_snapshot_equity_usdc":pf["usdc_total"],"settlement_gap_usdc":store.reconciled_equity()-pf["usdc_total"],"source":"REALIZED_CAPITAL"}
+        return {"open_position":None,"closed_trade":closed,"fill_summary":summary,"model_review":review,"controls":controls,"equity_reconciliation":reconciliation}
     status=position["status"] if position["status"]=="EXIT_SUBMITTED" else ("FILLED" if summary["buy_qty"]>0 else "SUBMITTED")
     if position["status"]=="SUBMITTED" and status=="FILLED":store.event("ENTRY_FILLED",{"order_id":position.get("order_id"),"fill_summary":summary},position["ticket_id"])
     store.update_position(position["ticket_id"],status)
     unrealized=summary["sell_value_usdc"]+mark_value-summary["buy_cost_usdc"]
-    return {"open_position":{**position,"status":status,"mark_price":product["price"],"mark_value_usdc":mark_value,"net_unrealized_pnl_usdc":unrealized,"fills":summary},"usdc_total":pf["usdc_total"],"controls":controls}
+    equity=store.reconciled_equity(unrealized);controls=store.update_equity_controls(equity,source="FILLS_AND_MARK")
+    reconciliation={"risk_equity_usdc":equity,"account_snapshot_equity_usdc":pf["usdc_total"]+mark_value,"settlement_gap_usdc":equity-(pf["usdc_total"]+mark_value),"source":"FILLS_AND_MARK"}
+    return {"open_position":{**position,"status":status,"mark_price":product["price"],"mark_value_usdc":mark_value,"net_unrealized_pnl_usdc":unrealized,"fills":summary},"usdc_total":pf["usdc_total"],"controls":controls,"equity_reconciliation":reconciliation}
 
 def supervise(regime=""):
     state=reconcile();position=state.get("open_position")
