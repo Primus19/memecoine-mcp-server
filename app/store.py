@@ -16,7 +16,10 @@ class Store:
         self.db.execute("CREATE TABLE IF NOT EXISTS recommendations (ticket_id TEXT PRIMARY KEY,recommendation_hash TEXT UNIQUE NOT NULL,model_version TEXT NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL,product_id TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,order_id TEXT,net_return REAL,realized_pnl REAL,closed_at TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS positions (ticket_id TEXT PRIMARY KEY,product_id TEXT NOT NULL,order_id TEXT,status TEXT NOT NULL,entry_notional REAL NOT NULL,entry_price REAL NOT NULL,opened_at TEXT NOT NULL,updated_at TEXT NOT NULL,closed_at TEXT,realized_pnl REAL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS capital_flows (seq INTEGER PRIMARY KEY AUTOINCREMENT,at TEXT NOT NULL,kind TEXT NOT NULL,amount REAL NOT NULL,balance_after REAL NOT NULL)")
-        self.db.execute("CREATE TABLE IF NOT EXISTS reviews (review_key TEXT PRIMARY KEY,at TEXT NOT NULL,trigger TEXT NOT NULL,payload TEXT NOT NULL)"); self.db.commit()
+        self.db.execute("CREATE TABLE IF NOT EXISTS reviews (review_key TEXT PRIMARY KEY,at TEXT NOT NULL,trigger TEXT NOT NULL,payload TEXT NOT NULL)")
+        columns={str(r[1]) for r in self.db.execute("PRAGMA table_info(recommendations)")}
+        if "rejection_reason" not in columns:self.db.execute("ALTER TABLE recommendations ADD COLUMN rejection_reason TEXT")
+        self.db.commit()
 
     def save_credentials(self,key_name,private_key):
         for n,v in (("key_name",key_name),("private_key",private_key)):
@@ -72,9 +75,9 @@ class Store:
         if not row:return None
         result=dict(row); result["payload"]=json.loads(result["payload"]); return result
     def recent_recommendations(self,limit=20):
-        return [dict(r) for r in self.db.execute("SELECT ticket_id,recommendation_hash,model_version,created_at,expires_at,product_id,status,net_return,realized_pnl,closed_at FROM recommendations ORDER BY created_at DESC LIMIT ?",(limit,)).fetchall()]
+        return [dict(r) for r in self.db.execute("SELECT ticket_id,recommendation_hash,model_version,created_at,expires_at,product_id,status,rejection_reason,net_return,realized_pnl,closed_at FROM recommendations ORDER BY created_at DESC LIMIT ?",(limit,)).fetchall()]
     def mark_recommendation(self,ticket_id,status,**values):
-        allowed={"order_id","net_return","realized_pnl","closed_at"}; u={"status":status,**{k:v for k,v in values.items() if k in allowed}}
+        allowed={"order_id","rejection_reason","net_return","realized_pnl","closed_at"}; u={"status":status,**{k:v for k,v in values.items() if k in allowed}}
         self.db.execute("UPDATE recommendations SET "+",".join(f"{k}=?" for k in u)+" WHERE ticket_id=?",(*u.values(),ticket_id)); self.db.commit()
     def add_position(self,ticket,order_id):
         now=utcnow(); self.db.execute("INSERT INTO positions(ticket_id,product_id,order_id,status,entry_notional,entry_price,opened_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(ticket["ticket_id"],ticket["product_id"],order_id,"SUBMITTED",ticket["notional_usdc"],ticket["limit_price"],now,now)); self.db.commit()
