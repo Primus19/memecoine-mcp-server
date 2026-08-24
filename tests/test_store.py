@@ -84,3 +84,10 @@ class StoreTests(unittest.TestCase):
 
         self.assertEqual(result["status"],"SETTLEMENT_GRACE")
         self.assertEqual(float(self.store.setting("net_external_flows_usdc")),0)
+
+    def test_rejection_reason_is_preserved_in_reports(self):
+        payload={"ticket_id":"t-reject","recommendation_hash":"h-reject","model_version":"3.1","created_at":"x","expires_at":"x","product_id":"TURBO-USDC","score":85}
+        self.store.issue_recommendation(payload)
+        self.store.mark_recommendation("t-reject","SUBMISSION_REJECTED",rejection_reason="broker rejected attached order")
+        row=self.store.recent_recommendations()[0]
+        self.assertEqual("broker rejected attached order",row["rejection_reason"])
