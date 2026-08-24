@@ -240,6 +240,12 @@ while the server is running; `executor_ready` reports dependency readiness.
 market-feed scan succeed. The executor can authenticate to the market feed with
 the optional `MULTI_ASSET_FEED_BEARER_TOKEN` secret.
 
+The executor also publishes `/report` as an email-client-safe HTML Forex
+dashboard and `/report.json` as the exact machine-readable report snapshot.
+The existing connected-Gmail scheduled task should fetch `/report`, send that
+HTML unchanged, and use the subject `[HOURLY] Forex Intelligence — YYYY-MM-DD
+HH:mm ET`. Railway does not store Gmail credentials.
+
 Live mode additionally requires all four values below plus a current verified
 economic-calendar response. Missing or inconsistent values fail closed:
 
