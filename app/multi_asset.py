@@ -137,29 +137,41 @@ class ForexEngine(StrategyEngine):
     asset_class = "FOREX"
 
     @staticmethod
-    def score(snapshot: dict[str, Any]) -> float:
+    def alignment(snapshot: dict[str, Any]) -> tuple[str, float, str]:
+        """Classify continuation versus a small pullback inside the daily trend."""
         one = float(snapshot.get("change_1h_pct") or 0)
         day = float(snapshot.get("change_24h_pct") or 0)
         trend = float(snapshot.get("trend_strength") or 0)
+        if one and day and one * day > 0:
+            return "CONTINUATION", 15.0, "BUY" if day > 0 else "SELL"
+        pullback_limit = max(0.01, float(snapshot.get("pullback_max_1h_pct") or 0.10))
+        if day and trend and day * trend > 0 and one * day < 0 and abs(one) <= pullback_limit:
+            return "CONTROLLED_PULLBACK", 8.0, "BUY" if day > 0 else "SELL"
+        return "CONTRADICTORY", 0.0, ""
+
+    @classmethod
+    def score(cls, snapshot: dict[str, Any]) -> float:
+        trend = float(snapshot.get("trend_strength") or 0)
         liquidity = float(snapshot.get("liquidity_score") or 0)
+        _, alignment_points, _ = cls.alignment(snapshot)
         return min(100.0, 25 + min(25, abs(trend) * 25) + min(20, liquidity * 20)
-                   + (15 if one * day > 0 else 0)
+                   + alignment_points
                    + (15 if snapshot.get("session_liquid") is True else 0))
 
     def evaluate(self, snapshot: dict[str, Any]) -> Proposal:
         failures = self.common_checks(snapshot)
         if snapshot.get("economic_event_within_minutes", 999) < 30:
             failures.append("high-impact economic event too close")
-        one = float(snapshot.get("change_1h_pct") or 0)
-        day = float(snapshot.get("change_24h_pct") or 0)
+        alignment, _, side = self.alignment(snapshot)
         score = self.score(snapshot)
-        if one == 0 or day == 0 or one * day <= 0:
-            failures.append("1h and 24h direction not aligned")
+        if alignment == "CONTRADICTORY":
+            failures.append("timeframes contradict trend thesis")
         if score < self.policy.minimum_score:
             failures.append(f"score {score:.2f} below policy minimum {self.policy.minimum_score:.2f}")
         if failures:
             raise MultiAssetRejected("; ".join(failures))
-        return self.proposal(snapshot, strategy="FOREX_TREND", score=score, side="BUY" if one > 0 else "SELL")
+        strategy = "FOREX_TREND_PULLBACK" if alignment == "CONTROLLED_PULLBACK" else "FOREX_TREND_CONTINUATION"
+        return self.proposal(snapshot, strategy=strategy, score=score, side=side)
 
 
 class EquityEngine(StrategyEngine):
