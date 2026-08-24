@@ -225,6 +225,7 @@ FOREX_EXECUTOR_ENABLED=true
 FOREX_EXECUTOR_INTERVAL_SECONDS=30
 FOREX_LEDGER_PATH=/app/data/forex.sqlite3
 MULTI_ASSET_FEED_URL=https://multi-asset-market-feed-production.up.railway.app/snapshots
+FOREX_MIN_SCORE=80
 FOREX_MAX_RISK_USD=2.50
 FOREX_MAX_OPEN_POSITIONS=1
 FOREX_DAILY_LOSS_LIMIT_USD=2.50
@@ -245,6 +246,13 @@ dashboard and `/report.json` as the exact machine-readable report snapshot.
 The existing connected-Gmail scheduled task should fetch `/report`, send that
 HTML unchanged, and use the subject `[HOURLY] Forex Intelligence — YYYY-MM-DD
 HH:mm ET`. Railway does not store Gmail credentials.
+
+`FOREX_MIN_SCORE` is independent from the generic multi-asset score setting so
+a sentinel used by another sleeve cannot silently disable Forex. Every closed
+trade is reviewed net of financing, with win rate, expectancy, profit factor,
+maximum favorable/adverse excursion, profit capture and symbol breakdowns.
+The champion remains locked for at least 30 closed trades. Any later change
+must be evaluated as a prospective challenger and cannot loosen risk controls.
 
 Live mode additionally requires all four values below plus a current verified
 economic-calendar response. Missing or inconsistent values fail closed:

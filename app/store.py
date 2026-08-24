@@ -83,8 +83,20 @@ class Store:
     def model_review(self,trigger,key):
         old=self.db.execute("SELECT payload FROM reviews WHERE review_key=?",(key,)).fetchone()
         if old:return json.loads(old[0])
-        pnls=[float(r[0]) for r in self.db.execute("SELECT realized_pnl FROM recommendations WHERE status='CLOSED' AND realized_pnl IS NOT NULL").fetchall()]; wins=[x for x in pnls if x>0]; losses=[x for x in pnls if x<0]
-        p={"model_version":"3.1","sample_size":len(pnls),"wins":len(wins),"losses":len(losses),"win_rate":len(wins)/len(pnls) if pnls else None,"net_expectancy_usdc":sum(pnls)/len(pnls) if pnls else None,"profit_factor":sum(wins)/abs(sum(losses)) if losses else None,"status":"MODEL LOCKED — COLLECTING EVIDENCE" if len(pnls)<30 else "ELIGIBLE FOR CHALLENGER REVIEW","parameters_changed":False,"trigger":trigger}
+        rows=[dict(r) for r in self.db.execute("""SELECT r.product_id,r.payload,r.realized_pnl,
+            p.entry_notional,p.entry_price FROM recommendations r LEFT JOIN positions p ON p.ticket_id=r.ticket_id
+            WHERE r.status='CLOSED' AND r.realized_pnl IS NOT NULL""").fetchall()]
+        pnls=[float(r["realized_pnl"]) for r in rows]; wins=[x for x in pnls if x>0]; losses=[x for x in pnls if x<0]
+        by_product={}; captures=[]; peak_opportunities=[]
+        for row in rows:
+            payload=json.loads(row["payload"]); product=str(row["product_id"]); pnl=float(row["realized_pnl"])
+            bucket=by_product.setdefault(product,{"sample_size":0,"wins":0,"net_pnl_usdc":0.0})
+            bucket["sample_size"]+=1;bucket["wins"]+=int(pnl>0);bucket["net_pnl_usdc"]=round(bucket["net_pnl_usdc"]+pnl,8)
+            ticket_id=str(payload.get("ticket_id") or "");entry=float(row.get("entry_price") or 0);notional=float(row.get("entry_notional") or 0)
+            high=float(self.setting("high_water:"+ticket_id,str(entry)) or entry) if ticket_id else entry
+            peak=notional*(high/entry-1) if entry>0 else 0;peak_opportunities.append(peak)
+            if peak>0:captures.append(pnl/peak)
+        p={"model_version":"3.1","sample_size":len(pnls),"wins":len(wins),"losses":len(losses),"win_rate":len(wins)/len(pnls) if pnls else None,"net_pnl_usdc":sum(pnls),"net_expectancy_usdc":sum(pnls)/len(pnls) if pnls else None,"profit_factor":sum(wins)/abs(sum(losses)) if losses else None,"average_win_usdc":sum(wins)/len(wins) if wins else None,"average_loss_usdc":sum(losses)/len(losses) if losses else None,"average_peak_opportunity_usdc":sum(peak_opportunities)/len(peak_opportunities) if peak_opportunities else None,"average_profit_capture":sum(captures)/len(captures) if captures else None,"by_product":by_product,"status":"MODEL LOCKED - COLLECTING EVIDENCE" if len(pnls)<30 else "ELIGIBLE FOR PROSPECTIVE CHALLENGER REVIEW","parameters_changed":False,"promotion_rule":"At least 30 closed trades; positive expectancy and profit factor above 1.0; challenger must then outperform prospectively without materially worse drawdown","trigger":trigger}
         self.db.execute("INSERT INTO reviews(review_key,at,trigger,payload) VALUES(?,?,?,?)",(key,utcnow(),trigger,json.dumps(p,sort_keys=True)));self.db.commit();self.event("MODEL_REVIEW",p);return p
     def recent_reviews(self,limit=10):
         return [{**dict(r),"payload":json.loads(r["payload"])} for r in self.db.execute("SELECT review_key,at,trigger,payload FROM reviews ORDER BY at DESC LIMIT ?",(limit,)).fetchall()]

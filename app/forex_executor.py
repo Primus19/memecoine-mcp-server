@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 import urllib.request
+from dataclasses import replace
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -62,9 +63,16 @@ class Ledger:
               symbol TEXT NOT NULL, side TEXT NOT NULL, entry_price REAL NOT NULL, quantity REAL NOT NULL,
               stop_price REAL NOT NULL, target_price REAL NOT NULL, maximum_loss_usd REAL NOT NULL,
               mode TEXT NOT NULL, status TEXT NOT NULL, broker_order_id TEXT, broker_trade_id TEXT,
-              realized_pnl_usd REAL);
+              realized_pnl_usd REAL, score REAL, model_version TEXT, closed_at TEXT,
+              max_favorable_pnl_usd REAL DEFAULT 0, max_adverse_pnl_usd REAL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+            columns = {str(row[1]) for row in self.db.execute("PRAGMA table_info(intents)")}
+            for name, kind in (("score", "REAL"), ("model_version", "TEXT"), ("closed_at", "TEXT"),
+                               ("max_favorable_pnl_usd", "REAL DEFAULT 0"),
+                               ("max_adverse_pnl_usd", "REAL DEFAULT 0")):
+                if name not in columns:
+                    self.db.execute(f"ALTER TABLE intents ADD COLUMN {name} {kind}")
 
     def event(self, kind: str, payload: dict) -> None:
         with self.lock, self.db:
@@ -99,9 +107,10 @@ class Ledger:
     def add_intent(self, proposal: dict, mode: str, status: str) -> None:
         with self.db:
             self.db.execute("""INSERT INTO intents(id,created_at,expires_at,symbol,side,entry_price,quantity,stop_price,target_price,
-              maximum_loss_usd,mode,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+              maximum_loss_usd,mode,status,score,model_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (proposal["proposal_id"], utcnow(), proposal["expires_at"], proposal["symbol"], proposal["side"], proposal["reference_price"],
-               proposal["quantity"], proposal["stop_price"], proposal["target_price"], proposal["maximum_loss_usd"], mode, status))
+               proposal["quantity"], proposal["stop_price"], proposal["target_price"], proposal["maximum_loss_usd"], mode, status,
+               proposal.get("score"), proposal.get("model_version", "FOREX_TREND_1.1")))
 
     def update_intent(self, intent_id: str, status: str, order_id: str = "", trade_id: str = "") -> None:
         with self.db:
@@ -121,15 +130,70 @@ class Ledger:
         return [dict(row) for row in self.db.execute(
             "SELECT seq,recorded_at,type,record_hash FROM events ORDER BY seq DESC LIMIT ?", (limit,)).fetchall()]
 
-    def close_broker_intent(self, trade_id: str, realized_pnl_usd: float | None) -> None:
+    def close_broker_intent(self, trade_id: str, realized_pnl_usd: float | None) -> bool:
         with self.db:
-            self.db.execute("""UPDATE intents SET status='BROKER_CLOSED', realized_pnl_usd=?
+            cursor = self.db.execute("""UPDATE intents SET status='BROKER_CLOSED', realized_pnl_usd=?, closed_at=?
                               WHERE broker_trade_id=? AND status='OPEN'""",
-                            (realized_pnl_usd, trade_id))
+                            (realized_pnl_usd, utcnow(), trade_id))
+        return cursor.rowcount == 1
 
     def realized_pnl(self) -> float:
         row = self.db.execute("SELECT COALESCE(SUM(realized_pnl_usd),0) FROM intents WHERE realized_pnl_usd IS NOT NULL").fetchone()
         return float(row[0])
+
+    def update_excursions(self, trades: list[dict]) -> None:
+        with self.db:
+            for trade in trades:
+                trade_id = str(trade.get("id") or "")
+                if not trade_id:
+                    continue
+                current = float(trade.get("unrealizedPL") or 0) + float(trade.get("financing") or 0)
+                self.db.execute("""UPDATE intents SET
+                    max_favorable_pnl_usd=MAX(COALESCE(max_favorable_pnl_usd,0),?),
+                    max_adverse_pnl_usd=MIN(COALESCE(max_adverse_pnl_usd,0),?)
+                    WHERE broker_trade_id=? AND status='OPEN'""", (current, current, trade_id))
+
+    def model_review(self, minimum_score: float) -> dict:
+        rows = [dict(row) for row in self.db.execute("""SELECT score,realized_pnl_usd,symbol,side,closed_at,
+                    max_favorable_pnl_usd,max_adverse_pnl_usd
+                    FROM intents WHERE status IN ('BROKER_CLOSED','PAPER_CLOSED')
+                    AND realized_pnl_usd IS NOT NULL ORDER BY closed_at""").fetchall()]
+        pnls = [float(row["realized_pnl_usd"]) for row in rows]
+        wins, losses = [x for x in pnls if x > 0], [x for x in pnls if x < 0]
+        sample = len(pnls)
+        favorable = [float(row.get("max_favorable_pnl_usd") or 0) for row in rows]
+        adverse = [float(row.get("max_adverse_pnl_usd") or 0) for row in rows]
+        captured = [float(row["realized_pnl_usd"]) / float(row["max_favorable_pnl_usd"])
+                    for row in rows if float(row.get("max_favorable_pnl_usd") or 0) > 0]
+        by_symbol = {}
+        for row in rows:
+            bucket = by_symbol.setdefault(str(row["symbol"]), {"sample_size": 0, "net_pnl_usd": 0.0, "wins": 0})
+            bucket["sample_size"] += 1
+            bucket["net_pnl_usd"] = round(bucket["net_pnl_usd"] + float(row["realized_pnl_usd"]), 8)
+            bucket["wins"] += int(float(row["realized_pnl_usd"]) > 0)
+        review = {
+            "model_version": "FOREX_TREND_1.1", "sample_size": sample,
+            "wins": len(wins), "losses": len(losses),
+            "win_rate": len(wins) / sample if sample else None,
+            "net_pnl_usd": round(sum(pnls), 8),
+            "net_expectancy_usd": sum(pnls) / sample if sample else None,
+            "profit_factor": sum(wins) / abs(sum(losses)) if losses else None,
+            "average_win_usd": sum(wins) / len(wins) if wins else None,
+            "average_loss_usd": sum(losses) / len(losses) if losses else None,
+            "average_max_favorable_excursion_usd": sum(favorable) / sample if sample else None,
+            "average_max_adverse_excursion_usd": sum(adverse) / sample if sample else None,
+            "average_profit_capture": sum(captured) / len(captured) if captured else None,
+            "by_symbol": by_symbol,
+            "champion_minimum_score": minimum_score,
+            "status": "MODEL LOCKED - COLLECTING EVIDENCE" if sample < 30 else "ELIGIBLE FOR PROSPECTIVE CHALLENGER REVIEW",
+            "parameters_changed": False,
+            "promotion_rule": "At least 30 closed trades, positive net expectancy and profit factor above 1.0; challenger must then win prospectively without worse drawdown",
+        }
+        last_sample = int(self.setting("model_review_sample_size", "-1"))
+        if sample != last_sample:
+            self.set_setting("model_review_sample_size", str(sample))
+            self.event("MODEL_REVIEW", review)
+        return review
 
 
 def closed_trade_pnl(transactions: list[dict]) -> dict[str, float]:
@@ -145,7 +209,10 @@ def closed_trade_pnl(transactions: list[dict]) -> dict[str, float]:
             trade_id = str(leg.get("tradeID") or "")
             if not trade_id:
                 continue
-            values[trade_id] = values.get(trade_id, 0.0) + float(leg.get("realizedPL") or 0)
+            net = (float(leg.get("realizedPL") or 0) + float(leg.get("financing") or 0)
+                   + float(leg.get("dividendAdjustment") or 0)
+                   - abs(float(leg.get("guaranteedExecutionFee") or 0)))
+            values[trade_id] = values.get(trade_id, 0.0) + net
     return values
 
 
@@ -204,7 +271,9 @@ class Executor:
         path = os.getenv("FOREX_LEDGER_PATH", "/app/data/forex.sqlite3")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.ledger = Ledger(path)
-        self.engine = ForexEngine(AssetPolicy.from_env())
+        base_policy = AssetPolicy.from_env()
+        self.engine = ForexEngine(replace(
+            base_policy, minimum_score=float(os.getenv("FOREX_MIN_SCORE", "80"))))
         self.max_risk = min(2.50, max(0.10, float(os.getenv("FOREX_MAX_RISK_USD", "2.50"))))
 
     def reconcile(self) -> dict:
@@ -225,14 +294,19 @@ class Executor:
             actual = {str(item.get("id") or "") for item in trades}
             unexpected = actual - expected
             if unexpected: raise BrokerError("unexpected broker trade detected; entries paused")
+            self.ledger.update_excursions(trades)
             pnl_by_trade = closed_trade_pnl(transactions)
             for position in broker_positions:
                 trade_id = str(position.get("broker_trade_id") or "")
                 if trade_id and trade_id not in actual:
                     pnl = pnl_by_trade.get(trade_id)
-                    self.ledger.close_broker_intent(trade_id, pnl)
-                    self.ledger.event("BROKER_TRADE_CLOSED", {"intent_id": position["id"],
-                                      "trade_id": trade_id, "realized_pnl_usd": pnl})
+                    if pnl is None:
+                        closed = self.adapter.trade(trade_id).get("trade", {})
+                        pnl = (float(closed.get("realizedPL") or 0) + float(closed.get("financing") or 0)
+                               + float(closed.get("dividendAdjustment") or 0))
+                    if self.ledger.close_broker_intent(trade_id, pnl):
+                        self.ledger.event("BROKER_TRADE_CLOSED", {"intent_id": position["id"],
+                                          "trade_id": trade_id, "realized_pnl_usd": pnl})
             for trade in trades:
                 if not trade.get("stopLossOrder") or not trade.get("takeProfitOrder"):
                     trade_id = str(trade.get("id") or "")
@@ -260,6 +334,7 @@ class Executor:
 
     def process(self, snapshot: dict) -> dict:
         proposal = vars(self.engine.evaluate(snapshot))
+        proposal["model_version"] = "FOREX_TREND_1.1"
         calendar_ok = snapshot.get("calendar_verified") is True and str(snapshot.get("economic_event_source", "")).startswith("https://")
         mode = "LIVE" if live_armed(self.adapter) else "PRACTICE" if practice_armed(self.adapter) else "PAPER_ONLY"
         if mode in {"LIVE", "PRACTICE"} and not calendar_ok:
@@ -328,7 +403,8 @@ class Executor:
                 pnl = (price - float(position["entry_price"])) * float(position["quantity"]) * direction
                 self.ledger.update_intent(position["id"], "PAPER_CLOSED")
                 with self.ledger.db:
-                    self.ledger.db.execute("UPDATE intents SET realized_pnl_usd=? WHERE id=?", (round(pnl, 8), position["id"]))
+                    self.ledger.db.execute("UPDATE intents SET realized_pnl_usd=?,closed_at=? WHERE id=?",
+                                           (round(pnl, 8), utcnow(), position["id"]))
                 event = {"intent_id": position["id"], "symbol": position["symbol"], "fill_price": price,
                          "reason": reason, "realized_pnl_usd": round(pnl, 8)}
                 self.ledger.event("PAPER_CLOSE", event); closes.append(event)
@@ -336,7 +412,7 @@ class Executor:
 
     def scan(self) -> None:
         if not 0 <= self.engine.policy.minimum_score <= 100:
-            raise BrokerError(f"ASSET_MIN_SCORE must be between 0 and 100; got {self.engine.policy.minimum_score:g}")
+            raise BrokerError(f"FOREX_MIN_SCORE must be between 0 and 100; got {self.engine.policy.minimum_score:g}")
         reconciliation = self.reconcile()
         payload = fetch_json(os.environ["MULTI_ASSET_FEED_URL"])
         snapshots = validated_snapshots(payload)
@@ -362,6 +438,7 @@ class Executor:
                   "snapshots": snapshots, "outcomes": outcomes, "paper_closes": closes,
                   "intents": self.ledger.recent_intents(), "events": self.ledger.recent_events(),
                   "realized_pnl_usd": self.ledger.realized_pnl(),
+                  "model_review": self.ledger.model_review(self.engine.policy.minimum_score),
                   "capital_baseline_nav": float(os.getenv("FOREX_LIVE_BASELINE_USD", "0") or 0),
                   "daily_baseline_nav": float(self.ledger.setting("daily_baseline_nav", str(reconciliation["summary"]["nav"])))}
         with LOCK:

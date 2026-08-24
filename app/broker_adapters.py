@@ -105,8 +105,8 @@ class OandaAdapter:
             "positionFill": "DEFAULT",
             "priceBound": f"{price_bound:.{precision}f}",
             "clientExtensions": {"id": client_order_id, "tag": "primus-forex-v1"},
-            "stopLossOnFill": {"price": str(proposal["stop_price"]), "timeInForce": "GTC"},
-            "takeProfitOnFill": {"price": str(proposal["target_price"]), "timeInForce": "GTC"},
+            "stopLossOnFill": {"price": f'{float(proposal["stop_price"]):.{precision}f}', "timeInForce": "GTC"},
+            "takeProfitOnFill": {"price": f'{float(proposal["target_price"]):.{precision}f}', "timeInForce": "GTC"},
         }
         return request_json(
             f"{self.base}/v3/accounts/{self.account}/orders",
@@ -117,6 +117,9 @@ class OandaAdapter:
 
     def open_trades(self) -> list[dict[str, Any]]:
         return request_json(f"{self.base}/v3/accounts/{self.account}/openTrades", token=self.token).get("trades", [])
+
+    def trade(self, trade_id: str) -> dict:
+        return request_json(f"{self.base}/v3/accounts/{self.account}/trades/{trade_id}", token=self.token)
 
     def pending_orders(self) -> list[dict[str, Any]]:
         return request_json(f"{self.base}/v3/accounts/{self.account}/pendingOrders", token=self.token).get("orders", [])
