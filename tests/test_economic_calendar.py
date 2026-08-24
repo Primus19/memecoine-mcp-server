@@ -3,6 +3,8 @@ import os
 import json
 import threading
 import urllib.request
+import tempfile
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -10,10 +12,38 @@ from app.economic_calendar import (build_request, normalize, parse_bls_ics,
                                    Handler, LOCK, STATE, ThreadingHTTPServer,
                                    parse_boe_html, parse_boj_html,
                                    parse_ecb_html, parse_fomc_html, parse_fred_calendar_html,
-                                   scan_official_composite)
+                                   scan_official_composite, load_official_snapshot)
 
 
 class CalendarTests(unittest.TestCase):
+    def test_validated_snapshot_fallback_refreshes_observed_at(self):
+        clock = datetime(2026, 8, 24, 12, tzinfo=timezone.utc)
+        payload = {"snapshot_generated_at": (clock - timedelta(hours=1)).isoformat(),
+                   "source_url": "https://fred.stlouisfed.org/releases/calendar",
+                   "coverage": ["USD", "EUR", "GBP", "JPY"], "sources": [],
+                   "events": [{"currency":"USD", "impact":"HIGH", "event":"CPI",
+                               "time": (clock + timedelta(hours=2)).isoformat(),
+                               "source_url":"https://fred.stlouisfed.org/releases/calendar",
+                               "blackout_before_minutes":60, "blackout_after_minutes":60}]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "snapshot.json"
+            path.write_text(json.dumps(payload))
+            result = load_official_snapshot(clock, path)
+        self.assertEqual(clock.isoformat(), result["observed_at"])
+        self.assertEqual("official_snapshot", result["provider"])
+        self.assertEqual(120, result["events"][0]["minutes_until"])
+
+    def test_stale_snapshot_fails_closed(self):
+        clock = datetime(2026, 8, 24, 12, tzinfo=timezone.utc)
+        payload = {"snapshot_generated_at": (clock - timedelta(days=3)).isoformat(),
+                   "source_url":"https://fred.stlouisfed.org/releases/calendar",
+                   "coverage":["USD", "EUR", "GBP", "JPY"], "events":[]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "snapshot.json"
+            path.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "snapshot stale"):
+                load_official_snapshot(clock, path)
+
     def test_official_fetch_error_names_the_failed_source(self):
         with patch("urllib.request.urlopen", side_effect=OSError("blocked")):
             with self.assertRaisesRegex(RuntimeError, "official calendar source fred_employment failed"):
@@ -107,6 +137,17 @@ class CalendarTests(unittest.TestCase):
         event = parse_fred_calendar_html(body)[0]
         self.assertEqual("USD", event["currency"])
         self.assertEqual("2026-09-04T12:30:00+00:00", event["time"])
+
+    def test_fomc_parser_does_not_leak_adjacent_year_panels(self):
+        body = '''<div class="panel panel-default"><a>2026 FOMC Meetings</a>
+        <div class="fomc-meeting__month"><strong>September</strong></div>
+        <div class="fomc-meeting__date">15-16*</div></div>
+        <div class="panel panel-default"><a>2025 FOMC Meetings</a>
+        <div class="fomc-meeting__month"><strong>September</strong></div>
+        <div class="fomc-meeting__date">17-18*</div></div>'''
+        events = parse_fomc_html(body, 2026)
+        self.assertEqual(1, len(events))
+        self.assertEqual("2026-09-16T18:00:00+00:00", events[0]["time"])
 
     def test_composite_verifies_coverage_even_when_window_is_quiet(self):
         clock = datetime(2026, 8, 24, tzinfo=timezone.utc)
