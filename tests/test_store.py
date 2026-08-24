@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from cryptography.fernet import Fernet
 from app.store import Store
@@ -43,3 +44,43 @@ class StoreTests(unittest.TestCase):
         controls=self.store.update_equity_controls(22)
         self.assertIn("two consecutive losses",controls["circuit_breakers"])
         self.assertTrue(self.store.paused())
+
+    def test_profitable_close_does_not_use_unsettled_cash_for_drawdown(self):
+        self.store.initialize_baseline(25)
+        self.store.set_setting("peak_equity_usdc",26.068091076)
+        payload={"ticket_id":"t1","recommendation_hash":"h1","model_version":"3.1","created_at":"x","expires_at":"x","product_id":"FARTCOIN-USDC","score":85}
+        self.store.issue_recommendation(payload)
+        self.store.add_position({"ticket_id":"t1","product_id":"FARTCOIN-USDC","notional_usdc":23.75,"limit_price":.181},"o1")
+
+        result=self.store.record_closed_trade("t1",.0444456428,.1853943158)
+
+        self.assertAlmostEqual(result["controls"]["equity_usdc"],25.0444456428)
+        self.assertAlmostEqual(result["controls"]["drawdown_pct"],3.9268139359)
+        self.assertEqual(result["controls"]["equity_source"],"REALIZED_CAPITAL")
+        self.assertEqual(result["controls"]["circuit_breakers"],[])
+        self.assertFalse(self.store.paused())
+
+    def test_open_trade_equity_uses_fill_pnl_not_account_settlement(self):
+        self.store.initialize_baseline(25)
+        self.assertAlmostEqual(self.store.reconciled_equity(.305993376),25.305993376)
+
+    def test_real_closed_loss_still_triggers_drawdown_pause(self):
+        self.store.initialize_baseline(25)
+        payload={"ticket_id":"t1","recommendation_hash":"h1","model_version":"3.1","created_at":"x","expires_at":"x","product_id":"FARTCOIN-USDC","score":85}
+        self.store.issue_recommendation(payload)
+        self.store.add_position({"ticket_id":"t1","product_id":"FARTCOIN-USDC","notional_usdc":23.75,"limit_price":.181},"o1")
+
+        result=self.store.record_closed_trade("t1",-4,-16.84)
+
+        self.assertIn("daily drawdown reached 15%",result["controls"]["circuit_breakers"])
+        self.assertTrue(self.store.paused())
+
+    def test_external_flow_waits_for_close_settlement_grace(self):
+        self.store.initialize_baseline(25)
+        until=(datetime.now(timezone.utc)+timedelta(seconds=60)).isoformat()
+        self.store.set_setting("settlement_grace_until",until)
+
+        result=self.store.sync_external_flow(1.0264)
+
+        self.assertEqual(result["status"],"SETTLEMENT_GRACE")
+        self.assertEqual(float(self.store.setting("net_external_flows_usdc")),0)
