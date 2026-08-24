@@ -13,9 +13,19 @@ from .broker_adapters import OandaAdapter
 
 LOCK = threading.RLock()
 STATE = {"ok": False, "scanned_at": "", "snapshots": [], "error": "not scanned"}
+CORE_FOREX_SYMBOLS = (
+    "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD",
+    "USD_CHF", "NZD_USD", "EUR_JPY", "GBP_JPY", "EUR_GBP",
+)
 
 
 def pct(a: float, b: float) -> float: return 0.0 if a == 0 else (b - a) / a * 100
+
+
+def configured_symbols(value: str | None = None) -> list[str]:
+    """Keep the approved liquid core and allow operators to append more pairs."""
+    extras = [s.strip().upper() for s in (value if value is not None else os.getenv("FOREX_SYMBOLS", "")).split(",") if s.strip()]
+    return list(dict.fromkeys((*CORE_FOREX_SYMBOLS, *extras)))
 
 
 def calendar_evidence(symbol: str) -> dict:
@@ -98,8 +108,7 @@ def main():
     if os.getenv("MULTI_ASSET_FEED_ENABLED", "false").lower() != "true": raise SystemExit("MULTI_ASSET_FEED_ENABLED is not true")
     threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler).serve_forever, daemon=True).start()
     interval = max(30, int(os.getenv("MULTI_ASSET_FEED_INTERVAL_SECONDS", "60")))
-    default_symbols = "EUR_USD,GBP_USD,USD_JPY,AUD_USD,USD_CAD,USD_CHF,NZD_USD,EUR_JPY,GBP_JPY,EUR_GBP"
-    symbols = [s.strip().upper() for s in os.getenv("FOREX_SYMBOLS", default_symbols).split(",") if s.strip()]
+    symbols = configured_symbols()
     while True:
         try:
             adapter = OandaAdapter()
