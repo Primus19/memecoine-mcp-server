@@ -63,6 +63,7 @@ def reconcile():
     if position["status"]=="SUBMITTED" and status=="FILLED":store.event("ENTRY_FILLED",{"order_id":position.get("order_id"),"fill_summary":summary},position["ticket_id"])
     store.update_position(position["ticket_id"],status)
     unrealized=summary["sell_value_usdc"]+mark_value-summary["buy_cost_usdc"]
+    store.update_position_excursions(position["ticket_id"],unrealized)
     equity=store.reconciled_equity(unrealized);controls=store.update_equity_controls(equity,source="FILLS_AND_MARK")
     reconciliation={"risk_equity_usdc":equity,"account_snapshot_equity_usdc":pf["usdc_total"]+mark_value,"settlement_gap_usdc":equity-(pf["usdc_total"]+mark_value),"source":"FILLS_AND_MARK"}
     return {"open_position":{**position,"status":status,"mark_price":product["price"],"mark_value_usdc":mark_value,"net_unrealized_pnl_usdc":unrealized,"fills":summary},"usdc_total":pf["usdc_total"],"controls":controls,"equity_reconciliation":reconciliation}
@@ -84,7 +85,8 @@ def supervise(regime=""):
     if target_1 and mark>=target_1 and store.setting(milestone_key)!="1":
         store.set_setting(milestone_key,"1");store.event("TARGET_1_REACHED",{"mark_price":mark,"target_1_price":target_1},ticket_id)
     reason=levels["exit_reason"]
-    if not reason:return {"status":"MONITORING","mark_price":mark,"high_water_price":high,"trail_active":trail_active,"effective_stop_price":trail_stop,"profit_protection_challenger":challenger,"state":state}
+    audit={"entry_price":entry,"entry_score":ticket.get("score"),"component_scores":ticket.get("component_scores"),"entry_spread_bps":ticket.get("spread_bps"),"entry_slippage_bps":ticket.get("slippage_bps"),"stop_price":ticket.get("stop_price"),"target_1_price":ticket.get("target_1_price"),"target_price":ticket.get("target_price"),"recommendation_hash":record.get("recommendation_hash")}
+    if not reason:return {"status":"MONITORING","mark_price":mark,"high_water_price":high,"trail_active":trail_active,"effective_stop_price":trail_stop,"entry_audit":audit,"profit_protection_challenger":challenger,"state":state}
     ex=exchange();cancel=ex.cancel_open_sell_orders(position["product_id"]);time.sleep(1);size=ex.available_base_balance(position["product_id"])
     if size<=0:return {"status":"EXIT_WAITING_FOR_CANCEL","reason":reason,"cancel":cancel,"state":reconcile()}
     sale=ex.market_sell(position["product_id"],size,"managed-exit-"+str(uuid.uuid4()));exit_id=order_id(sale)
