@@ -91,3 +91,17 @@ class StoreTests(unittest.TestCase):
         self.store.mark_recommendation("t-reject","SUBMISSION_REJECTED",rejection_reason="broker rejected attached order")
         row=self.store.recent_recommendations()[0]
         self.assertEqual("broker rejected attached order",row["rejection_reason"])
+
+    def test_closed_trade_review_retains_mfe_and_mae(self):
+        payload={"ticket_id":"t-excursion","recommendation_hash":"h-excursion","model_version":"3.1",
+                 "created_at":"x","expires_at":"x","product_id":"TURBO-USDC","score":85}
+        self.store.issue_recommendation(payload)
+        self.store.add_position({"ticket_id":"t-excursion","product_id":"TURBO-USDC",
+                                 "notional_usdc":20,"limit_price":1},"o-excursion")
+        self.store.update_position_excursions("t-excursion",1.25)
+        self.store.update_position_excursions("t-excursion",-.40)
+        self.store.record_closed_trade("t-excursion",.75,3.75)
+        review=self.store.model_review("trade_close","trade:t-excursion")
+        self.assertAlmostEqual(1.25,review["average_max_favorable_excursion_usdc"])
+        self.assertAlmostEqual(-.40,review["average_max_adverse_excursion_usdc"])
+        self.assertAlmostEqual(.60,review["average_profit_capture"])

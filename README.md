@@ -225,18 +225,19 @@ FOREX_EXECUTOR_ENABLED=true
 FOREX_EXECUTOR_INTERVAL_SECONDS=30
 FOREX_LEDGER_PATH=/app/data/forex.sqlite3
 MULTI_ASSET_FEED_URL=https://multi-asset-market-feed-production.up.railway.app/snapshots
-FOREX_MIN_SCORE=75
-FOREX_MAX_RISK_USD=2.50
-FOREX_MAX_OPEN_POSITIONS=2
+FOREX_MIN_SCORE=80
+FOREX_MAX_RISK_USD=0.50
+FOREX_MAX_OPEN_POSITIONS=1
+FOREX_MAX_COMBINED_RISK_USD=0.50
 FOREX_DAILY_LOSS_LIMIT_USD=2.50
 FOREX_MAX_NOTIONAL_USD=50.00
 FOREX_MAX_MARGIN_USED_USD=5.00
 FOREX_MAX_ENTRY_DRIFT_BPS=15
 ```
 
-The executor hard-caps this setting at two positions. A second position is
-accepted only when it shares no currency with an existing position and the
-combined planned loss and margin remain within their account-level limits.
+The approved production default is one position with $0.50 maximum planned
+loss. The executor retains hard portfolio-risk, margin and currency-overlap
+guards if a separately reviewed deployment ever enables a second position.
 
 Use `/railway.forex-executor.json` as the custom Railway config path for both
 Forex executor services. `/health` is process liveness and remains HTTP 200
@@ -272,6 +273,8 @@ LIVE_EMERGING_MIN_MARKET_CAP_USD=10000000
 LIVE_EMERGING_MIN_VOLUME_24H_USD=1000000
 LIVE_EMERGING_MAX_SPREAD_BPS=30
 LIVE_EMERGING_MAX_SLIPPAGE_BPS=30
+LIVE_ESTIMATED_FEE_BPS_PER_SIDE=120
+LIVE_MIN_NET_EDGE_BPS=50
 PILOT_EMERGING_NOTIONAL_USDC=5.00
 PILOT_EMERGING_MAX_LOSS_USDC=0.25
 ```

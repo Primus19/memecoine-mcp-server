@@ -15,6 +15,10 @@ class ForexReportTests(unittest.TestCase):
                           "minimum_score":80, "reason":"score below minimum"}], "intents": [], "events": [],
             "model_review": {"model_version":"FOREX_TREND_1.1", "sample_size":0,
                              "status":"MODEL LOCKED - COLLECTING EVIDENCE"},
+            "risk_configuration": {"minimum_score":80,"maximum_open_positions":1,
+                "maximum_risk_per_trade_usd":.5,"maximum_combined_risk_usd":.5,
+                "current_open_risk_usd":0,"daily_loss_limit_usd":2.5,
+                "maximum_notional_usd":50,"maximum_margin_used_usd":5,"currency_overlap_guard":True},
         })
         self.assertIn("Production Forex Dashboard", body)
         self.assertIn("Market and calendar", body)
@@ -22,6 +26,8 @@ class ForexReportTests(unittest.TestCase):
         self.assertIn("PRACTICE_ARMED", body)
         self.assertIn("76.10 / 80.00", body)
         self.assertIn("Model quality and guarded improvement", body)
+        self.assertIn("Effective guardrails", body)
+        self.assertIn("Position limit:</b> 1", body)
         self.assertNotIn("<script", body.lower())
 
 

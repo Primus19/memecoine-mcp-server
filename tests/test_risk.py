@@ -67,6 +67,17 @@ class RiskTests(unittest.TestCase):
         t=ticket();t["source_timestamp"]=(datetime.now(timezone.utc)-timedelta(minutes=3)).isoformat()
         with self.assertRaisesRegex(TicketRejected,"fresh"):self.validate(t)
 
+    def test_rejects_trade_whose_target_cannot_clear_round_trip_costs(self):
+        t=ticket();t["target_price"]=.102
+        with self.assertRaisesRegex(TicketRejected,"round-trip costs"):
+            self.validate(t)
+
+    def test_fee_assumption_is_configurable_but_remains_fee_aware(self):
+        t=ticket();t["target_price"]=.105
+        with patch.dict("os.environ",{"LIVE_ESTIMATED_FEE_BPS_PER_SIDE":"10",
+                                      "LIVE_MIN_NET_EDGE_BPS":"25"}):
+            self.validate(t)
+
     def test_emerging_tier_is_small_and_stricter(self):
         t=ticket(5);t.update(opportunity_tier="EMERGING",market_cap_usd=15_000_000,
                              volume_24h_usd=2_000_000,max_loss_usdc=.25,score=86,
