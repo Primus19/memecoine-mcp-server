@@ -10,6 +10,7 @@ from app.evidence_worker import (
     evaluate_goplus_solana,
     score_news,
 )
+from app.policy import OpportunityPolicy
 
 
 class EvidenceWorkerTests(unittest.TestCase):
@@ -105,6 +106,19 @@ class EvidenceWorkerTests(unittest.TestCase):
         second = adapter.coin_detail("turbo")
         self.assertEqual(first, second)
         adapter.json.assert_called_once()
+
+    def test_market_page_uses_requested_page_for_full_research_coverage(self):
+        adapter = EvidenceAdapter.__new__(EvidenceAdapter)
+        adapter.cg_base = "https://api.example"
+        adapter.json = Mock(return_value=[])
+
+        adapter.market_page(2)
+
+        self.assertIn("page=2", adapter.json.call_args.args[0])
+
+    def test_evidence_policy_includes_documented_emerging_tier(self):
+        policy = OpportunityPolicy()
+        self.assertEqual("EMERGING", policy.tier(15_000_000, 2_000_000))
 
 
 if __name__ == "__main__":

@@ -528,6 +528,7 @@ Required variables:
 ```text
 EVIDENCE_ADAPTER_ENABLED=true
 EVIDENCE_SCAN_INTERVAL_SECONDS=300
+EVIDENCE_MARKET_PAGES=2
 EVIDENCE_REQUEST_SPACING_SECONDS=2.5
 EVIDENCE_HTTP_MAX_RETRIES=3
 EXECUTOR_BASE_URL=https://memecoin-mcp-server-production.up.railway.app
@@ -543,6 +544,12 @@ bounded evidence to the authenticated research service. Keep
 `LIVE_TRADING=false` until a genuine adapter-produced candidate completes the
 full path and returns `DRY_RUN_ONLY`. Do not use fabricated evidence to force a
 production test.
+
+The evidence adapter uses the same established and emerging liquidity policy
+as the research feed. Candidates are ranked with an auditable top-ten summary
+using model score, safety, verified news, and 1-hour momentum. Product identity
+does not impose a cooldown or preference: the top-ranked qualifying candidate
+advances, while every safety and execution gate remains authoritative.
 
 The adapter spaces requests per upstream host, honors HTTP `Retry-After`, uses
 bounded retries, caches CoinGecko identity metadata for six hours, and isolates

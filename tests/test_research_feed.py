@@ -163,6 +163,15 @@ class ResearchFeedTests(unittest.TestCase):
         markets = [self.market(id=str(i), price_change_percentage_1h_in_currency=-1, price_change_percentage_24h_in_currency=-3) for i in range(6)]
         self.assertEqual("FALLING", ResearchFeed.regime(markets)["classification"])
 
+    def test_equal_scores_use_evidence_and_momentum_not_feed_order(self):
+        base = {"component_scores": {"safety": 15, "news": 0, "momentum": 9},
+                "change_1h_pct": 1, "product_id": "AAA-USDC"}
+        stronger_news = {**base, "component_scores": {"safety": 15, "news": 4, "momentum": 5},
+                         "product_id": "BBB-USDC"}
+        values = [base, stronger_news]
+        values.sort(key=ResearchFeed.candidate_rank_key)
+        self.assertEqual("BBB-USDC", values[0]["product_id"])
+
     def test_rate_limit_retries_and_honors_retry_after(self):
         feed = self.make_feed()
         feed.http_max_retries = 2

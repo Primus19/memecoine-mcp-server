@@ -120,7 +120,10 @@ class Store:
             bucket=by_product.setdefault(product,{"sample_size":0,"wins":0,"net_pnl_usdc":0.0})
             bucket["sample_size"]+=1;bucket["wins"]+=int(pnl>0);bucket["net_pnl_usdc"]=round(bucket["net_pnl_usdc"]+pnl,8)
             ticket_id=str(payload.get("ticket_id") or "");entry=float(row.get("entry_price") or 0);notional=float(row.get("entry_notional") or 0)
-            peak=float(row.get("max_favorable_pnl") or 0);peak_opportunities.append(peak)
+            stored_peak=float(row.get("max_favorable_pnl") or 0)
+            high=float(self.setting("high_water:"+ticket_id,str(entry)) or entry) if ticket_id else entry
+            legacy_peak=notional*(high/entry-1) if entry>0 else 0
+            peak=max(stored_peak,legacy_peak);peak_opportunities.append(peak)
             favorable.append(peak);adverse.append(float(row.get("max_adverse_pnl") or 0))
             if peak>0:captures.append(pnl/peak)
         p={"model_version":"3.1","sample_size":len(pnls),"wins":len(wins),"losses":len(losses),"win_rate":len(wins)/len(pnls) if pnls else None,"net_pnl_usdc":sum(pnls),"net_expectancy_usdc":sum(pnls)/len(pnls) if pnls else None,"profit_factor":sum(wins)/abs(sum(losses)) if losses else None,"average_win_usdc":sum(wins)/len(wins) if wins else None,"average_loss_usdc":sum(losses)/len(losses) if losses else None,"average_peak_opportunity_usdc":sum(peak_opportunities)/len(peak_opportunities) if peak_opportunities else None,"average_max_favorable_excursion_usdc":sum(favorable)/len(favorable) if favorable else None,"average_max_adverse_excursion_usdc":sum(adverse)/len(adverse) if adverse else None,"average_profit_capture":sum(captures)/len(captures) if captures else None,"by_product":by_product,"status":"MODEL LOCKED - COLLECTING EVIDENCE" if len(pnls)<30 else "ELIGIBLE FOR PROSPECTIVE CHALLENGER REVIEW","parameters_changed":False,"promotion_rule":"At least 30 closed trades; positive expectancy and profit factor above 1.0; challenger must then outperform prospectively without materially worse drawdown","trigger":trigger}

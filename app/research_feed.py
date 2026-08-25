@@ -264,6 +264,18 @@ class ResearchFeed:
                 "average_current_return_pct": (sum(float(x.get("current_return_pct") or 0) for x in shadows) / len(shadows) if shadows else None),
                 "best_missed_return_pct": max((float(x.get("max_return_pct") or 0) for x in shadows), default=None)}
 
+    @staticmethod
+    def candidate_rank_key(candidate: dict[str, Any]) -> tuple[float, float, float, float, str]:
+        """Rank equal-score candidates on observed facts, never feed ordering."""
+        components = candidate.get("component_scores") or {}
+        return (
+            -float(sum(components.values())),
+            -float(components.get("safety") or 0),
+            -float(components.get("news") or 0),
+            -float(candidate.get("change_1h_pct") or 0),
+            str(candidate.get("product_id") or ""),
+        )
+
     def scan_once(self) -> dict[str, Any]:
         started = now_utc()
         products_payload = self.fetch(f"{self.executor_url}/api/eligible-products", self.executor_token)
@@ -294,8 +306,23 @@ class ResearchFeed:
                                  "opportunity_tier": self.policy.tier(market.get("market_cap"), market.get("total_volume")),
                                  "score": sum(components.values()), "failures": failures})
                 with self.lock: self.record_shadow(product_id, market, failures, components, started)
-        candidates.sort(key=lambda item: sum(item["component_scores"].values()), reverse=True)
-        status = {"ok": True, "scanned_at": iso_now(), "duration_ms": round((now_utc() - started).total_seconds() * 1000), "market_count": len(markets), "coinbase_product_count": len(products), "regime": regime, "candidate_count": len(candidates), "candidate_tiers": {"established": sum(x.get("opportunity_tier") == "ESTABLISHED" for x in candidates), "emerging": sum(x.get("opportunity_tier") == "EMERGING" for x in candidates)}, "shadow_summary": self.shadow_summary(), "rejected_attested": rejected[:50]}
+        candidates.sort(key=self.candidate_rank_key)
+        for rank, candidate in enumerate(candidates, 1):
+            candidate["candidate_rank"] = rank
+            candidate["selection_rationale"] = (
+                "Ranked by total Model 3.1 score, safety, verified news, then 1h momentum; "
+                "product identity adds no preference or restriction, and all live risk gates remain authoritative."
+            )
+        ranked = [{
+            "rank": item["candidate_rank"], "product_id": item["product_id"],
+            "opportunity_tier": item["opportunity_tier"],
+            "score": sum(item["component_scores"].values()),
+            "component_scores": item["component_scores"],
+            "change_1h_pct": item["change_1h_pct"],
+            "change_24h_pct": item["change_24h_pct"],
+            "selection_rationale": item["selection_rationale"],
+        } for item in candidates[:10]]
+        status = {"ok": True, "scanned_at": iso_now(), "duration_ms": round((now_utc() - started).total_seconds() * 1000), "market_count": len(markets), "coinbase_product_count": len(products), "regime": regime, "candidate_count": len(candidates), "candidate_tiers": {"established": sum(x.get("opportunity_tier") == "ESTABLISHED" for x in candidates), "emerging": sum(x.get("opportunity_tier") == "EMERGING" for x in candidates)}, "ranked_candidates": ranked, "shadow_summary": self.shadow_summary(), "rejected_attested": rejected[:50]}
         with self.lock:
             self.state["candidates"], self.state["status"] = candidates, status
             self._save()
