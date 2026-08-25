@@ -28,6 +28,7 @@ class ForexReportTests(unittest.TestCase):
         self.assertIn("Model quality and guarded improvement", body)
         self.assertIn("Effective guardrails", body)
         self.assertIn("Position limit:</b> 1", body)
+        self.assertIn("Position-limit reconciliation", body)
         self.assertNotIn("<script", body.lower())
 
 

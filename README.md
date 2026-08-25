@@ -235,9 +235,10 @@ FOREX_MAX_MARGIN_USED_USD=5.00
 FOREX_MAX_ENTRY_DRIFT_BPS=15
 ```
 
-The approved production default is one position with $0.50 maximum planned
-loss. The executor retains hard portfolio-risk, margin and currency-overlap
-guards if a separately reviewed deployment ever enables a second position.
+The approved production limit is hard-coded at one position with $0.50 maximum
+planned loss and cannot be raised by stale Railway variables. Two protected
+positions created during the briefly expanded policy are reconciled and
+supervised to their normal exits, but no additional entry is admitted.
 
 Use `/railway.forex-executor.json` as the custom Railway config path for both
 Forex executor services. `/health` is process liveness and remains HTTP 200

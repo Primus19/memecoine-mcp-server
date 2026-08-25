@@ -331,7 +331,8 @@ class Executor:
 
     @staticmethod
     def max_positions() -> int:
-        return max(1, min(2, int(os.getenv("FOREX_MAX_OPEN_POSITIONS", "1"))))
+        # Production safety baseline: environment drift cannot raise this cap.
+        return 1
 
     @staticmethod
     def currencies(symbol: str) -> set[str]:
@@ -348,8 +349,10 @@ class Executor:
             self.ledger.set_setting("last_transaction_id", summary["last_transaction_id"])
         self.ledger.event("BROKER_RECONCILIATION", {"summary": summary, "open_trades": trades,
                                                      "pending_orders": pending, "transactions": transactions})
-        if len(trades) > self.max_positions():
-            raise BrokerError("broker position count exceeds limit")
+        # Two protected trades may exist from the briefly expanded policy.
+        # Keep reconciling and supervising them, but never admit another entry.
+        if len(trades) > 2:
+            raise BrokerError("broker position count exceeds emergency reconciliation limit")
         if live_armed(self.adapter) or practice_armed(self.adapter):
             broker_positions = self.ledger.broker_positions()
             expected = {str(item.get("broker_trade_id") or "") for item in broker_positions if item.get("broker_trade_id")}
@@ -423,8 +426,7 @@ class Executor:
         if self.ledger.symbol_in_cooldown(str(proposal["symbol"]), int(os.getenv("FOREX_SYMBOL_COOLDOWN_SECONDS", "3600"))):
             raise MultiAssetRejected("symbol cooldown active")
         proposal["maximum_loss_usd"] = self.max_risk
-        configured_portfolio_cap = max(self.max_risk, float(os.getenv("FOREX_MAX_COMBINED_RISK_USD", "0.50")))
-        portfolio_risk_cap = max(self.max_risk, min(1.0, configured_portfolio_cap))
+        portfolio_risk_cap = self.max_risk
         if self.ledger.open_risk() + self.max_risk > portfolio_risk_cap + 1e-9:
             raise MultiAssetRejected("combined portfolio risk cap reached")
         intent_id = proposal["proposal_id"]
@@ -536,7 +538,8 @@ class Executor:
                       "minimum_score": self.engine.policy.minimum_score,
                       "maximum_open_positions": self.max_positions(),
                       "maximum_risk_per_trade_usd": self.max_risk,
-                      "maximum_combined_risk_usd": min(1.0, max(self.max_risk, float(os.getenv("FOREX_MAX_COMBINED_RISK_USD", "0.50")))),
+                      "maximum_combined_risk_usd": self.max_risk,
+                      "grandfathered_positions_above_limit": max(0, len(reconciliation["open_trades"]) - self.max_positions()),
                       "current_open_risk_usd": self.ledger.open_risk(),
                       "daily_loss_limit_usd": min(5.0, max(0.50, float(os.getenv("FOREX_DAILY_LOSS_LIMIT_USD", "2.50")))),
                       "maximum_notional_usd": max(1.0, float(os.getenv("FOREX_MAX_NOTIONAL_USD", "50"))),

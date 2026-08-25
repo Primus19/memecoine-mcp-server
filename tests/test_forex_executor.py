@@ -183,12 +183,12 @@ class ForexExecutorTests(unittest.TestCase):
             self.assertEqual(.5,ledger.open_risk())
             self.assertEqual(["AUD_USD"],ledger.open_symbols())
 
-    def test_default_forex_limit_is_one_and_hard_cap_is_two(self):
+    def test_forex_position_limit_cannot_be_raised_by_environment(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("FOREX_MAX_OPEN_POSITIONS",None)
             self.assertEqual(1,Executor.max_positions())
         with patch.dict(os.environ,{"FOREX_MAX_OPEN_POSITIONS":"8"},clear=False):
-            self.assertEqual(2,Executor.max_positions())
+            self.assertEqual(1,Executor.max_positions())
 
     def test_impossible_score_threshold_fails_readiness(self):
         executor = object.__new__(Executor)
