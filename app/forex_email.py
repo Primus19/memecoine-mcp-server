@@ -141,7 +141,12 @@ class ForexReportEmailer:
 
     @staticmethod
     def _mime_message(config: dict, content: dict) -> EmailMessage:
-        message = ForexReportEmailer._mime_message(config, content)
+        message = EmailMessage()
+        message["Subject"] = content["subject"]
+        message["From"] = config["from_address"]
+        message["To"] = ", ".join(config["recipients"])
+        message.set_content(content["text"])
+        message.add_alternative(content["html"], subtype="html")
         return message
 
     @classmethod
