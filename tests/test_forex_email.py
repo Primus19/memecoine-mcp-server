@@ -62,6 +62,44 @@ class ForexEmailTests(unittest.TestCase):
         self.assertIn("RuntimeError", ledger.settings["forex_email_last_error"])
         self.assertEqual("FOREX_EMAIL_FAILED", ledger.events[-1][0])
 
+    def test_resend_uses_https_api_without_exposing_key_in_payload(self):
+        ledger = Ledger()
+        emailer = ForexReportEmailer(ledger)
+        now = datetime(2026, 8, 25, 13, 42, tzinfo=timezone.utc)
+        env = {
+            **ENV,
+            "FOREX_EMAIL_PROVIDER": "resend",
+            "FOREX_EMAIL_RESEND_API_KEY": "resend-secret",
+        }
+
+        class Response:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self): return b'{"id":"email-1"}'
+
+        captured = {}
+        def fake_open(request, timeout):
+            captured["url"] = request.full_url
+            captured["authorization"] = request.headers["Authorization"]
+            captured["body"] = request.data.decode()
+            captured["timeout"] = timeout
+            return Response()
+
+        with patch.dict(os.environ, env, clear=False), patch("app.forex_email.urllib.request.urlopen", fake_open):
+            emailer._send({"mode": "LIVE_ARMED"}, now)
+
+        self.assertEqual("https://api.resend.com/emails", captured["url"])
+        self.assertEqual("Bearer resend-secret", captured["authorization"])
+        self.assertNotIn("resend-secret", captured["body"])
+        self.assertIn("one@example.test", captured["body"])
+
+    def test_resend_configuration_requires_api_key(self):
+        env = {**ENV, "FOREX_EMAIL_PROVIDER": "resend", "FOREX_EMAIL_RESEND_API_KEY": ""}
+        with patch.dict(os.environ, env, clear=False):
+            with self.assertRaisesRegex(ValueError, "resend_api_key"):
+                ForexReportEmailer._configuration()
+
     def test_disabled_sender_does_nothing(self):
         with patch.dict(os.environ, {"FOREX_EMAIL_REPORT_ENABLED": "false"}, clear=False):
             self.assertEqual("DISABLED", ForexReportEmailer(Ledger()).maybe_send({})["status"])

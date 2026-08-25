@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import smtplib
 import ssl
 import threading
 import time
+import urllib.request
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
@@ -61,36 +63,84 @@ class ForexReportEmailer:
         return f"[HOURLY] Forex Live Trading Dashboard - {current:%Y-%m-%d %H}:00 ET"
 
     @staticmethod
-    def _configuration() -> dict:
+    def provider() -> str:
+        return os.getenv("FOREX_EMAIL_PROVIDER", "smtp").strip().lower()
+
+    @classmethod
+    def _configuration(cls) -> dict:
         config = {
-            "host": os.getenv("FOREX_EMAIL_SMTP_HOST", "smtp.gmail.com").strip(),
-            "port": int(os.getenv("FOREX_EMAIL_SMTP_PORT", "587")),
-            "username": os.getenv("FOREX_EMAIL_SMTP_USERNAME", "").strip(),
-            "password": os.getenv("FOREX_EMAIL_SMTP_PASSWORD", ""),
+            "provider": cls.provider(),
             "from_address": os.getenv("FOREX_EMAIL_FROM", "").strip(),
             "recipients": _recipients(),
-            "starttls": _truthy(os.getenv("FOREX_EMAIL_SMTP_STARTTLS", "true")),
-            "timeout": max(5, min(60, int(os.getenv("FOREX_EMAIL_SMTP_TIMEOUT_SECONDS", "20")))),
+            "timeout": max(5, min(60, int(os.getenv("FOREX_EMAIL_TIMEOUT_SECONDS",
+                                                   os.getenv("FOREX_EMAIL_SMTP_TIMEOUT_SECONDS", "20"))))),
         }
-        missing = [name for name in ("host", "username", "password", "from_address") if not config[name]]
+        missing = [name for name in ("from_address",) if not config[name]]
         if not config["recipients"]:
             missing.append("recipients")
+        if config["provider"] == "resend":
+            config["api_key"] = os.getenv("FOREX_EMAIL_RESEND_API_KEY", "").strip()
+            if not config["api_key"]:
+                missing.append("resend_api_key")
+        elif config["provider"] == "smtp":
+            config.update({
+                "host": os.getenv("FOREX_EMAIL_SMTP_HOST", "smtp.gmail.com").strip(),
+                "port": int(os.getenv("FOREX_EMAIL_SMTP_PORT", "587")),
+                "username": os.getenv("FOREX_EMAIL_SMTP_USERNAME", "").strip(),
+                "password": os.getenv("FOREX_EMAIL_SMTP_PASSWORD", ""),
+                "starttls": _truthy(os.getenv("FOREX_EMAIL_SMTP_STARTTLS", "true")),
+            })
+            missing.extend(name for name in ("host", "username", "password") if not config[name])
+        else:
+            raise ValueError("FOREX_EMAIL_PROVIDER must be resend or smtp")
         if missing:
             raise ValueError("missing Forex email configuration: " + ", ".join(missing))
         return config
 
     @staticmethod
-    def _send(report: dict, now: datetime | None = None) -> None:
-        config = ForexReportEmailer._configuration()
+    def _content(report: dict, now: datetime | None = None) -> dict:
+        return {
+            "subject": ForexReportEmailer.subject(now),
+            "text": "The production Forex dashboard is included as HTML in this message.",
+            "html": render_forex_report(report),
+        }
+
+    @classmethod
+    def _send_resend(cls, config: dict, content: dict) -> None:
+        payload = json.dumps({
+            "from": config["from_address"],
+            "to": config["recipients"],
+            "subject": content["subject"],
+            "text": content["text"],
+            "html": content["html"],
+        }).encode()
+        request = urllib.request.Request(
+            "https://api.resend.com/emails",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {config['api_key']}",
+                "Content-Type": "application/json",
+                "User-Agent": "primus-forex-reporter/1.0",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=config["timeout"]) as response:
+            if not 200 <= int(getattr(response, "status", 0)) < 300:
+                raise OSError(f"Resend returned HTTP {getattr(response, 'status', 'unknown')}")
+            response.read()
+
+    @staticmethod
+    def _send_smtp(config: dict, content: dict) -> None:
         message = EmailMessage()
-        message["Subject"] = ForexReportEmailer.subject(now)
+        message["Subject"] = content["subject"]
         message["From"] = config["from_address"]
         message["To"] = ", ".join(config["recipients"])
-        message.set_content("The production Forex dashboard is attached as HTML in this message.")
-        message.add_alternative(render_forex_report(report), subtype="html")
+        message.set_content(content["text"])
+        message.add_alternative(content["html"], subtype="html")
         context = ssl.create_default_context()
         if config["port"] == 465:
-            with smtplib.SMTP_SSL(config["host"], config["port"], timeout=config["timeout"], context=context) as client:
+            with smtplib.SMTP_SSL(config["host"], config["port"], timeout=config["timeout"],
+                                  context=context) as client:
                 client.login(config["username"], config["password"])
                 client.send_message(message)
         else:
@@ -101,6 +151,15 @@ class ForexReportEmailer:
                     client.ehlo()
                 client.login(config["username"], config["password"])
                 client.send_message(message)
+
+    @classmethod
+    def _send(cls, report: dict, now: datetime | None = None) -> None:
+        config = cls._configuration()
+        message_content = cls._content(report, now)
+        if config["provider"] == "resend":
+            cls._send_resend(config, message_content)
+        else:
+            cls._send_smtp(config, message_content)
 
     def maybe_send(self, report: dict, now: datetime | None = None) -> dict:
         if not self.enabled():
@@ -138,6 +197,7 @@ class ForexReportEmailer:
     def status(self) -> dict:
         return {
             "enabled": self.enabled(),
+            "provider": self.provider(),
             "last_sent_hour": self.ledger.setting("forex_email_last_sent_hour"),
             "last_error": self.ledger.setting("forex_email_last_error"),
             "inflight": self._inflight,
