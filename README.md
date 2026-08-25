@@ -257,16 +257,18 @@ sanitized delivery events. Configure the live Forex Railway service with:
 
 ```text
 FOREX_EMAIL_REPORT_ENABLED=true
-FOREX_EMAIL_PROVIDER=resend
+FOREX_EMAIL_PROVIDER=gmail_api
 FOREX_EMAIL_TIMEZONE=America/New_York
 FOREX_EMAIL_RECIPIENTS=first@example.com,second@example.com
-FOREX_EMAIL_FROM=reports@your-verified-domain.example
-FOREX_EMAIL_RESEND_API_KEY=<Railway secret>
+FOREX_EMAIL_FROM=your-account@gmail.com
+FOREX_EMAIL_GMAIL_CLIENT_ID=<Railway secret>
+FOREX_EMAIL_GMAIL_CLIENT_SECRET=<Railway secret>
+FOREX_EMAIL_GMAIL_REFRESH_TOKEN=<Railway secret>
 FOREX_EMAIL_TIMEOUT_SECONDS=20
 FOREX_EMAIL_RETRY_SECONDS=300
 ```
 
-`resend` uses HTTPS port 443 and is the recommended provider when the host blocks outbound SMTP. The sender address must belong to a domain verified by the email provider. SMTP remains available by setting `FOREX_EMAIL_PROVIDER=smtp` and the documented `FOREX_EMAIL_SMTP_*` variables.
+`gmail_api` sends from an existing Gmail account over HTTPS port 443 and does not require a custom domain. Enable the Gmail API, grant only the `gmail.send` OAuth scope, and store the OAuth client ID, client secret and refresh token in Railway secrets. `resend` and `smtp` remain optional fallback providers.
 
 The subject is `[HOURLY] Forex Live Trading Dashboard - YYYY-MM-DD HH:00 ET`.
 A successful send stores the ET hour in the ledger, so restarts and repeated
