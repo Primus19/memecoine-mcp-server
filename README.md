@@ -249,9 +249,32 @@ the optional `MULTI_ASSET_FEED_BEARER_TOKEN` secret.
 
 The executor also publishes `/report` as an email-client-safe HTML Forex
 dashboard and `/report.json` as the exact machine-readable report snapshot.
-The existing connected-Gmail scheduled task should fetch `/report`, send that
-HTML unchanged, and use the subject `[HOURLY] Forex Intelligence — YYYY-MM-DD
-HH:mm ET`. Railway does not store Gmail credentials.
+For reliable production delivery, the executor can send the generated HTML
+itself instead of relying on a connected-chat Gmail action. Delivery is opt-in,
+uses the existing SQLite ledger to suppress duplicates across restarts, retries
+transient failures without changing executor readiness, and records only
+sanitized delivery events. Configure the live Forex Railway service with:
+
+```text
+FOREX_EMAIL_REPORT_ENABLED=true
+FOREX_EMAIL_TIMEZONE=America/New_York
+FOREX_EMAIL_RECIPIENTS=first@example.com,second@example.com
+FOREX_EMAIL_FROM=sender@example.com
+FOREX_EMAIL_SMTP_HOST=smtp.gmail.com
+FOREX_EMAIL_SMTP_PORT=587
+FOREX_EMAIL_SMTP_STARTTLS=true
+FOREX_EMAIL_SMTP_USERNAME=<Railway secret>
+FOREX_EMAIL_SMTP_PASSWORD=<Railway secret or Gmail app password>
+FOREX_EMAIL_SMTP_TIMEOUT_SECONDS=20
+FOREX_EMAIL_RETRY_SECONDS=300
+```
+
+The subject is `[HOURLY] Forex Live Trading Dashboard - YYYY-MM-DD HH:00 ET`.
+A successful send stores the ET hour in the ledger, so restarts and repeated
+30-second scans cannot create duplicate messages. SMTP errors are exposed in
+`email_delivery` and the audit stream, but they never authorize trades or make
+the executor unready. Keep credentials only in Railway secrets. Once this path
+is verified, disable the old connected-Gmail Forex task to avoid duplicates.
 
 `FOREX_MIN_SCORE` is independent from the generic multi-asset score setting so
 a sentinel used by another sleeve cannot silently disable Forex. Every closed
