@@ -64,6 +64,14 @@ def validate_ticket(
         errors.append(f"spread above {spread_limit:g} bps")
     if float(t.get("slippage_bps", 9999)) > slippage_limit:
         errors.append(f"slippage above {slippage_limit:g} bps")
+    entry = float(t.get("limit_price", 0) or 0)
+    target = float(t.get("target_price", 0) or 0)
+    expected_gross_bps = ((target / entry) - 1) * 10_000 if entry > 0 and target > entry else 0
+    expected_round_trip_cost_bps = (2 * policy.estimated_fee_bps_per_side
+                                    + float(t.get("spread_bps", 9999))
+                                    + 2 * float(t.get("slippage_bps", 9999)))
+    if expected_gross_bps < expected_round_trip_cost_bps + policy.minimum_net_edge_bps:
+        errors.append("target does not clear estimated round-trip costs and minimum net edge")
     if not all(t.get(k) is True for k in ("identity_verified", "spot_available", "no_safety_veto")):
         errors.append("identity/spot/safety verification failed")
 
