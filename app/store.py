@@ -19,6 +19,9 @@ class Store:
         self.db.execute("CREATE TABLE IF NOT EXISTS reviews (review_key TEXT PRIMARY KEY,at TEXT NOT NULL,trigger TEXT NOT NULL,payload TEXT NOT NULL)")
         columns={str(r[1]) for r in self.db.execute("PRAGMA table_info(recommendations)")}
         if "rejection_reason" not in columns:self.db.execute("ALTER TABLE recommendations ADD COLUMN rejection_reason TEXT")
+        position_columns={str(r[1]) for r in self.db.execute("PRAGMA table_info(positions)")}
+        for name in ("max_favorable_pnl", "max_adverse_pnl"):
+            if name not in position_columns:self.db.execute(f"ALTER TABLE positions ADD COLUMN {name} REAL DEFAULT 0")
         self.db.commit()
 
     def save_credentials(self,key_name,private_key):
@@ -85,6 +88,11 @@ class Store:
         row=self.db.execute("SELECT * FROM positions WHERE status NOT IN ('CLOSED','CANCELLED','FAILED','EXPIRED') ORDER BY opened_at DESC LIMIT 1").fetchone(); return dict(row) if row else None
     def update_position(self,ticket_id,status,pnl=None):
         self.db.execute("UPDATE positions SET status=?,updated_at=?,closed_at=CASE WHEN ?='CLOSED' THEN ? ELSE closed_at END,realized_pnl=COALESCE(?,realized_pnl) WHERE ticket_id=?",(status,utcnow(),status,utcnow(),pnl,ticket_id)); self.db.commit()
+    def update_position_excursions(self,ticket_id,pnl):
+        self.db.execute("""UPDATE positions SET
+            max_favorable_pnl=MAX(COALESCE(max_favorable_pnl,0),?),
+            max_adverse_pnl=MIN(COALESCE(max_adverse_pnl,0),?),updated_at=? WHERE ticket_id=?""",
+            (pnl,pnl,utcnow(),ticket_id));self.db.commit()
     def record_closed_trade(self,ticket_id,pnl,return_pct):
         self.add_realized_pnl(pnl); losses=int(self.setting("consecutive_losses","0") or 0); losses=losses+1 if pnl<0 else 0; self.set_setting("consecutive_losses",losses)
         self.update_position(ticket_id,"CLOSED",pnl); self.mark_recommendation(ticket_id,"CLOSED",net_return=return_pct,realized_pnl=pnl,closed_at=utcnow()); self.set_setting("settlement_grace_until",(datetime.now(timezone.utc)+timedelta(seconds=60)).isoformat()); self.event("POSITION_CLOSED",{"realized_pnl_usdc":pnl,"net_return_pct":return_pct,"consecutive_losses":losses},ticket_id)
@@ -103,19 +111,19 @@ class Store:
         old=self.db.execute("SELECT payload FROM reviews WHERE review_key=?",(key,)).fetchone()
         if old:return json.loads(old[0])
         rows=[dict(r) for r in self.db.execute("""SELECT r.product_id,r.payload,r.realized_pnl,
-            p.entry_notional,p.entry_price FROM recommendations r LEFT JOIN positions p ON p.ticket_id=r.ticket_id
+            p.entry_notional,p.entry_price,p.max_favorable_pnl,p.max_adverse_pnl FROM recommendations r LEFT JOIN positions p ON p.ticket_id=r.ticket_id
             WHERE r.status='CLOSED' AND r.realized_pnl IS NOT NULL""").fetchall()]
         pnls=[float(r["realized_pnl"]) for r in rows]; wins=[x for x in pnls if x>0]; losses=[x for x in pnls if x<0]
-        by_product={}; captures=[]; peak_opportunities=[]
+        by_product={}; captures=[]; peak_opportunities=[]; favorable=[]; adverse=[]
         for row in rows:
             payload=json.loads(row["payload"]); product=str(row["product_id"]); pnl=float(row["realized_pnl"])
             bucket=by_product.setdefault(product,{"sample_size":0,"wins":0,"net_pnl_usdc":0.0})
             bucket["sample_size"]+=1;bucket["wins"]+=int(pnl>0);bucket["net_pnl_usdc"]=round(bucket["net_pnl_usdc"]+pnl,8)
             ticket_id=str(payload.get("ticket_id") or "");entry=float(row.get("entry_price") or 0);notional=float(row.get("entry_notional") or 0)
-            high=float(self.setting("high_water:"+ticket_id,str(entry)) or entry) if ticket_id else entry
-            peak=notional*(high/entry-1) if entry>0 else 0;peak_opportunities.append(peak)
+            peak=float(row.get("max_favorable_pnl") or 0);peak_opportunities.append(peak)
+            favorable.append(peak);adverse.append(float(row.get("max_adverse_pnl") or 0))
             if peak>0:captures.append(pnl/peak)
-        p={"model_version":"3.1","sample_size":len(pnls),"wins":len(wins),"losses":len(losses),"win_rate":len(wins)/len(pnls) if pnls else None,"net_pnl_usdc":sum(pnls),"net_expectancy_usdc":sum(pnls)/len(pnls) if pnls else None,"profit_factor":sum(wins)/abs(sum(losses)) if losses else None,"average_win_usdc":sum(wins)/len(wins) if wins else None,"average_loss_usdc":sum(losses)/len(losses) if losses else None,"average_peak_opportunity_usdc":sum(peak_opportunities)/len(peak_opportunities) if peak_opportunities else None,"average_profit_capture":sum(captures)/len(captures) if captures else None,"by_product":by_product,"status":"MODEL LOCKED - COLLECTING EVIDENCE" if len(pnls)<30 else "ELIGIBLE FOR PROSPECTIVE CHALLENGER REVIEW","parameters_changed":False,"promotion_rule":"At least 30 closed trades; positive expectancy and profit factor above 1.0; challenger must then outperform prospectively without materially worse drawdown","trigger":trigger}
+        p={"model_version":"3.1","sample_size":len(pnls),"wins":len(wins),"losses":len(losses),"win_rate":len(wins)/len(pnls) if pnls else None,"net_pnl_usdc":sum(pnls),"net_expectancy_usdc":sum(pnls)/len(pnls) if pnls else None,"profit_factor":sum(wins)/abs(sum(losses)) if losses else None,"average_win_usdc":sum(wins)/len(wins) if wins else None,"average_loss_usdc":sum(losses)/len(losses) if losses else None,"average_peak_opportunity_usdc":sum(peak_opportunities)/len(peak_opportunities) if peak_opportunities else None,"average_max_favorable_excursion_usdc":sum(favorable)/len(favorable) if favorable else None,"average_max_adverse_excursion_usdc":sum(adverse)/len(adverse) if adverse else None,"average_profit_capture":sum(captures)/len(captures) if captures else None,"by_product":by_product,"status":"MODEL LOCKED - COLLECTING EVIDENCE" if len(pnls)<30 else "ELIGIBLE FOR PROSPECTIVE CHALLENGER REVIEW","parameters_changed":False,"promotion_rule":"At least 30 closed trades; positive expectancy and profit factor above 1.0; challenger must then outperform prospectively without materially worse drawdown","trigger":trigger}
         self.db.execute("INSERT INTO reviews(review_key,at,trigger,payload) VALUES(?,?,?,?)",(key,utcnow(),trigger,json.dumps(p,sort_keys=True)));self.db.commit();self.event("MODEL_REVIEW",p);return p
     def recent_reviews(self,limit=10):
         return [{**dict(r),"payload":json.loads(r["payload"])} for r in self.db.execute("SELECT review_key,at,trigger,payload FROM reviews ORDER BY at DESC LIMIT ?",(limit,)).fetchall()]
