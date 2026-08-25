@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+import os
+import smtplib
+import ssl
+import threading
+import time
+from datetime import datetime, timezone
+from email.message import EmailMessage
+from zoneinfo import ZoneInfo
+
+from .forex_report import render_forex_report
+
+
+UTC = timezone.utc
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _recipients() -> list[str]:
+    raw = os.getenv("FOREX_EMAIL_RECIPIENTS", "")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+class ForexReportEmailer:
+    """Best-effort, idempotent delivery for the production Forex dashboard.
+
+    Email failures are deliberately isolated from the executor scan. The
+    SQLite-backed ledger supplies restart-safe one-send-per-hour state, while
+    the in-process lock prevents overlapping SMTP attempts.
+    """
+
+    def __init__(self, ledger):
+        self.ledger = ledger
+        self._lock = threading.Lock()
+        self._inflight = False
+        self._last_attempt_monotonic = 0.0
+
+    @staticmethod
+    def enabled() -> bool:
+        return _truthy(os.getenv("FOREX_EMAIL_REPORT_ENABLED"))
+
+    @staticmethod
+    def timezone() -> ZoneInfo:
+        name = os.getenv("FOREX_EMAIL_TIMEZONE", "America/New_York").strip()
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            return ZoneInfo("America/New_York")
+
+    @classmethod
+    def hour_key(cls, now: datetime | None = None) -> str:
+        current = (now or datetime.now(UTC)).astimezone(cls.timezone())
+        return current.strftime("%Y-%m-%dT%H%z")
+
+    @classmethod
+    def subject(cls, now: datetime | None = None) -> str:
+        current = (now or datetime.now(UTC)).astimezone(cls.timezone())
+        return f"[HOURLY] Forex Live Trading Dashboard - {current:%Y-%m-%d %H}:00 ET"
+
+    @staticmethod
+    def _configuration() -> dict:
+        config = {
+            "host": os.getenv("FOREX_EMAIL_SMTP_HOST", "smtp.gmail.com").strip(),
+            "port": int(os.getenv("FOREX_EMAIL_SMTP_PORT", "587")),
+            "username": os.getenv("FOREX_EMAIL_SMTP_USERNAME", "").strip(),
+            "password": os.getenv("FOREX_EMAIL_SMTP_PASSWORD", ""),
+            "from_address": os.getenv("FOREX_EMAIL_FROM", "").strip(),
+            "recipients": _recipients(),
+            "starttls": _truthy(os.getenv("FOREX_EMAIL_SMTP_STARTTLS", "true")),
+            "timeout": max(5, min(60, int(os.getenv("FOREX_EMAIL_SMTP_TIMEOUT_SECONDS", "20")))),
+        }
+        missing = [name for name in ("host", "username", "password", "from_address") if not config[name]]
+        if not config["recipients"]:
+            missing.append("recipients")
+        if missing:
+            raise ValueError("missing Forex email configuration: " + ", ".join(missing))
+        return config
+
+    @staticmethod
+    def _send(report: dict, now: datetime | None = None) -> None:
+        config = ForexReportEmailer._configuration()
+        message = EmailMessage()
+        message["Subject"] = ForexReportEmailer.subject(now)
+        message["From"] = config["from_address"]
+        message["To"] = ", ".join(config["recipients"])
+        message.set_content("The production Forex dashboard is attached as HTML in this message.")
+        message.add_alternative(render_forex_report(report), subtype="html")
+        context = ssl.create_default_context()
+        if config["port"] == 465:
+            with smtplib.SMTP_SSL(config["host"], config["port"], timeout=config["timeout"], context=context) as client:
+                client.login(config["username"], config["password"])
+                client.send_message(message)
+        else:
+            with smtplib.SMTP(config["host"], config["port"], timeout=config["timeout"]) as client:
+                client.ehlo()
+                if config["starttls"]:
+                    client.starttls(context=context)
+                    client.ehlo()
+                client.login(config["username"], config["password"])
+                client.send_message(message)
+
+    def maybe_send(self, report: dict, now: datetime | None = None) -> dict:
+        if not self.enabled():
+            return {"status": "DISABLED"}
+        hour = self.hour_key(now)
+        if self.ledger.setting("forex_email_last_sent_hour") == hour:
+            return {"status": "DUPLICATE_SUPPRESSED", "hour": hour}
+        retry_seconds = max(60, int(os.getenv("FOREX_EMAIL_RETRY_SECONDS", "300")))
+        with self._lock:
+            elapsed = time.monotonic() - self._last_attempt_monotonic
+            if self._inflight or (self._last_attempt_monotonic and elapsed < retry_seconds):
+                return {"status": "RETRY_PENDING", "hour": hour}
+            self._inflight = True
+            self._last_attempt_monotonic = time.monotonic()
+
+        snapshot = dict(report)
+        thread = threading.Thread(target=self._deliver, args=(snapshot, hour, now), daemon=True)
+        thread.start()
+        return {"status": "QUEUED", "hour": hour}
+
+    def _deliver(self, report: dict, hour: str, now: datetime | None) -> None:
+        try:
+            self._send(report, now)
+            self.ledger.set_setting("forex_email_last_sent_hour", hour)
+            self.ledger.set_setting("forex_email_last_error", "")
+            self.ledger.event("FOREX_EMAIL_SENT", {"hour": hour, "recipient_count": len(_recipients())})
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {str(exc)[:240]}"
+            self.ledger.set_setting("forex_email_last_error", error)
+            self.ledger.event("FOREX_EMAIL_FAILED", {"hour": hour, "error": error})
+        finally:
+            with self._lock:
+                self._inflight = False
+
+    def status(self) -> dict:
+        return {
+            "enabled": self.enabled(),
+            "last_sent_hour": self.ledger.setting("forex_email_last_sent_hour"),
+            "last_error": self.ledger.setting("forex_email_last_error"),
+            "inflight": self._inflight,
+        }
