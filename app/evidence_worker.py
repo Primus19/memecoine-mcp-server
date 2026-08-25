@@ -15,6 +15,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
+from .policy import OpportunityPolicy
+
 
 UTC = timezone.utc
 EVM_CHAINS = {
@@ -176,9 +178,11 @@ class EvidenceAdapter:
         self.cg_key = os.getenv("COINGECKO_API_KEY", "")
         configured = [value.strip() for value in os.getenv("EVIDENCE_NEWS_RSS_URLS", "").split(",") if value.strip()]
         self.news_feeds = tuple(configured) or DEFAULT_NEWS_FEEDS
+        self.pages = max(1, min(3, int(os.getenv("EVIDENCE_MARKET_PAGES", os.getenv("RESEARCH_MARKET_PAGES", "2")))))
         self.interval = min(900, max(60, int(os.getenv("EVIDENCE_SCAN_INTERVAL_SECONDS", "300"))))
         self.request_spacing = max(0.5, float(os.getenv("EVIDENCE_REQUEST_SPACING_SECONDS", "2.5")))
         self.max_retries = min(5, max(1, int(os.getenv("EVIDENCE_HTTP_MAX_RETRIES", "3"))))
+        self.policy = OpportunityPolicy.from_env()
         self.status: dict[str, Any] = {"ok": False}
         self.lock = threading.RLock()
         self.request_lock = threading.Lock()
@@ -224,10 +228,10 @@ class EvidenceAdapter:
         with urllib.request.urlopen(request, timeout=20) as response:
             return json.loads(response.read().decode())
 
-    def market_page(self) -> list[dict[str, Any]]:
+    def market_page(self, page: int = 1) -> list[dict[str, Any]]:
         query = urllib.parse.urlencode({
             "vs_currency": "usd", "category": "meme-token", "order": "market_cap_desc",
-            "per_page": 250, "page": 1, "sparkline": "false", "price_change_percentage": "1h,24h,7d",
+            "per_page": 250, "page": page, "sparkline": "false", "price_change_percentage": "1h,24h,7d",
         })
         result = self.json(f"{self.cg_base}/coins/markets?{query}")
         return result if isinstance(result, list) else []
@@ -283,7 +287,7 @@ class EvidenceAdapter:
         started = now_utc()
         products = self.json(f"{self.executor_url}/api/eligible-products", self.executor_token).get("products", [])
         eligible = {str(item.get("product_id", "")) for item in products}
-        markets = self.market_page()
+        markets = [market for page in range(1, self.pages + 1) for market in self.market_page(page)]
         symbol_counts: dict[str, int] = {}
         for market in markets:
             symbol = str(market.get("symbol", "")).upper()
@@ -294,7 +298,8 @@ class EvidenceAdapter:
             symbol = str(market.get("symbol", "")).upper()
             product_id = f"{symbol}-USDC"
             cap, volume = float(market.get("market_cap") or 0), float(market.get("total_volume") or 0)
-            if product_id not in eligible or symbol_counts.get(symbol) != 1 or cap < 50_000_000 or volume < 10_000_000:
+            tier = self.policy.tier(cap, volume)
+            if product_id not in eligible or symbol_counts.get(symbol) != 1 or tier == "INELIGIBLE":
                 continue
             try:
                 detail = self.coin_detail(str(market["id"]))
@@ -314,6 +319,7 @@ class EvidenceAdapter:
             explorer_urls = [str(value) for value in (detail.get("links", {}).get("blockchain_site") or []) if str(value).startswith("https://")]
             payload = {
                 "coin_id": market["id"], "product_id": product_id, "contract": contract,
+                "opportunity_tier": tier,
                 "identity_verified": True, "no_safety_veto": True, "safety_score": safety_score,
                 "news_score": news_score, "news_veto": news_veto, "social_score": 0,
                 "source_urls": list(dict.fromkeys([*news_urls, *explorer_urls[:1], "https://docs.gopluslabs.io/reference/api-overview"])),

@@ -105,3 +105,15 @@ class StoreTests(unittest.TestCase):
         self.assertAlmostEqual(1.25,review["average_max_favorable_excursion_usdc"])
         self.assertAlmostEqual(-.40,review["average_max_adverse_excursion_usdc"])
         self.assertAlmostEqual(.60,review["average_profit_capture"])
+
+    def test_model_review_preserves_legacy_high_water_after_schema_upgrade(self):
+        payload={"ticket_id":"t-legacy","recommendation_hash":"h-legacy","model_version":"3.1",
+                 "created_at":"x","expires_at":"x","product_id":"FARTCOIN-USDC","score":85}
+        self.store.issue_recommendation(payload)
+        self.store.add_position({"ticket_id":"t-legacy","product_id":"FARTCOIN-USDC",
+                                 "notional_usdc":20,"limit_price":1},"o-legacy")
+        self.store.set_setting("high_water:t-legacy",1.05)
+        self.store.record_closed_trade("t-legacy",.50,2.5)
+        review=self.store.model_review("trade_close","trade:t-legacy")
+        self.assertAlmostEqual(1.0,review["average_max_favorable_excursion_usdc"])
+        self.assertAlmostEqual(.50,review["average_profit_capture"])
