@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .broker_adapters import BrokerError, OandaAdapter
+from .forex_email import ForexReportEmailer
 from .forex_report import render_forex_report
 from .multi_asset import AssetPolicy, ForexEngine, MultiAssetRejected
 
@@ -85,11 +86,12 @@ class Ledger:
                             (stamp, kind, body, previous, digest))
 
     def setting(self, key: str, default: str = "") -> str:
-        row = self.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-        return str(row[0]) if row else default
+        with self.lock:
+            row = self.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            return str(row[0]) if row else default
 
     def set_setting(self, key: str, value: str) -> None:
-        with self.db:
+        with self.lock, self.db:
             self.db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
     def open_count(self) -> int:
@@ -328,6 +330,7 @@ class Executor:
         self.engine = ForexEngine(replace(
             base_policy, minimum_score=float(os.getenv("FOREX_MIN_SCORE", "80"))))
         self.max_risk = min(0.50, max(0.10, float(os.getenv("FOREX_MAX_RISK_USD", "0.50"))))
+        self.emailer = ForexReportEmailer(self.ledger)
 
     @staticmethod
     def max_positions() -> int:
@@ -548,6 +551,9 @@ class Executor:
                   },
                   "capital_baseline_nav": float(os.getenv("FOREX_LIVE_BASELINE_USD", "0") or 0),
                   "daily_baseline_nav": float(self.ledger.setting("daily_baseline_nav", str(reconciliation["summary"]["nav"])))}
+        delivery = self.emailer.status()
+        delivery["attempt"] = self.emailer.maybe_send(report)
+        report["email_delivery"] = delivery
         with LOCK:
             STATE["report"] = report
         print(json.dumps({"event": "FOREX_EXECUTOR_SCAN", "outcomes": outcomes, "paper_closes": closes}), flush=True)
