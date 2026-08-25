@@ -31,6 +31,8 @@ class OpportunityPolicy:
     emerging_min_volume_24h_usd: float = 1_000_000.0
     emerging_max_spread_bps: float = 30.0
     emerging_max_slippage_bps: float = 30.0
+    estimated_fee_bps_per_side: float = 120.0
+    minimum_net_edge_bps: float = 50.0
 
     @classmethod
     def from_env(cls) -> "OpportunityPolicy":
@@ -50,6 +52,8 @@ class OpportunityPolicy:
             emerging_min_volume_24h_usd=float(os.getenv("LIVE_EMERGING_MIN_VOLUME_24H_USD", "1000000")),
             emerging_max_spread_bps=float(os.getenv("LIVE_EMERGING_MAX_SPREAD_BPS", "30")),
             emerging_max_slippage_bps=float(os.getenv("LIVE_EMERGING_MAX_SLIPPAGE_BPS", "30")),
+            estimated_fee_bps_per_side=float(os.getenv("LIVE_ESTIMATED_FEE_BPS_PER_SIDE", "120")),
+            minimum_net_edge_bps=float(os.getenv("LIVE_MIN_NET_EDGE_BPS", "50")),
         )
 
     def tier(self, market_cap_usd: Any, volume_24h_usd: Any) -> str:
