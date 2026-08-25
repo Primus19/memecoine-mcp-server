@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 import unittest
 from datetime import datetime, timezone
@@ -61,6 +63,57 @@ class ForexEmailTests(unittest.TestCase):
         self.assertNotIn("forex_email_last_sent_hour", ledger.settings)
         self.assertIn("RuntimeError", ledger.settings["forex_email_last_error"])
         self.assertEqual("FOREX_EMAIL_FAILED", ledger.events[-1][0])
+
+    def test_gmail_api_refreshes_token_and_sends_mime_over_https(self):
+        emailer = ForexReportEmailer(Ledger())
+        now = datetime(2026, 8, 25, 13, 42, tzinfo=timezone.utc)
+        env = {
+            **ENV,
+            "FOREX_EMAIL_PROVIDER": "gmail_api",
+            "FOREX_EMAIL_GMAIL_CLIENT_ID": "client-id",
+            "FOREX_EMAIL_GMAIL_CLIENT_SECRET": "client-secret",
+            "FOREX_EMAIL_GMAIL_REFRESH_TOKEN": "refresh-secret",
+        }
+        requests = []
+
+        class Response:
+            status = 200
+            def __init__(self, body): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self): return self.body
+
+        def fake_open(request, timeout):
+            requests.append((request, timeout))
+            if request.full_url == "https://oauth2.googleapis.com/token":
+                return Response(b'{"access_token":"short-lived-token"}')
+            return Response(b'{"id":"gmail-message-1"}')
+
+        with patch.dict(os.environ, env, clear=False), patch("app.forex_email.urllib.request.urlopen", fake_open):
+            emailer._send({"mode": "LIVE_ARMED"}, now)
+
+        self.assertEqual("https://oauth2.googleapis.com/token", requests[0][0].full_url)
+        self.assertIn(b"refresh-secret", requests[0][0].data)
+        self.assertEqual("https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                         requests[1][0].full_url)
+        self.assertEqual("Bearer short-lived-token", requests[1][0].headers["Authorization"])
+        send_payload = json.loads(requests[1][0].data)
+        mime = base64.urlsafe_b64decode(send_payload["raw"]).decode()
+        self.assertIn("one@example.test", mime)
+        self.assertNotIn("client-secret", mime)
+        self.assertNotIn("refresh-secret", mime)
+
+    def test_gmail_api_configuration_requires_oauth_secrets(self):
+        env = {
+            **ENV,
+            "FOREX_EMAIL_PROVIDER": "gmail_api",
+            "FOREX_EMAIL_GMAIL_CLIENT_ID": "",
+            "FOREX_EMAIL_GMAIL_CLIENT_SECRET": "",
+            "FOREX_EMAIL_GMAIL_REFRESH_TOKEN": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with self.assertRaisesRegex(ValueError, "client_id"):
+                ForexReportEmailer._configuration()
 
     def test_resend_uses_https_api_without_exposing_key_in_payload(self):
         ledger = Ledger()
