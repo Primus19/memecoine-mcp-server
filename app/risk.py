@@ -15,7 +15,8 @@ class TicketRejected(ValueError):
 
 
 def risk_size_ticket(t: dict[str, Any], *, permitted_capital: float,
-                     available_usdc: float, allocation_fraction: float = .95) -> dict[str, Any]:
+                     available_usdc: float, allocation_fraction: float = .95,
+                     risk_multiplier: float = 1.0) -> dict[str, Any]:
     """Return an executor-sized ticket whose stop loss risks at most 2% capital."""
     result = dict(t)
     entry = float(result.get("limit_price") or 0)
@@ -23,14 +24,17 @@ def risk_size_ticket(t: dict[str, Any], *, permitted_capital: float,
     if not 0 < stop < entry:
         return result
     risk_fraction = min(.05, max(.005, float(os.getenv("MEME_MAX_RISK_FRACTION", ".02"))))
-    risk_budget = min(float(os.getenv("MEME_MAX_RISK_USDC", ".50")), permitted_capital * risk_fraction)
+    multiplier = min(1.0, max(.25, float(risk_multiplier)))
+    risk_budget = min(float(os.getenv("MEME_MAX_RISK_USDC", ".50")),
+                      permitted_capital * risk_fraction) * multiplier
     stop_fraction = (entry - stop) / entry
     capital_limit = min(available_usdc, permitted_capital) * allocation_fraction
     proposed = min(float(result.get("notional_usdc") or 0), capital_limit, risk_budget / stop_fraction)
     result["notional_usdc"] = round(proposed, 8)
     result["max_loss_usdc"] = round(proposed * stop_fraction, 8)
     result["risk_budget_usdc"] = round(risk_budget, 8)
-    result["risk_sizing"] = "STOP_DISTANCE_2PCT_CAPITAL"
+    result["risk_sizing"] = "STOP_DISTANCE_NAV_RISK_WITH_RECOVERY_THROTTLE"
+    result["risk_multiplier"] = multiplier
     return result
 
 
@@ -42,6 +46,7 @@ def validate_ticket(
     open_positions: int,
     product: dict[str, Any],
     allocation_fraction: float = 0.95,
+    minimum_score_boost: float = 0.0,
 ) -> None:
     """Validate a research ticket against live Coinbase and portfolio facts.
 
@@ -65,7 +70,7 @@ def validate_ticket(
         errors.append("product is not currently tradable")
     if not policy.regime_allowed(t.get("regime")):
         errors.append("regime is not permitted")
-    required_score = policy.minimum_score_for(tier)
+    required_score = policy.minimum_score_for(tier) + max(0.0, float(minimum_score_boost))
     if actual_tier != tier:
         errors.append("opportunity tier does not match market liquidity")
     if float(t.get("score", 0)) < required_score:

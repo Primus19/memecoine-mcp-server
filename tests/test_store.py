@@ -37,13 +37,26 @@ class StoreTests(unittest.TestCase):
         self.assertAlmostEqual(self.store.permitted_capital(),25)
         self.assertAlmostEqual(float(self.store.setting("realized_pnl_usdc")),0)
 
-    def test_two_losses_pause(self):
+    def test_two_losses_enter_recovery_instead_of_permanent_pause(self):
         self.store.initialize_baseline(25)
+        self.store.event("PAUSED",{"reason":"two consecutive losses","automatic":True})
         for i in range(2):
             payload={"ticket_id":f"t{i}","recommendation_hash":f"h{i}","model_version":"3.1","created_at":"x","expires_at":"x","product_id":"TURBO-USDC","score":85}
             self.store.issue_recommendation(payload);self.store.add_position({"ticket_id":f"t{i}","product_id":"TURBO-USDC","notional_usdc":5,"limit_price":1},f"o{i}");self.store.record_closed_trade(f"t{i}",-1,-20)
         controls=self.store.update_equity_controls(22)
-        self.assertIn("two consecutive losses",controls["circuit_breakers"])
+        self.assertEqual([],controls["circuit_breakers"])
+        self.assertEqual("RECOVERY",controls["recovery_mode"])
+        self.assertEqual(.35,controls["recommended_allocation_fraction"])
+        self.assertEqual(.625,controls["risk_multiplier"])
+        self.assertEqual(4,controls["minimum_score_boost"])
+        self.assertFalse(self.store.paused())
+
+    def test_manual_pause_is_never_automatically_resumed(self):
+        self.store.initialize_baseline(25)
+        self.store.set_setting("consecutive_losses",2)
+        self.store.event("PAUSED",{"reason":"operator investigation","automatic":False})
+        controls=self.store.update_equity_controls(23)
+        self.assertEqual("RECOVERY",controls["recovery_mode"])
         self.assertTrue(self.store.paused())
 
     def test_profitable_close_does_not_use_unsettled_cash_for_drawdown(self):

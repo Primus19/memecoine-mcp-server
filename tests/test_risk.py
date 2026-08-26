@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from app.risk import TicketRejected, validate_ticket
+from app.risk import TicketRejected, risk_size_ticket, validate_ticket
 
 
 def ticket(notional=23.75):
@@ -95,3 +95,17 @@ class RiskTests(unittest.TestCase):
                              spread_bps=31,slippage_bps=25,stop_price=.095)
         with self.assertRaisesRegex(TicketRejected,"30 bps"):
             self.validate(t)
+
+    def test_recovery_mode_reduces_risk_budget_and_notional(self):
+        sized=risk_size_ticket(ticket(),permitted_capital=23.75,available_usdc=23.75,
+                               allocation_fraction=.35,risk_multiplier=.625)
+        self.assertLessEqual(sized["notional_usdc"],23.75*.35)
+        self.assertAlmostEqual(.296875,sized["risk_budget_usdc"])
+        self.assertEqual(.625,sized["risk_multiplier"])
+
+    def test_recovery_score_boost_rejects_marginal_candidate(self):
+        candidate=ticket(8);candidate["score"]=80
+        with self.assertRaisesRegex(TicketRejected,"score below 82"):
+            validate_ticket(candidate,available_usdc=25,permitted_capital=25,
+                            open_positions=0,product=PRODUCT,allocation_fraction=.35,
+                            minimum_score_boost=4)
