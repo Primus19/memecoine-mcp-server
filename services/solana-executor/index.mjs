@@ -31,7 +31,14 @@ function sanitized() { const address=wallet?.publicKey.toString() || ""; return 
   maxPositions: cfg.maxPositions, stopPct: cfg.stopPct, targetPct: cfg.targetPct, trailPct: cfg.trailPct}}; }
 
 let wallet = null;
-try { if (cfg.secret) wallet = Keypair.fromSecretKey(bs58.decode(cfg.secret)); } catch (e) { state.errors.push(`wallet key invalid: ${e.message}`); }
+try {
+  if (cfg.secret) {
+    const decoded = bs58.decode(cfg.secret.trim());
+    if (decoded.length === 64) wallet = Keypair.fromSecretKey(decoded);
+    else if (decoded.length === 32) wallet = Keypair.fromSeed(decoded);
+    else throw new Error(`unsupported decoded key size ${decoded.length}; expected 32 or 64 bytes`);
+  }
+} catch (e) { state.errors.push(`wallet key invalid: ${e.message}`); }
 function readiness() {
   const b=[];
   if (!cfg.enabled) b.push("SOLANA_EXECUTOR_ENABLED is not true");
