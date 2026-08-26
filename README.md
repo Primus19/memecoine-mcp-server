@@ -458,7 +458,7 @@ task must use `pilot_status` as the live-pilot source of truth in every report.
 
 Run `python -m app.research_feed` as a third Railway service from this same
 repository. It continuously scans the broad CoinGecko market universe, using
-four pages or 1,000 assets by default and up to 2,500 when configured, then
+at least four pages or 1,000 assets and up to 2,500 when configured, then
 intersects unique symbols with the executor's actual eligible Coinbase USDC
 products, classifies liquid breadth, calculates the bounded Model 3.1
 components, and publishes fresh candidates at `GET /candidates`.

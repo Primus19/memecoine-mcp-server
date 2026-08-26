@@ -1,5 +1,7 @@
 import unittest
 import urllib.parse
+import os
+from unittest.mock import patch
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
@@ -139,6 +141,15 @@ class EvidenceWorkerTests(unittest.TestCase):
         adapter.market_page(1)
         query = urllib.parse.parse_qs(urllib.parse.urlparse(adapter.json.call_args.args[0]).query)
         self.assertNotIn("category", query)
+
+    def test_stale_two_page_setting_cannot_narrow_evidence_universe(self):
+        variables = {
+            "EXECUTOR_BASE_URL":"https://executor.example", "REST_API_TOKEN":"x",
+            "RESEARCH_FEED_URL":"https://research.example", "SIGNAL_FEED_BEARER_TOKEN":"y",
+            "EVIDENCE_MARKET_PAGES":"2",
+        }
+        with patch.dict(os.environ, variables, clear=False):
+            self.assertEqual(4, EvidenceAdapter().pages)
 
     def test_evidence_policy_includes_documented_emerging_tier(self):
         policy = OpportunityPolicy()

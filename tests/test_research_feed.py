@@ -204,6 +204,10 @@ class ResearchFeedTests(unittest.TestCase):
         with patch.dict(os.environ, {"RESEARCH_MARKET_PAGES":"4"}, clear=False):
             self.assertEqual(4, self.make_feed().pages)
 
+    def test_stale_two_page_setting_cannot_narrow_broad_universe(self):
+        with patch.dict(os.environ, {"RESEARCH_MARKET_PAGES":"2"}, clear=False):
+            self.assertEqual(4, self.make_feed().pages)
+
 
 if __name__ == "__main__":
     unittest.main()

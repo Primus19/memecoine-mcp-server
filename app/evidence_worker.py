@@ -178,7 +178,7 @@ class EvidenceAdapter:
         self.cg_key = os.getenv("COINGECKO_API_KEY", "")
         configured = [value.strip() for value in os.getenv("EVIDENCE_NEWS_RSS_URLS", "").split(",") if value.strip()]
         self.news_feeds = tuple(configured) or DEFAULT_NEWS_FEEDS
-        self.pages = max(1, min(10, int(os.getenv("EVIDENCE_MARKET_PAGES", os.getenv("RESEARCH_MARKET_PAGES", "4")))))
+        self.pages = max(4, min(10, int(os.getenv("EVIDENCE_MARKET_PAGES", os.getenv("RESEARCH_MARKET_PAGES", "4")))))
         self.interval = min(900, max(60, int(os.getenv("EVIDENCE_SCAN_INTERVAL_SECONDS", "300"))))
         self.request_spacing = max(0.5, float(os.getenv("EVIDENCE_REQUEST_SPACING_SECONDS", "2.5")))
         self.max_retries = min(5, max(1, int(os.getenv("EVIDENCE_HTTP_MAX_RETRIES", "3"))))
