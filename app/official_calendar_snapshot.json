@@ -10,29 +10,9 @@
       "blackout_after_minutes": 90,
       "blackout_before_minutes": 60,
       "currency": "USD",
-      "event": "GDP (Second Estimate) and Corporate Profits, 2nd Quarter 2026",
-      "impact": "HIGH",
-      "minutes_until": 629,
-      "source_url": "https://www.bea.gov/news/schedule",
-      "time": "2026-08-26T12:30:00+00:00"
-    },
-    {
-      "blackout_after_minutes": 90,
-      "blackout_before_minutes": 60,
-      "currency": "USD",
-      "event": "Personal Income and Outlays, July 2026",
-      "impact": "HIGH",
-      "minutes_until": 629,
-      "source_url": "https://www.bea.gov/news/schedule",
-      "time": "2026-08-26T12:30:00+00:00"
-    },
-    {
-      "blackout_after_minutes": 90,
-      "blackout_before_minutes": 60,
-      "currency": "USD",
       "event": "U.S. International Trade in Goods and Services, July 2026",
       "impact": "HIGH",
-      "minutes_until": 12149,
+      "minutes_until": 11471,
       "source_url": "https://www.bea.gov/news/schedule",
       "time": "2026-09-03T12:30:00+00:00"
     },
@@ -42,7 +22,7 @@
       "currency": "USD",
       "event": "Employment Situation",
       "impact": "HIGH",
-      "minutes_until": 13589,
+      "minutes_until": 12911,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-09-04T12:30:00+00:00"
     },
@@ -52,7 +32,7 @@
       "currency": "EUR",
       "event": "ECB monetary policy decision and press conference",
       "impact": "HIGH",
-      "minutes_until": 22214,
+      "minutes_until": 21536,
       "source_url": "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html",
       "time": "2026-09-10T12:15:00+00:00"
     },
@@ -62,7 +42,7 @@
       "currency": "USD",
       "event": "Producer Price Index",
       "impact": "HIGH",
-      "minutes_until": 22229,
+      "minutes_until": 21551,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-09-10T12:30:00+00:00"
     },
@@ -72,7 +52,7 @@
       "currency": "USD",
       "event": "Consumer Price Index",
       "impact": "HIGH",
-      "minutes_until": 23669,
+      "minutes_until": 22991,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-09-11T12:30:00+00:00"
     },
@@ -82,7 +62,7 @@
       "currency": "USD",
       "event": "FOMC monetary policy decision",
       "impact": "HIGH",
-      "minutes_until": 31199,
+      "minutes_until": 30521,
       "source_url": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
       "time": "2026-09-16T18:00:00+00:00"
     },
@@ -92,7 +72,7 @@
       "currency": "JPY",
       "event": "Bank of Japan monetary policy decision window",
       "impact": "HIGH",
-      "minutes_until": 31739,
+      "minutes_until": 31061,
       "source_url": "https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm",
       "time": "2026-09-17T03:00:00+00:00"
     },
@@ -102,14 +82,14 @@
       "currency": "GBP",
       "event": "Bank of England MPC decision",
       "impact": "HIGH",
-      "minutes_until": 32219,
+      "minutes_until": 31541,
       "source_url": "https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates",
       "time": "2026-09-17T11:00:00+00:00"
     }
   ],
-  "observed_at": "2026-08-26T02:00:44.776011+00:00",
+  "observed_at": "2026-08-26T13:18:51.496299+00:00",
   "provider": "official_composite",
-  "snapshot_generated_at": "2026-08-26T02:00:48.108652+00:00",
+  "snapshot_generated_at": "2026-08-26T13:18:53.552740+00:00",
   "source_url": "https://fred.stlouisfed.org/releases/calendar",
   "sources": [
     {
@@ -135,7 +115,7 @@
     },
     {
       "currency": "USD",
-      "event_count": 15,
+      "event_count": 13,
       "name": "bureau_economic_analysis",
       "ok": true,
       "url": "https://www.bea.gov/news/schedule"
