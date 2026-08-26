@@ -12,18 +12,18 @@ from .meme_report import render_meme_report
 
 class MemeReportEmailer(ForexReportEmailer):
     @staticmethod
-    def enabled()->bool:return _truthy(os.getenv("MEME_EMAIL_REPORT_ENABLED"))
+    def enabled()->bool:return _truthy(os.getenv("MEME_EMAIL_REPORT_ENABLED",os.getenv("FOREX_EMAIL_REPORT_ENABLED","false")))
 
     @staticmethod
-    def provider()->str:return os.getenv("MEME_EMAIL_PROVIDER","gmail_api").strip().lower()
+    def provider()->str:return os.getenv("MEME_EMAIL_PROVIDER",os.getenv("FOREX_EMAIL_PROVIDER","gmail_api")).strip().lower()
 
     @staticmethod
     def timezone()->ZoneInfo:
-        try:return ZoneInfo(os.getenv("MEME_EMAIL_TIMEZONE","America/New_York"))
+        try:return ZoneInfo(os.getenv("MEME_EMAIL_TIMEZONE",os.getenv("FOREX_EMAIL_TIMEZONE","America/New_York")))
         except Exception:return ZoneInfo("America/New_York")
 
     @staticmethod
-    def recipients()->list[str]:return [x.strip() for x in os.getenv("MEME_EMAIL_RECIPIENTS","").split(",") if x.strip()]
+    def recipients()->list[str]:return [x.strip() for x in os.getenv("MEME_EMAIL_RECIPIENTS",os.getenv("FOREX_EMAIL_RECIPIENTS","")).split(",") if x.strip()]
 
     @classmethod
     def subject(cls,now:datetime|None=None)->str:
@@ -32,8 +32,8 @@ class MemeReportEmailer(ForexReportEmailer):
 
     @classmethod
     def _configuration(cls)->dict:
-        recipients=cls.recipients();config={"provider":cls.provider(),"from_address":os.getenv("MEME_EMAIL_FROM","").strip(),"recipients":recipients,"timeout":max(5,min(60,int(os.getenv("MEME_EMAIL_TIMEOUT_SECONDS","20"))))}
-        config.update({"client_id":os.getenv("MEME_EMAIL_GMAIL_CLIENT_ID","").strip(),"client_secret":os.getenv("MEME_EMAIL_GMAIL_CLIENT_SECRET","").strip(),"refresh_token":os.getenv("MEME_EMAIL_GMAIL_REFRESH_TOKEN","").strip()})
+        recipients=cls.recipients();config={"provider":cls.provider(),"from_address":os.getenv("MEME_EMAIL_FROM",os.getenv("FOREX_EMAIL_FROM","")).strip(),"recipients":recipients,"timeout":max(5,min(60,int(os.getenv("MEME_EMAIL_TIMEOUT_SECONDS",os.getenv("FOREX_EMAIL_TIMEOUT_SECONDS","20"))))) }
+        config.update({"client_id":os.getenv("MEME_EMAIL_GMAIL_CLIENT_ID",os.getenv("FOREX_EMAIL_GMAIL_CLIENT_ID","")).strip(),"client_secret":os.getenv("MEME_EMAIL_GMAIL_CLIENT_SECRET",os.getenv("FOREX_EMAIL_GMAIL_CLIENT_SECRET","")).strip(),"refresh_token":os.getenv("MEME_EMAIL_GMAIL_REFRESH_TOKEN",os.getenv("FOREX_EMAIL_GMAIL_REFRESH_TOKEN","")).strip()})
         missing=[k for k in ("from_address","client_id","client_secret","refresh_token") if not config[k]]
         if not recipients:missing.append("recipients")
         if config["provider"]!="gmail_api":raise ValueError("MEME_EMAIL_PROVIDER must be gmail_api")
@@ -47,7 +47,7 @@ class MemeReportEmailer(ForexReportEmailer):
         if not self.enabled():return {"status":"DISABLED"}
         hour=self.hour_key(now)
         if self.ledger.setting("meme_email_last_sent_hour")==hour:return {"status":"DUPLICATE_SUPPRESSED","hour":hour}
-        retry=max(60,int(os.getenv("MEME_EMAIL_RETRY_SECONDS","300")))
+        retry=max(60,int(os.getenv("MEME_EMAIL_RETRY_SECONDS",os.getenv("FOREX_EMAIL_RETRY_SECONDS","300"))))
         with self._lock:
             if self._inflight or (self._last_attempt_monotonic and time.monotonic()-self._last_attempt_monotonic<retry):return {"status":"RETRY_PENDING","hour":hour}
             self._inflight=True;self._last_attempt_monotonic=time.monotonic()

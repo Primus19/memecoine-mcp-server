@@ -8,8 +8,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .policy import OpportunityPolicy
+from .version import CRYPTO_MODEL_VERSION
 
-MODEL_VERSION = "3.1"
+MODEL_VERSION = CRYPTO_MODEL_VERSION
 COMPONENT_LIMITS = {"regime":15,"liquidity":20,"momentum":13,"volume_quality":12,"tokenomics":10,"safety":15,"news":10,"social":5}
 
 def canonical_hash(payload: dict[str, Any]) -> str:
