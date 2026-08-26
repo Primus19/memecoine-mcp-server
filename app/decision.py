@@ -26,5 +26,14 @@ def build_recommendation(candidate: dict[str, Any]) -> dict[str, Any]:
     # useful for audit, but it is not an authorization to chase an old price.
     expiry=now+timedelta(seconds=min(120,max(30,int(candidate.get("expiry_seconds",120)))))
     payload={"ticket_id":str(candidate.get("ticket_id") or uuid.uuid4()),"signal_id":str(candidate.get("signal_id") or ""),"model_version":MODEL_VERSION,"created_at":now.isoformat(),"expires_at":expiry.isoformat(),"product_id":str(candidate.get("product_id","")).upper(),"opportunity_tier":str(candidate.get("opportunity_tier") or "ESTABLISHED").upper(),"regime":candidate.get("regime"),"score":round(sum(normalized.values()),4),"component_scores":normalized,"news_score":normalized["news"],"news_veto":candidate.get("news_veto") is True,"change_1h_pct":float(candidate.get("change_1h_pct",0)),"change_24h_pct":float(candidate.get("change_24h_pct",0)),"market_cap_usd":float(candidate.get("market_cap_usd",0)),"volume_24h_usd":float(candidate.get("volume_24h_usd",0)),"turnover":float(candidate.get("turnover",-1)),"spread_bps":float(candidate.get("spread_bps",9999)),"slippage_bps":float(candidate.get("slippage_bps",9999)),"identity_verified":candidate.get("identity_verified") is True,"spot_available":candidate.get("spot_available") is True,"no_safety_veto":candidate.get("no_safety_veto") is True,"notional_usdc":float(candidate.get("notional_usdc",0)),"max_loss_usdc":float(candidate.get("max_loss_usdc",9999)),"reference_price":float(candidate.get("reference_price") or candidate.get("limit_price",0)),"limit_price":float(candidate.get("limit_price",0)),"stop_price":float(candidate.get("stop_price",0)),"target_1_price":float(candidate.get("target_1_price") or 0),"target_price":float(candidate.get("target_price",0)),"trail_activation_pct":float(candidate.get("trail_activation_pct",5)),"trail_pct":float(candidate.get("trail_pct",4)),"thesis":str(candidate.get("thesis",""))[:4000],"invalidation":str(candidate.get("invalidation",""))[:2000],"evidence_urls":sorted({str(x) for x in candidate.get("evidence_urls",[]) if str(x).startswith("https://")})[:20],"source_timestamp":str(candidate.get("source_timestamp", ""))}
+    payload.update({
+        "change_7d_pct": float(candidate.get("change_7d_pct", 0)),
+        "horizon_direction": int(candidate.get("horizon_direction") or 0),
+        "horizon_agreement": float(candidate.get("horizon_agreement") or 0),
+        "volatility_proxy_pct": float(candidate.get("volatility_proxy_pct") or 0),
+        "volatility_method": str(candidate.get("volatility_method") or ""),
+        "signal_probability_shadow": float(candidate.get("signal_probability_shadow") or 0),
+        "expected_net_bps_shadow": float(candidate.get("expected_net_bps_shadow") or 0),
+    })
     payload["opportunity_policy"] = {"version": "1.0", **asdict(OpportunityPolicy.from_env())}
     payload["recommendation_hash"]=canonical_hash(payload); return payload
