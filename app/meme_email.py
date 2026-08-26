@@ -58,7 +58,15 @@ class MemeReportEmailer(ForexReportEmailer):
         sent=set(json.loads(self.ledger.setting("meme_email_sent_event_ids","[]") or "[]"))
         pending=json.loads(self.ledger.setting("meme_email_pending_alerts","[]") or "[]")
         by_id={str(x.get("event_id")):x for x in pending if x.get("event_id")}
-        for event in report.get("notification_events") or []:
+        events=list(report.get("notification_events") or [])
+        if self.ledger.setting("meme_email_event_mode_initialized")!="1":
+            sent.update(str(e.get("seq") or e.get("digest")) for e in events if str(e.get("kind") or "") in self.ALERT_KINDS and (e.get("seq") or e.get("digest")))
+            self.ledger.set_setting("meme_email_sent_event_ids",json.dumps(list(sent)[-500:]))
+            self.ledger.set_setting("meme_email_pending_alerts","[]")
+            self.ledger.set_setting("meme_email_event_mode_initialized","1")
+            return ({"status":"HISTORY_BASELINE_ESTABLISHED","historical_events_suppressed":len(sent)}
+                    if sent else {"status":"NO_NEW_TRADE_OR_CRITICAL_EVENT"})
+        for event in events:
             kind=str(event.get("kind") or "")
             event_id=str(event.get("seq") or event.get("digest") or "")
             if kind in self.ALERT_KINDS and event_id and event_id not in sent:

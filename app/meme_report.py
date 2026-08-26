@@ -65,6 +65,23 @@ def render_meme_report(report: dict) -> str:
     status_color = "#166534" if ready else "#991b1b"
     status_bg = "#dcfce7" if ready else "#fee2e2"
     stamp = esc(report.get("timestamp") or datetime.now(timezone.utc).isoformat())
+    alert = report.get("_meme_alert") or {}
+    alert_event = alert.get("event") or {}
+    alert_payload = alert_event.get("payload") or {}
+    alert_kind = str(alert.get("kind") or "")
+    trade_pnl = alert_payload.get("realized_pnl_usdc")
+    if alert_kind:
+        result = ("PROFIT" if float(trade_pnl or 0) > 0 else
+                  "LOSS" if float(trade_pnl or 0) < 0 else
+                  "OPEN — RESULT NOT FINAL")
+        alert_html = (f'<tr><td style="padding:20px 26px;background:#eff6ff;border-bottom:1px solid #bfdbfe">'
+                      f'<div style="font-size:12px;color:#1d4ed8;font-weight:700">WHY YOU RECEIVED THIS EMAIL</div>'
+                      f'<div style="font-size:24px;font-weight:800;margin-top:5px">{esc(alert_kind.replace("_"," "))}</div>'
+                      f'<div style="margin-top:8px"><b>This trade:</b> {money(trade_pnl) if trade_pnl is not None else "Not closed yet"} &nbsp; '
+                      f'<b>Result:</b> {result} &nbsp; <b>Total realized account P&amp;L:</b> {money(report.get("realized_pnl_usdc"))}</div>'
+                      f'<div style="margin-top:6px;color:#475569">Open-position P&amp;L is shown separately below and is not final until the position closes.</div></td></tr>')
+    else:
+        alert_html = ""
 
     if position:
         position_rows = "".join([
@@ -128,6 +145,7 @@ def render_meme_report(report: dict) -> str:
 <table role="presentation" width="760" cellpadding="0" cellspacing="0" style="width:100%;max-width:760px;background:#ffffff;border:1px solid #dbe3ec;border-radius:14px;overflow:hidden">
 <tr><td style="padding:26px;background:#111827;color:#fff"><div style="font-size:12px;letter-spacing:1.2px;color:#93c5fd;font-weight:700">CRYPTO LIVE TRADING INTELLIGENCE</div><h1 style="margin:8px 0 5px;font-size:27px">Production Dashboard</h1><div style="color:#cbd5e1;font-size:13px">{stamp}</div></td></tr>
 <tr><td style="padding:18px 26px;background:{status_bg};color:{status_color}"><table role="presentation" width="100%"><tr><td><div style="font-size:11px">MODE</div><div style="font-size:20px;font-weight:800">{esc(mode)}</div></td><td><div style="font-size:11px">AUTO EXECUTION</div><div style="font-size:20px;font-weight:800">{'PAUSED' if paused else 'ENABLED'}</div></td><td><div style="font-size:11px">POSITION</div><div style="font-size:20px;font-weight:800">{'OPEN' if position else 'FLAT'}</div></td></tr></table></td></tr>
+{alert_html}
 <tr><td {section}>Capital and risk controls</td></tr><tr><td style="padding:6px 26px 18px"><table role="presentation" {table}>{capital_rows}</table></td></tr>
 <tr><td {section}>Position and protection</td></tr><tr><td style="padding:6px 26px 18px"><table role="presentation" {table}>{position_rows}</table></td></tr>
 <tr><td {section}>Recent decisions and completed trades</td></tr><tr><td style="padding:6px 26px 18px;overflow-x:auto"><table role="presentation" {table}><tr style="background:#f8fafc"><th style="padding:8px;text-align:left">Created</th><th style="padding:8px;text-align:left">Product</th><th style="padding:8px;text-align:left">Status</th><th style="padding:8px;text-align:right">Score</th><th style="padding:8px;text-align:right">P&L</th></tr>{recommendations_html}</table></td></tr>

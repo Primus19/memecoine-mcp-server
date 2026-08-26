@@ -360,6 +360,9 @@ def confirmed_trade_actions(transactions: list[dict], summary: dict, open_trades
             "pair": pair,
             "execution_time": tx.get("time"),
             "resulting_unrealized_pnl_usd": summary.get("unrealized_pl"),
+            "cumulative_realized_pnl_usd": summary.get("pl"),
+            "daily_pnl_usd": (float(summary.get("nav") or 0) -
+                              float(risk.get("daily_baseline_nav") or summary.get("nav") or 0)),
             "nav": summary.get("nav"),
             "margin_used": summary.get("margin_used"),
             "margin_available": summary.get("margin_available"),
@@ -743,6 +746,8 @@ class Executor:
                   "model_review": self.ledger.model_review(self.engine.policy.minimum_score),
                   "risk_configuration": {
                       "minimum_score": self.engine.policy.minimum_score,
+                      "daily_baseline_nav": float(self.ledger.setting(
+                          "daily_baseline_nav", str(reconciliation["summary"]["nav"]))),
                       **self.risk_limits(float(reconciliation["summary"]["nav"])),
                       "grandfathered_positions_above_limit": max(
                           0, len(reconciliation["open_trades"]) -

@@ -150,8 +150,9 @@ class ForexReportEmailer:
 <tr><td style="padding:22px"><div style="padding:16px;border-left:5px solid #6366f1;background:#eef2ff;border-radius:8px">
 <b>Why this report was triggered</b><div style="margin-top:6px;line-height:1.5">{esc(action.get('trigger'))}</div></div>
 <table role="presentation" width="100%" cellpadding="8" cellspacing="0" style="margin-top:16px">
-<tr><td style="background:#f8fafc"><b>Action</b><br>{esc(action.get('action'))}</td><td style="background:#f8fafc"><b>Side</b><br>{esc(action.get('side'))}</td><td style="background:#f8fafc"><b>Filled quantity</b><br>{esc(action.get('filled_quantity'))}</td></tr>
-<tr><td><b>Execution price</b><br>{esc(action.get('execution_price'))}</td><td><b>Realized P&amp;L</b><br><span style="color:{pnl_color};font-weight:700">{cls._money(action.get('realized_pnl_usd'))}</span></td><td><b>Account unrealized P&amp;L</b><br>{cls._money(action.get('resulting_unrealized_pnl_usd'))}</td></tr>
+<tr><td style="background:#f8fafc"><b>What happened</b><br>{esc(action.get('action'))}</td><td style="background:#f8fafc"><b>Quantity</b><br>{esc(action.get('filled_quantity'))}</td><td style="background:#f8fafc"><b>Price</b><br>{esc(action.get('execution_price'))}</td></tr>
+<tr><td><b>This trade realized</b><br><span style="color:{pnl_color};font-size:22px;font-weight:700">{cls._money(action.get('realized_pnl_usd'))}</span></td><td><b>Today, including open positions</b><br>{cls._money(action.get('daily_pnl_usd'))}</td><td><b>Open-position P&amp;L</b><br>{cls._money(action.get('resulting_unrealized_pnl_usd'))}</td></tr>
+<tr><td><b>Total realized account P&amp;L</b><br>{cls._money(action.get('cumulative_realized_pnl_usd'))}</td><td><b>Trade status</b><br>{'CLOSED' if str(action.get('email_action'))=='CLOSED' else 'OPEN — profit/loss not final'}</td><td><b>Result</b><br>{'PROFIT' if pnl>0 else 'LOSS' if pnl<0 else 'NOT REALIZED YET'}</td></tr>
 <tr><td style="background:#f8fafc"><b>NAV</b><br>{cls._money(action.get('nav'))}</td><td style="background:#f8fafc"><b>Margin used</b><br>{cls._money(action.get('margin_used'))}</td><td style="background:#f8fafc"><b>Margin available</b><br>{cls._money(action.get('margin_available'))}</td></tr></table>
 <h3 style="margin:22px 0 8px">Position impact</h3><div style="line-height:1.55">{esc(action.get('position_impact'))}</div>
 <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px;border:1px solid #e5e7eb"><tr style="background:#172554;color:#fff"><th style="padding:8px">Pair</th><th>Units</th><th>Entry</th><th>Stop loss</th><th>Take profit</th></tr>{rows}</table>
@@ -287,9 +288,19 @@ class ForexReportEmailer:
         if not self.enabled():
             return {"status": "DISABLED"}
         sent = set(json.loads(self.ledger.setting("forex_email_sent_action_ids", "[]") or "[]"))
+        current_actions = list(report.get("_trade_actions") or [])
+        # Establish a history watermark when a ledger is first created. Broker
+        # history is context, not a set of new alerts to replay after deploys.
+        if self.ledger.setting("forex_email_event_mode_initialized") != "1":
+            sent.update(str(item.get("action_id")) for item in current_actions if item.get("action_id"))
+            self.ledger.set_setting("forex_email_sent_action_ids", json.dumps(list(sent)[-500:]))
+            self.ledger.set_setting("forex_email_pending_actions", "[]")
+            self.ledger.set_setting("forex_email_event_mode_initialized", "1")
+            return ({"status": "HISTORY_BASELINE_ESTABLISHED", "historical_actions_suppressed": len(current_actions)}
+                    if current_actions else {"status": "NO_NEW_TRADE_ACTION"})
         pending = json.loads(self.ledger.setting("forex_email_pending_actions", "[]") or "[]")
         pending_by_id = {str(item.get("action_id")): item for item in pending if item.get("action_id")}
-        for action in report.get("_trade_actions") or []:
+        for action in current_actions:
             action_id = str(action.get("action_id") or "")
             if action_id and action_id not in sent:
                 pending_by_id[action_id] = action
