@@ -107,11 +107,31 @@ class Store:
         if self.setting("daily_start_date")!=today:self.set_setting("daily_start_date",today);self.set_setting("daily_start_equity_usdc",equity)
         peak=max(float(self.setting("peak_equity_usdc","0") or 0),equity);self.set_setting("peak_equity_usdc",peak); daily=float(self.setting("daily_start_equity_usdc",str(equity)) or equity)
         dd=0 if peak<=0 else (peak-equity)/peak; ddd=0 if daily<=0 else (daily-equity)/daily; losses=int(self.setting("consecutive_losses","0") or 0); reasons=[]
-        if losses>=2:reasons.append("two consecutive losses")
         if ddd>=.15:reasons.append("daily drawdown reached 15%")
         if dd>=.25:reasons.append("peak drawdown reached 25%")
         if reasons and not self.paused():self.event("PAUSED",{"reason":"; ".join(reasons),"automatic":True})
-        return {"equity_usdc":equity,"equity_source":source,"peak_equity_usdc":peak,"drawdown_pct":dd*100,"daily_drawdown_pct":ddd*100,"consecutive_losses":losses,"circuit_breakers":reasons}
+        recovery="DEFENSIVE" if losses>=3 else "RECOVERY" if losses>=2 or dd>=.08 else "NORMAL"
+        if recovery=="DEFENSIVE":
+            allocation,risk_multiplier,score_boost=.20,.375,6.0
+        elif recovery=="RECOVERY":
+            allocation,risk_multiplier,score_boost=.35,.625,4.0
+        else:
+            allocation,risk_multiplier,score_boost=.95,1.0,0.0
+        previous=self.setting("meme_recovery_mode","NORMAL")
+        if previous!=recovery:
+            self.set_setting("meme_recovery_mode",recovery)
+            self.event("RECOVERY_MODE_CHANGED",{"previous":previous,"current":recovery,
+                       "consecutive_losses":losses,"drawdown_pct":dd*100,
+                       "allocation_fraction":allocation,"risk_multiplier":risk_multiplier,
+                       "minimum_score_boost":score_boost})
+        if not reasons and recovery!="NORMAL" and self.paused() and self.automatic_pause_reason_is_loss_streak():
+            self.event("RESUMED",{"automatic":True,"reason":"loss streak moved to controlled recovery mode"})
+        return {"equity_usdc":equity,"equity_source":source,"peak_equity_usdc":peak,
+                "drawdown_pct":dd*100,"daily_drawdown_pct":ddd*100,
+                "consecutive_losses":losses,"circuit_breakers":reasons,
+                "recovery_mode":recovery,"recommended_allocation_fraction":allocation,
+                "risk_multiplier":risk_multiplier,"minimum_score_boost":score_boost,
+                "new_entries_halted":bool(reasons)}
     def model_review(self,trigger,key):
         old=self.db.execute("SELECT payload FROM reviews WHERE review_key=?",(key,)).fetchone()
         if old:
@@ -144,5 +164,10 @@ class Store:
     def seen(self,ticket_id):return self.db.execute("SELECT 1 FROM events WHERE ticket_id=? LIMIT 1",(ticket_id,)).fetchone() is not None
     def paused(self):
         row=self.db.execute("SELECT kind FROM events WHERE kind IN ('PAUSED','RESUMED') ORDER BY seq DESC LIMIT 1").fetchone();return bool(row and row[0]=="PAUSED")
+    def automatic_pause_reason_is_loss_streak(self):
+        row=self.db.execute("SELECT payload FROM events WHERE kind='PAUSED' ORDER BY seq DESC LIMIT 1").fetchone()
+        if not row:return False
+        payload=json.loads(row[0])
+        return payload.get("automatic") is True and "consecutive losses" in str(payload.get("reason",""))
     def recent(self,limit=50,since_seq=0):
         return [{**dict(r),"payload":json.loads(r["payload"])} for r in self.db.execute("SELECT seq,at,kind,ticket_id,payload,digest FROM events WHERE seq>? ORDER BY seq DESC LIMIT ?",(since_seq,limit)).fetchall()]
