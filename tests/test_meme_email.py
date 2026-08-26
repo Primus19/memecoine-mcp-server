@@ -65,8 +65,24 @@ class MemeEmailTests(unittest.TestCase):
         })
         self.assertIn("Production Dashboard", body)
         self.assertIn("LIVE_ARMED", body)
-        self.assertIn("AUTO EXECUTION ENABLED", body)
+        self.assertIn("AUTO EXECUTION", body)
+        self.assertIn("ENABLED", body)
+        self.assertIn("Capital and risk controls", body)
+        self.assertIn("Recent decisions and completed trades", body)
+        self.assertIn("Recent audit events and errors", body)
+        self.assertIn("background:#111827", body)
         self.assertNotIn("<script", body.lower())
+
+    def test_report_renders_error_detail_and_escapes_untrusted_values(self):
+        body = render_meme_report({
+            "mode": "LIVE_ARMED", "paused": False,
+            "portfolio": {"open_position": None, "controls": {}},
+            "notification_events": [{"at": "now", "kind": "POSITION_SUPERVISION_ERROR",
+                                      "payload": {"detail": "bad <script>alert(1)</script>"}}],
+        })
+        self.assertIn("POSITION_SUPERVISION_ERROR", body)
+        self.assertIn("bad &lt;script&gt;alert(1)&lt;/script&gt;", body)
+        self.assertNotIn("bad <script>", body)
 
     def test_forex_gmail_configuration_is_reused_when_meme_values_are_absent(self):
         forex_env = {
