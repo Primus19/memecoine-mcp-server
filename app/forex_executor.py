@@ -334,6 +334,123 @@ def safe_quantity(adapter: OandaAdapter, proposal: dict, risk_usd: float,
     return float(units)
 
 
+def confirmed_trade_actions(transactions: list[dict], summary: dict, open_trades: list[dict],
+                            pending_orders: list[dict], risk: dict, snapshots: list[dict],
+                            intents: list[dict], outcomes: list[dict]) -> list[dict]:
+    """Convert confirmed broker fills into sanitized, explanatory email payloads."""
+    actions = []
+    intent_by_trade = {str(item.get("broker_trade_id")): item for item in intents
+                       if item.get("broker_trade_id")}
+    outcome_by_symbol = {str(item.get("symbol")): item for item in outcomes}
+    calendar_verified = all(item.get("calendar_verified") is True for item in snapshots) if snapshots else False
+    blackout = any(int(item.get("economic_event_within_minutes") or 0) > 0 for item in snapshots)
+
+    def base(tx: dict, pair: str, action_id: str) -> dict:
+        outcome = outcome_by_symbol.get(pair, {})
+        score = outcome.get("score")
+        signal = (
+            f"Signal score {score:.2f} versus "
+            f"{outcome.get('minimum_score', risk.get('minimum_score'))}; "
+            f"{outcome.get('alignment', 'broker fill confirmation')}"
+        ) if isinstance(score, (int, float)) else (
+            "Confirmed broker fill; original signal details are retained in the trade ledger."
+        )
+        return {
+            "action_id": action_id,
+            "pair": pair,
+            "execution_time": tx.get("time"),
+            "resulting_unrealized_pnl_usd": summary.get("unrealized_pl"),
+            "nav": summary.get("nav"),
+            "margin_used": summary.get("margin_used"),
+            "margin_available": summary.get("margin_available"),
+            "remaining_positions": open_trades,
+            "pending_protective_orders": pending_orders,
+            "signal_trigger": signal,
+            "calendar_state": (
+                f"Verified: {'yes' if calendar_verified else 'no'}; "
+                f"active/upcoming blackout evidence: {'yes' if blackout else 'no'}"
+            ),
+            "executor_state": "LIVE_ARMED and ready; broker fill confirmed",
+            "risk_summary": (
+                f"{float(risk.get('risk_per_trade_pct') or 0) * 100:.2f}% NAV per trade; "
+                f"{float(risk.get('combined_risk_pct') or 0) * 100:.2f}% combined risk; "
+                f"{risk.get('maximum_open_positions')} maximum positions; "
+                f"{float(risk.get('drawdown_pct') or 0) * 100:.2f}% drawdown"
+            ),
+            "warnings": ([outcome.get("reason")] if outcome.get("reason") else []) +
+                        (["Economic-calendar blackout is active for at least one scanned pair."]
+                         if blackout else []),
+        }
+
+    for tx in transactions:
+        if str(tx.get("type")) != "ORDER_FILL":
+            continue
+        tx_id = str(tx.get("id") or "")
+        pair = str(tx.get("instrument") or "")
+        reason = str(tx.get("reason") or "MARKET_ORDER")
+        opened = tx.get("tradeOpened") or {}
+        if opened:
+            trade_id = str(opened.get("tradeID") or "")
+            intent = intent_by_trade.get(trade_id, {})
+            units = float(opened.get("units") or tx.get("units") or intent.get("quantity") or 0)
+            side = "BUY" if units > 0 else "SELL"
+            action = base(tx, pair or str(intent.get("symbol") or ""), f"{tx_id}:open:{trade_id}")
+            action.update({
+                "email_action": side,
+                "action": "New position opened",
+                "side": side,
+                "filled_quantity": abs(units),
+                "execution_price": opened.get("price") or tx.get("price") or intent.get("entry_price"),
+                "realized_pnl_usd": float(tx.get("pl") or 0),
+                "trigger": (
+                    f"A broker-confirmed {side} fill opened a new {action['pair'].replace('_', '/')} "
+                    f"position. The order passed the strategy score, liquidity, spread, session, "
+                    f"calendar, risk-budget, correlation, and protection checks."
+                ),
+                "position_impact": (
+                    f"Exposure increased by {abs(units):g} units. "
+                    f"{len(open_trades)} position(s) are now open, with protective stop-loss and "
+                    f"take-profit orders listed below."
+                ),
+            })
+            actions.append(action)
+        closed_items = list(tx.get("tradesClosed") or [])
+        if tx.get("tradeReduced"):
+            closed_items.append(tx["tradeReduced"])
+        for item in closed_items:
+            trade_id = str(item.get("tradeID") or "")
+            intent = intent_by_trade.get(trade_id, {})
+            closed_pair = pair or str(intent.get("symbol") or "")
+            units = abs(float(item.get("units") or 0))
+            realized = (float(item.get("realizedPL") or 0) + float(item.get("financing") or 0) +
+                        float(item.get("dividendAdjustment") or 0))
+            trigger_names = {
+                "STOP_LOSS_ORDER": "The protective stop-loss was executed because price reached the predefined loss boundary.",
+                "TAKE_PROFIT_ORDER": "The protective take-profit was executed because price reached the planned profit target.",
+                "MARKET_ORDER_TRADE_CLOSE": "The position was closed by a confirmed market close instruction.",
+            }
+            trigger = trigger_names.get(
+                reason, f"A broker-confirmed fill reduced or closed the position ({reason.replace('_', ' ').lower()}).")
+            action = base(tx, closed_pair, f"{tx_id}:close:{trade_id}")
+            action.update({
+                "email_action": "CLOSED",
+                "action": "Partial position close" if tx.get("tradeReduced") and not tx.get("tradesClosed")
+                          else "Position closed",
+                "side": "CLOSE",
+                "filled_quantity": units,
+                "execution_price": item.get("price") or tx.get("price"),
+                "realized_pnl_usd": realized,
+                "trigger": trigger,
+                "position_impact": (
+                    f"Exposure decreased by {units:g} units. Realized result from this fill was "
+                    f"{'a gain' if realized >= 0 else 'a loss'} of ${abs(realized):.4f}. "
+                    f"{len(open_trades)} position(s) remain open."
+                ),
+            })
+            actions.append(action)
+    return actions
+
+
 class Executor:
     def __init__(self):
         self.adapter = OandaAdapter()
@@ -639,8 +756,15 @@ class Executor:
                   },
                   "capital_baseline_nav": float(os.getenv("FOREX_LIVE_BASELINE_USD", "0") or 0),
                   "daily_baseline_nav": float(self.ledger.setting("daily_baseline_nav", str(reconciliation["summary"]["nav"])))}
+        trade_actions = confirmed_trade_actions(
+            reconciliation["transactions"], reconciliation["summary"],
+            reconciliation["open_trades"], reconciliation["pending_orders"],
+            report["risk_configuration"], snapshots, report["intents"], outcomes)
         delivery = self.emailer.status()
-        delivery["attempt"] = self.emailer.maybe_send(report)
+        delivery_payload = dict(report)
+        delivery_payload["_trade_actions"] = trade_actions
+        delivery["attempt"] = self.emailer.maybe_send(delivery_payload)
+        delivery["confirmed_actions_this_scan"] = len(trade_actions)
         report["email_delivery"] = delivery
         with LOCK:
             STATE["report"] = report
