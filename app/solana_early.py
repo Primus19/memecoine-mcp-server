@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 UTC = timezone.utc
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 LOCK = threading.RLock()
 STATE: dict[str, Any] = {"ok": False, "scanned_at": "", "candidates": [], "error": "not scanned",
                          "feed": "", "wallet_events": 0}
@@ -111,7 +112,32 @@ class Ledger:
                   str(event.get("observed_at") or utcnow()), json.dumps(event, sort_keys=True))
         with self.lock, self.db:
             cursor = self.db.execute("INSERT OR IGNORE INTO wallet_events VALUES(?,?,?,?,?,?,?)", values)
-        return cursor.rowcount == 1
+        inserted = cursor.rowcount == 1
+        if inserted:
+            with self.lock, self.db:
+                if event["side"] == "BUY" and float(event.get("quote_usdc", 0)) > 0:
+                    self.db.execute("INSERT OR IGNORE INTO wallet_outcomes VALUES(?,?,?,?,?)",
+                        (event["wallet"], event["mint"], event["observed_at"], None, None))
+                elif event["side"] == "SELL" and float(event.get("quote_usdc", 0)) > 0:
+                    row = self.db.execute(
+                        "SELECT opened_at FROM wallet_outcomes WHERE wallet=? AND token=? AND closed_at IS NULL ORDER BY opened_at LIMIT 1",
+                        (event["wallet"], event["mint"])).fetchone()
+                    if row:
+                        buy = self.db.execute("SELECT payload FROM wallet_events WHERE wallet=? AND mint=? AND side='BUY' AND observed_at=?",
+                            (event["wallet"], event["mint"], row[0])).fetchone()
+                        cost = float(json.loads(buy[0]).get("quote_usdc", 0)) if buy else 0
+                        if cost > 0:
+                            realized = float(event["quote_usdc"]) / cost - 1
+                            self.db.execute("UPDATE wallet_outcomes SET closed_at=?,realized_return=? WHERE wallet=? AND token=? AND opened_at=?",
+                                (event["observed_at"], realized, event["wallet"], event["mint"], row[0]))
+        return inserted
+
+    def recent_buyers(self, mint: str, minutes: int = 15) -> list[str]:
+        cutoff = datetime.fromtimestamp(time.time() - minutes * 60, UTC).isoformat()
+        with self.lock:
+            rows = self.db.execute("SELECT DISTINCT wallet FROM wallet_events WHERE mint=? AND side='BUY' AND observed_at>=?",
+                                   (mint, cutoff)).fetchall()
+        return [str(row[0]) for row in rows]
 
 
 def smart_wallet_score(wallets: list[str], ledger: Ledger) -> tuple[float, list[dict[str, Any]]]:
@@ -259,7 +285,7 @@ def jupiter_sell_check(mint: str, decimals: int, price_usd: float) -> tuple[bool
     return bool(payload.get("outAmount") or payload.get("outputAmount")), impact
 
 
-def coingecko_candidates() -> list[dict[str, Any]]:
+def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
     key = os.environ["COINGECKO_API_KEY"]
     base = os.getenv("COINGECKO_ONCHAIN_BASE_URL", "https://pro-api.coingecko.com/api/v3/onchain").rstrip("/")
     headers = {"x-cg-pro-api-key": key}
@@ -308,16 +334,17 @@ def coingecko_candidates() -> list[dict[str, Any]]:
             **safety,
             "coingecko_top10_holder_fraction": _number(distribution.get("top_10"), 100) / 100,
             "sell_simulation_ok": sell_ok, "sell_price_impact_bps": sell_impact,
-            "social_velocity_ratio": 0, "creator_history_score": 0, "buyer_wallets": [],
+            "social_velocity_ratio": 0, "creator_history_score": 0,
+            "buyer_wallets": ledger.recent_buyers(mint),
             "quote_symbol": str(quote_token.get("symbol") or ""), "source": "coingecko_onchain",
         })
     return results
 
 
-def fetch_candidates() -> tuple[list[dict[str, Any]], str]:
+def fetch_candidates(ledger: Ledger) -> tuple[list[dict[str, Any]], str]:
     url = os.getenv("SOLANA_EARLY_FEED_URL", "").strip()
     if not url:
-        return coingecko_candidates(), "coingecko_onchain"
+        return coingecko_candidates(ledger), "coingecko_onchain"
     headers = {"Accept": "application/json", "User-Agent": "primus-solana-early/1.0"}
     token = os.getenv("SOLANA_EARLY_FEED_TOKEN", "")
     if token:
@@ -346,16 +373,26 @@ class Handler(BaseHTTPRequestHandler):
             for tx in payload if isinstance(payload, list) else [payload]:
                 signature = str(tx.get("signature") or "")
                 timestamp = datetime.fromtimestamp(int(tx.get("timestamp") or time.time()), UTC).isoformat()
-                for transfer in tx.get("tokenTransfers") or []:
-                    source, destination = str(transfer.get("fromUserAccount") or ""), str(transfer.get("toUserAccount") or "")
-                    wallet = destination if destination in watched else source if source in watched else ""
-                    if not signature or not wallet:
-                        continue
-                    side = "BUY" if destination == wallet else "SELL"
-                    event = {"signature": f"{signature}:{wallet}:{transfer.get('mint')}", "wallet": wallet,
-                             "mint": transfer.get("mint"), "side": side,
-                             "quantity": transfer.get("tokenAmount") or 0, "observed_at": timestamp}
-                    inserted += int(self.ledger.store_wallet_event(event))
+                transfers = tx.get("tokenTransfers") or []
+                involved = {str(value.get(field) or "") for value in transfers
+                            for field in ("fromUserAccount", "toUserAccount")}
+                for wallet in watched & involved:
+                    spent = sum(float(value.get("tokenAmount") or 0) for value in transfers
+                                if value.get("mint") == USDC_MINT and value.get("fromUserAccount") == wallet)
+                    received = sum(float(value.get("tokenAmount") or 0) for value in transfers
+                                   if value.get("mint") == USDC_MINT and value.get("toUserAccount") == wallet)
+                    for value in transfers:
+                        mint = str(value.get("mint") or "")
+                        if not signature or not mint or mint == USDC_MINT:
+                            continue
+                        side = "BUY" if value.get("toUserAccount") == wallet and spent > 0 else \
+                               "SELL" if value.get("fromUserAccount") == wallet and received > 0 else ""
+                        if not side:
+                            continue
+                        event = {"signature": f"{signature}:{wallet}:{mint}:{side}", "wallet": wallet,
+                                 "mint": mint, "side": side, "quantity": value.get("tokenAmount") or 0,
+                                 "quote_usdc": spent if side == "BUY" else received, "observed_at": timestamp}
+                        inserted += int(self.ledger.store_wallet_event(event))
             with LOCK:
                 STATE["wallet_events"] = int(STATE.get("wallet_events", 0)) + inserted
             body = json.dumps({"ok": True, "inserted": inserted}).encode()
@@ -397,7 +434,7 @@ def main() -> None:
     while True:
         try:
             results = []
-            candidates, feed = fetch_candidates()
+            candidates, feed = fetch_candidates(ledger)
             for candidate in candidates:
                 outcome = score_candidate(candidate, ledger, policy)
                 ledger.store_signal(candidate, outcome["score"], "QUALIFIED" if outcome["qualified"] else "REJECTED")
