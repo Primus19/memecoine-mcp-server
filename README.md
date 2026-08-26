@@ -2,6 +2,65 @@
 
 This MCP server is the authoritative decision and execution ledger for the Coinbase pilot. It does not guarantee profit.
 
+## Solana early-discovery sleeve
+
+`python -m app.solana_early` is a separately deployable discovery service for
+new Solana pools and Pump.fun-style launches. It scores contract safety,
+sellability, liquidity, unique-buyer acceleration, net buy pressure, holder
+distribution, creator behavior, social velocity and the repeatable performance
+of participating wallets. A wallet receives predictive credit only after at
+least 20 timestamped closed outcomes with positive mean return and a minimum
+55% win rate; one lucky trade never creates a "smart wallet" label.
+
+The discovery service never holds a private key or submits swaps. It obtains
+new pools and aggregate flow/holder evidence from CoinGecko Onchain, fails
+closed on GoPlus token-control evidence, verifies that a small exit is routable
+through Jupiter Swap V2, and accepts authenticated Helius wallet events at
+`POST /webhooks/helius`. Deploy with a persistent volume and:
+
+```text
+SOLANA_EARLY_ENABLED=true
+COINGECKO_API_KEY=<secret>
+JUPITER_API_KEY=<secret>
+HELIUS_WEBHOOK_AUTH=<random-secret>
+SOLANA_WATCH_WALLETS=<comma-separated-public-addresses>
+SOLANA_EARLY_LEDGER_PATH=/app/data/solana_early.sqlite3
+SOLANA_EARLY_SCAN_INTERVAL_SECONDS=20
+SOLANA_EARLY_MIN_SCORE=78
+SOLANA_EARLY_MAX_PROBE_USD=3
+SOLANA_EARLY_LIVE_ENABLED=false
+```
+
+Use `railway.solana-early.json` as the Railway config path. `/health` proves
+process and scan health, while `/status` and `/candidates` expose sanitized
+paper decisions.
+
+`services/solana-executor` is a separate signer/executor deployment using
+`Dockerfile.solana-executor` and `railway.solana-executor.json`. It consumes
+only qualified discovery records, uses Jupiter Swap V2 order/execute, persists
+confirmed signatures, reconciles wallet USDC/SOL before entry, limits entries
+to $3, total exposure to $6 and two positions, and supervises stop-loss,
+take-profit, trailing-stop and 24-hour maximum-hold exits. It remains blocked
+until at least 50 paper observations and every live gate are present:
+
+```text
+SOLANA_EXECUTOR_ENABLED=true
+SOLANA_DISCOVERY_URL=https://<discovery-service>.up.railway.app
+JUPITER_API_KEY=<secret>
+HELIUS_API_KEY=<secret>
+SOLANA_WALLET_PRIVATE_KEY=<base58-secret-stored-only-in-Railway>
+SOLANA_MIN_PAPER_OBSERVATIONS=50
+SOLANA_MAX_ENTRY_USD=3
+SOLANA_MAX_TOTAL_EXPOSURE_USD=6
+SOLANA_MAX_POSITIONS=2
+SOLANA_LIVE_ENABLED=false
+SOLANA_LIVE_ACK=
+```
+
+After forward validation, arm with `SOLANA_LIVE_ENABLED=true` and the exact
+acknowledgement `I_ACCEPT_THE_25_USD_SOLANA_EARLY_RISK`. Never paste the wallet
+secret into chat, source control, logs, or the discovery service.
+
 ## One report-to-execution chain
 
 1. Market research supplies normalized evidence to `issue_model_3_1_recommendation`.

@@ -1,0 +1,8 @@
+FROM node:20-slim
+WORKDIR /app
+COPY services/solana-executor/package.json ./package.json
+RUN npm install --omit=dev
+COPY services/solana-executor/index.mjs ./index.mjs
+ENV PORT=8080 NODE_ENV=production
+EXPOSE 8080
+CMD ["node", "index.mjs"]
