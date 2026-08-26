@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from app.forex_email import ForexReportEmailer
+from app.forex_executor import confirmed_trade_actions
 
 
 class Ledger:
@@ -36,33 +37,61 @@ ENV = {
 
 
 class ForexEmailTests(unittest.TestCase):
-    def test_et_hour_and_subject_are_stable(self):
+    @staticmethod
+    def action():
+        return {
+            "action_id": "tx-22:close:trade-10",
+            "email_action": "CLOSED",
+            "action": "Position closed",
+            "pair": "EUR_JPY",
+            "side": "CLOSE",
+            "execution_time": "2026-08-25T13:42:00+00:00",
+            "filled_quantity": 42,
+            "execution_price": 186.677,
+            "realized_pnl_usd": 0.25,
+            "resulting_unrealized_pnl_usd": 0,
+            "nav": 50.25,
+            "margin_used": 0,
+            "margin_available": 50.25,
+            "trigger": "The protective take-profit was executed.",
+            "position_impact": "Exposure decreased by 42 units.",
+            "remaining_positions": [],
+            "signal_trigger": "Original signal score 82.",
+            "calendar_state": "Verified; no active blackout.",
+            "executor_state": "LIVE_ARMED and ready",
+            "risk_summary": "1% per trade; 2% combined",
+            "warnings": [],
+        }
+
+    def test_trade_subject_uses_action_and_execution_time(self):
         now = datetime(2026, 8, 25, 13, 42, tzinfo=timezone.utc)
         with patch.dict(os.environ, ENV, clear=False):
             self.assertEqual("2026-08-25T09-0400", ForexReportEmailer.hour_key(now))
-            self.assertEqual("[HOURLY] Forex Live Trading Dashboard - 2026-08-25 09:00 ET",
-                             ForexReportEmailer.subject(now))
+            self.assertEqual("[TRADE] Forex CLOSED - EUR/JPY - 2026-08-25 09:42 ET",
+                             ForexReportEmailer.subject(self.action(), now))
 
-    def test_success_is_recorded_and_duplicate_is_suppressed(self):
+    def test_success_is_recorded_and_same_action_is_suppressed(self):
         ledger = Ledger()
         emailer = ForexReportEmailer(ledger)
         now = datetime(2026, 8, 25, 13, 42, tzinfo=timezone.utc)
         with patch.dict(os.environ, ENV, clear=False), patch.object(emailer, "_send"):
-            emailer._deliver({"mode": "LIVE_ARMED"}, emailer.hour_key(now), now)
-            result = emailer.maybe_send({"mode": "LIVE_ARMED"}, now)
-        self.assertEqual("DUPLICATE_SUPPRESSED", result["status"])
-        self.assertEqual("2026-08-25T09-0400", ledger.settings["forex_email_last_sent_hour"])
-        self.assertEqual("FOREX_EMAIL_SENT", ledger.events[-1][0])
+            emailer._deliver([self.action()], now)
+            result = emailer.maybe_send({"_trade_actions": [self.action()]}, now)
+        self.assertEqual("NO_NEW_TRADE_ACTION", result["status"])
+        self.assertIn(self.action()["action_id"], ledger.settings["forex_email_sent_action_ids"])
+        self.assertEqual("FOREX_TRADE_EMAIL_SENT", ledger.events[-1][0])
 
-    def test_failure_is_audited_without_marking_hour_sent(self):
+    def test_failure_is_audited_and_action_remains_pending(self):
         ledger = Ledger()
         emailer = ForexReportEmailer(ledger)
         now = datetime(2026, 8, 25, 13, 42, tzinfo=timezone.utc)
         with patch.dict(os.environ, ENV, clear=False), patch.object(emailer, "_send", side_effect=RuntimeError("down")):
-            emailer._deliver({}, emailer.hour_key(now), now)
-        self.assertNotIn("forex_email_last_sent_hour", ledger.settings)
+            ledger.set_setting("forex_email_pending_actions", json.dumps([self.action()]))
+            emailer._deliver([self.action()], now)
+        self.assertNotIn("forex_email_sent_action_ids", ledger.settings)
+        self.assertIn(self.action()["action_id"], ledger.settings["forex_email_pending_actions"])
         self.assertIn("RuntimeError", ledger.settings["forex_email_last_error"])
-        self.assertEqual("FOREX_EMAIL_FAILED", ledger.events[-1][0])
+        self.assertEqual("FOREX_TRADE_EMAIL_FAILED", ledger.events[-1][0])
 
     def test_gmail_api_refreshes_token_and_sends_mime_over_https(self):
         emailer = ForexReportEmailer(Ledger())
@@ -90,7 +119,7 @@ class ForexEmailTests(unittest.TestCase):
             return Response(b'{"id":"gmail-message-1"}')
 
         with patch.dict(os.environ, env, clear=False), patch("app.forex_email.urllib.request.urlopen", fake_open):
-            emailer._send({"mode": "LIVE_ARMED"}, now)
+            emailer._send(self.action(), now)
 
         self.assertEqual("https://oauth2.googleapis.com/token", requests[0][0].full_url)
         self.assertIn(b"refresh-secret", requests[0][0].data)
@@ -140,7 +169,7 @@ class ForexEmailTests(unittest.TestCase):
             return Response()
 
         with patch.dict(os.environ, env, clear=False), patch("app.forex_email.urllib.request.urlopen", fake_open):
-            emailer._send({"mode": "LIVE_ARMED"}, now)
+            emailer._send(self.action(), now)
 
         self.assertEqual("https://api.resend.com/emails", captured["url"])
         self.assertEqual("Bearer resend-secret", captured["authorization"])
@@ -156,6 +185,39 @@ class ForexEmailTests(unittest.TestCase):
     def test_disabled_sender_does_nothing(self):
         with patch.dict(os.environ, {"FOREX_EMAIL_REPORT_ENABLED": "false"}, clear=False):
             self.assertEqual("DISABLED", ForexReportEmailer(Ledger()).maybe_send({})["status"])
+
+    def test_no_trade_action_does_not_queue_email(self):
+        with patch.dict(os.environ, ENV, clear=False):
+            self.assertEqual(
+                "NO_NEW_TRADE_ACTION",
+                ForexReportEmailer(Ledger()).maybe_send({"_trade_actions": []})["status"],
+            )
+
+    def test_html_explains_trigger_positions_and_profit(self):
+        body = ForexReportEmailer._trade_html(self.action())
+        self.assertIn("Why this report was triggered", body)
+        self.assertIn("protective take-profit", body)
+        self.assertIn("Position impact", body)
+        self.assertIn("+$0.2500", body)
+
+    def test_confirmed_take_profit_fill_becomes_detailed_close_action(self):
+        transactions = [{
+            "id": "22", "type": "ORDER_FILL", "time": "2026-08-25T13:42:00Z",
+            "instrument": "EUR_JPY", "reason": "TAKE_PROFIT_ORDER", "price": "186.677",
+            "tradesClosed": [{"tradeID": "10", "units": "-42", "realizedPL": "0.25",
+                              "financing": "-0.01"}],
+        }]
+        summary = {"nav": 50.24, "unrealized_pl": 0, "margin_used": 0, "margin_available": 50.24}
+        risk = {"minimum_score": 80, "risk_per_trade_pct": .01, "combined_risk_pct": .02,
+                "maximum_open_positions": 2, "drawdown_pct": 0}
+        actions = confirmed_trade_actions(
+            transactions, summary, [], [], risk,
+            [{"calendar_verified": True, "economic_event_within_minutes": 0}],
+            [{"broker_trade_id": "10", "symbol": "EUR_JPY"}], [])
+        self.assertEqual(1, len(actions))
+        self.assertEqual("CLOSED", actions[0]["email_action"])
+        self.assertIn("take-profit", actions[0]["trigger"])
+        self.assertAlmostEqual(.24, actions[0]["realized_pnl_usd"])
 
 
 if __name__ == "__main__":
