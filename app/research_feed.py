@@ -63,7 +63,7 @@ class ResearchFeed:
         # Scan the broad crypto market instead of CoinGecko's meme-only category.
         # Four pages covers the leading 1,000 assets; operators can extend this
         # without changing code when Coinbase adds deeper USDC markets.
-        self.pages = max(1, min(10, int(os.getenv("RESEARCH_MARKET_PAGES", "4"))))
+        self.pages = max(4, min(10, int(os.getenv("RESEARCH_MARKET_PAGES", "4"))))
         self.interval = max(15, min(300, int(os.getenv("RESEARCH_SCAN_INTERVAL_SECONDS", "30"))))
         self.http_max_retries = max(1, min(5, int(os.getenv("RESEARCH_HTTP_MAX_RETRIES", "3"))))
         self.http_retry_backoff = max(.25, min(10.0, float(os.getenv("RESEARCH_HTTP_RETRY_BACKOFF_SECONDS", "1"))))
