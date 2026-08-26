@@ -299,7 +299,8 @@ def practice_armed(adapter: OandaAdapter) -> bool:
 
 
 def safe_quantity(adapter: OandaAdapter, proposal: dict, risk_usd: float,
-                  margin_budget_usd: float | None = None) -> float:
+                  margin_budget_usd: float | None = None,
+                  notional_budget_usd: float | None = None) -> float:
     quote = adapter.price(proposal["symbol"])
     if quote.get("status") != "tradeable":
         raise MultiAssetRejected("broker reports instrument non-tradeable")
@@ -317,9 +318,16 @@ def safe_quantity(adapter: OandaAdapter, proposal: dict, risk_usd: float,
     metadata = adapter.instrument(proposal["symbol"])
     margin_rate = float(metadata.get("marginRate") or 1)
     unit_notional_home = mid * factor
-    notional_cap = max(1.0, float(os.getenv("FOREX_MAX_NOTIONAL_USD", "50")))
-    configured_margin_cap = max(0.50, float(os.getenv("FOREX_MAX_MARGIN_USED_USD", "5")))
-    margin_cap = configured_margin_cap if margin_budget_usd is None else max(0.0, min(configured_margin_cap, margin_budget_usd))
+    notional_cap = max(0.0, float(notional_budget_usd if notional_budget_usd is not None else
+                                    os.getenv("FOREX_MAX_NOTIONAL_USD", "50")))
+    margin_cap = max(0.0, float(margin_budget_usd if margin_budget_usd is not None else
+                                  os.getenv("FOREX_MAX_MARGIN_USED_USD", "5")))
+    absolute_notional = max(0.0, float(os.getenv("FOREX_ABSOLUTE_MAX_NOTIONAL_USD", "0") or 0))
+    absolute_margin = max(0.0, float(os.getenv("FOREX_ABSOLUTE_MAX_MARGIN_USED_USD", "0") or 0))
+    if absolute_notional:
+        notional_cap = min(notional_cap, absolute_notional)
+    if absolute_margin:
+        margin_cap = min(margin_cap, absolute_margin)
     units = min(units, int(notional_cap / unit_notional_home), int(margin_cap / (unit_notional_home * margin_rate)))
     if units < 1:
         raise MultiAssetRejected("risk cap cannot support minimum unit")
@@ -335,17 +343,69 @@ class Executor:
         base_policy = AssetPolicy.from_env()
         self.engine = ForexEngine(replace(
             base_policy, minimum_score=float(os.getenv("FOREX_MIN_SCORE", "80"))))
-        self.max_risk = min(0.50, max(0.10, float(os.getenv("FOREX_MAX_RISK_USD", "0.50"))))
+        self.base_risk_pct = min(0.01, max(0.001, float(os.getenv("FOREX_RISK_PER_TRADE_PCT", "0.01"))))
         self.emailer = ForexReportEmailer(self.ledger)
 
     @staticmethod
     def max_positions() -> int:
-        # Production safety baseline: environment drift cannot raise this cap.
-        return 1
+        # Deliberate hard ceiling: NAV compounding may scale size, never concurrency beyond two.
+        return min(2, max(1, int(os.getenv("FOREX_MAX_OPEN_POSITIONS", "2"))))
 
     @staticmethod
     def currencies(symbol: str) -> set[str]:
         return {part for part in str(symbol).upper().split("_") if part}
+
+    def risk_limits(self, nav: float) -> dict:
+        nav = max(0.0, float(nav))
+        stored_peak_value = self.ledger.setting("peak_nav", "")
+        stored_peak = float(stored_peak_value or nav)
+        peak_nav = max(nav, stored_peak)
+        if not stored_peak_value or peak_nav > stored_peak:
+            self.ledger.set_setting("peak_nav", str(peak_nav))
+        drawdown_pct = 0.0 if peak_nav <= 0 else max(0.0, (peak_nav - nav) / peak_nav)
+        risk_pct, positions = self.base_risk_pct, self.max_positions()
+        if drawdown_pct >= 0.10:
+            risk_pct, positions = 0.0, 0
+        elif drawdown_pct >= 0.07:
+            risk_pct, positions = min(risk_pct, 0.0025), 1
+        elif drawdown_pct >= 0.04:
+            risk_pct = min(risk_pct, 0.005)
+        return {
+            "nav": nav,
+            "peak_nav": peak_nav,
+            "drawdown_pct": drawdown_pct,
+            "risk_per_trade_pct": risk_pct,
+            "risk_per_trade_usd": nav * risk_pct,
+            "maximum_open_positions": positions,
+            "combined_risk_pct": 0.02,
+            "combined_risk_usd": nav * 0.02,
+            "daily_loss_pct": 0.03,
+            "daily_loss_usd": nav * 0.03,
+            "weekly_loss_pct": 0.06,
+            "weekly_loss_usd": nav * 0.06,
+            "single_notional_pct": 1.0,
+            "single_notional_usd": nav,
+            "combined_notional_pct": 1.75,
+            "combined_notional_usd": nav * 1.75,
+            "maximum_margin_used_usd": nav * 0.10,
+            "new_entries_halted": drawdown_pct >= 0.10,
+        }
+
+    def open_notional_home(self, trades: list[dict]) -> float:
+        total = 0.0
+        for trade in trades:
+            symbol = str(trade.get("instrument") or "")
+            units = abs(float(trade.get("currentUnits") or trade.get("initialUnits") or 0))
+            if not symbol or units <= 0:
+                continue
+            quote = self.adapter.price(symbol)
+            bids, asks = quote.get("bids", []), quote.get("asks", [])
+            if not bids or not asks:
+                continue
+            mid = (float(bids[0]["price"]) + float(asks[0]["price"])) / 2
+            factor = float(quote.get("quoteHomeConversionFactors", {}).get("negativeUnits") or 0)
+            total += units * mid * factor
+        return total
 
     def reconcile(self) -> dict:
         summary = self.adapter.preflight()
@@ -358,10 +418,9 @@ class Executor:
             self.ledger.set_setting("last_transaction_id", summary["last_transaction_id"])
         self.ledger.event("BROKER_RECONCILIATION", {"summary": summary, "open_trades": trades,
                                                      "pending_orders": pending, "transactions": transactions})
-        # Two protected trades may exist from the briefly expanded policy.
-        # Keep reconciling and supervising them, but never admit another entry.
-        if len(trades) > 2:
-            raise BrokerError("broker position count exceeds emergency reconciliation limit")
+        limits = self.risk_limits(float(summary["nav"]))
+        if len(trades) > self.max_positions():
+            raise BrokerError("broker position count exceeds two-position safety ceiling")
         if live_armed(self.adapter) or practice_armed(self.adapter):
             broker_positions = self.ledger.broker_positions()
             expected = {str(item.get("broker_trade_id") or "") for item in broker_positions if item.get("broker_trade_id")}
@@ -371,7 +430,8 @@ class Executor:
                 trade_id = str(trade.get("id") or "")
                 if trade_id not in unexpected:
                     continue
-                recovered = recoverable_managed_trade(trade, self.max_risk, transactions)
+                limits = self.risk_limits(float(summary["nav"]))
+                recovered = recoverable_managed_trade(trade, max(0.10, limits["risk_per_trade_usd"]), transactions)
                 if not recovered or self.ledger.has_intent(recovered["proposal_id"]):
                     continue
                 self.ledger.add_intent(recovered, "LIVE" if live_armed(self.adapter) else "PRACTICE", "OPEN")
@@ -400,20 +460,28 @@ class Executor:
                     result = self.adapter.close_trade(trade_id) if trade_id else {}
                     self.ledger.event("UNPROTECTED_TRADE_EMERGENCY_CLOSE", {"trade_id": trade_id, "response": result})
                     raise BrokerError("unprotected broker trade closed; entries paused")
-        baseline = float(os.getenv("FOREX_LIVE_BASELINE_USD", "0") or 0)
-        loss_limit = min(5.0, max(0.50, float(os.getenv("FOREX_DAILY_LOSS_LIMIT_USD", "2.50"))))
-        if live_armed(self.adapter) and baseline <= 0:
-            raise BrokerError("FOREX_LIVE_BASELINE_USD must be configured")
-        today = datetime.now(UTC).date().isoformat()
-        if self.ledger.setting("daily_baseline_date") != today:
-            self.ledger.set_setting("daily_baseline_date", today)
+        today = datetime.now(UTC).date()
+        today_key = today.isoformat()
+        week_key = f"{today.isocalendar().year}-W{today.isocalendar().week:02d}"
+        if self.ledger.setting("daily_baseline_date") != today_key:
+            self.ledger.set_setting("daily_baseline_date", today_key)
             self.ledger.set_setting("daily_baseline_nav", str(summary["nav"]))
-            self.ledger.event("DAILY_BASELINE_RESET", {"date": today, "nav": summary["nav"]})
+            self.ledger.event("DAILY_BASELINE_RESET", {"date": today_key, "nav": summary["nav"]})
+        if self.ledger.setting("weekly_baseline_week") != week_key:
+            self.ledger.set_setting("weekly_baseline_week", week_key)
+            self.ledger.set_setting("weekly_baseline_nav", str(summary["nav"]))
+            self.ledger.event("WEEKLY_BASELINE_RESET", {"week": week_key, "nav": summary["nav"]})
         daily_nav = float(self.ledger.setting("daily_baseline_nav", str(summary["nav"])))
-        if (live_armed(self.adapter) or practice_armed(self.adapter)) and daily_nav - float(summary["nav"]) >= loss_limit:
-            raise BrokerError("daily NAV loss circuit breaker active")
-        if (live_armed(self.adapter) or practice_armed(self.adapter)) and float(summary["margin_used"]) > float(os.getenv("FOREX_MAX_MARGIN_USED_USD", "5")):
-            raise BrokerError("margin-used circuit breaker active")
+        weekly_nav = float(self.ledger.setting("weekly_baseline_nav", str(summary["nav"])))
+        armed = live_armed(self.adapter) or practice_armed(self.adapter)
+        if armed and daily_nav - float(summary["nav"]) >= limits["daily_loss_usd"]:
+            raise BrokerError("3% daily NAV loss circuit breaker active")
+        if armed and weekly_nav - float(summary["nav"]) >= limits["weekly_loss_usd"]:
+            raise BrokerError("6% weekly NAV loss circuit breaker active")
+        if armed and limits["new_entries_halted"]:
+            raise BrokerError("10% peak-to-current drawdown circuit breaker active")
+        if armed and float(summary["margin_used"]) > limits["maximum_margin_used_usd"]:
+            raise BrokerError("NAV-based margin-used circuit breaker active")
         with LOCK:
             STATE["open_positions"] = len(trades)
         return {"summary": summary, "open_trades": trades, "pending_orders": pending,
@@ -426,36 +494,45 @@ class Executor:
         mode = "LIVE" if live_armed(self.adapter) else "PRACTICE" if practice_armed(self.adapter) else "PAPER_ONLY"
         if mode in {"LIVE", "PRACTICE"} and not calendar_ok:
             raise MultiAssetRejected("verified economic calendar evidence required for broker execution")
-        if self.ledger.open_count() >= self.max_positions():
+        preflight = self.adapter.preflight()
+        limits = self.risk_limits(float(preflight.get("nav") or preflight.get("balance") or 0))
+        if limits["new_entries_halted"]:
+            raise MultiAssetRejected("10% drawdown throttle halts new entries")
+        if self.ledger.open_count() >= limits["maximum_open_positions"]:
             raise MultiAssetRejected("position limit reached")
         overlaps = [symbol for symbol in self.ledger.open_symbols()
                     if self.currencies(symbol) & self.currencies(str(proposal["symbol"]))]
         if overlaps:
-            raise MultiAssetRejected("currency-overlap guard active")
+            raise MultiAssetRejected("currency/correlation overlap guard active")
         if self.ledger.symbol_in_cooldown(str(proposal["symbol"]), int(os.getenv("FOREX_SYMBOL_COOLDOWN_SECONDS", "3600"))):
             raise MultiAssetRejected("symbol cooldown active")
-        proposal["maximum_loss_usd"] = self.max_risk
-        portfolio_risk_cap = self.max_risk
-        if self.ledger.open_risk() + self.max_risk > portfolio_risk_cap + 1e-9:
+        remaining_risk = limits["combined_risk_usd"] - self.ledger.open_risk()
+        trade_risk = min(limits["risk_per_trade_usd"], remaining_risk)
+        if trade_risk < max(0.01, float(os.getenv("FOREX_MIN_EXECUTABLE_RISK_USD", "0.10"))):
             raise MultiAssetRejected("combined portfolio risk cap reached")
+        proposal["maximum_loss_usd"] = trade_risk
         intent_id = proposal["proposal_id"]
         if self.ledger.has_intent(intent_id):
             return {"status": "DUPLICATE_SUPPRESSED", "id": intent_id}
+        open_trades = self.adapter.open_trades() if mode != "PAPER_ONLY" else []
+        open_notional = self.open_notional_home(open_trades) if open_trades else 0.0
+        notional_remaining = limits["combined_notional_usd"] - open_notional
+        single_notional = min(limits["single_notional_usd"], notional_remaining)
+        margin_remaining = limits["maximum_margin_used_usd"] - float(preflight.get("margin_used") or 0)
+        if single_notional <= 0:
+            raise MultiAssetRejected("combined NAV-based notional cap reached")
+        if margin_remaining <= 0:
+            raise MultiAssetRejected("combined NAV-based margin cap reached")
+        proposal["quantity"] = safe_quantity(
+            self.adapter, proposal, trade_risk, margin_remaining, single_notional)
         if mode == "PAPER_ONLY":
-            proposal["quantity"] = safe_quantity(self.adapter, proposal, self.max_risk)
             self.ledger.add_intent(proposal, "PAPER_ONLY", "PAPER_OPEN")
             self.ledger.event("PAPER_FILL", proposal)
             return {"status": "PAPER_FILL", "id": intent_id}
-        preflight = self.adapter.preflight()
         if preflight["balance"] <= 0 or preflight["margin_available"] <= 0:
             raise MultiAssetRejected("live account has no available capital")
-        if preflight["open_trade_count"] >= self.max_positions():
+        if preflight["open_trade_count"] >= limits["maximum_open_positions"]:
             raise MultiAssetRejected("broker position limit reached")
-        margin_cap = float(os.getenv("FOREX_MAX_MARGIN_USED_USD", "5"))
-        margin_remaining = margin_cap - float(preflight.get("margin_used") or 0)
-        if margin_remaining <= 0:
-            raise MultiAssetRejected("combined margin cap reached")
-        proposal["quantity"] = safe_quantity(self.adapter, proposal, self.max_risk, margin_remaining)
         self.ledger.add_intent(proposal, mode, "SUBMITTING")
         response = self.adapter.create_order(proposal, client_order_id=intent_id.replace("-", "")[:32])
         rejected = response.get("orderRejectTransaction")
@@ -549,15 +626,16 @@ class Executor:
                   "model_review": self.ledger.model_review(self.engine.policy.minimum_score),
                   "risk_configuration": {
                       "minimum_score": self.engine.policy.minimum_score,
-                      "maximum_open_positions": self.max_positions(),
-                      "maximum_risk_per_trade_usd": self.max_risk,
-                      "maximum_combined_risk_usd": self.max_risk,
-                      "grandfathered_positions_above_limit": max(0, len(reconciliation["open_trades"]) - self.max_positions()),
+                      **self.risk_limits(float(reconciliation["summary"]["nav"])),
+                      "grandfathered_positions_above_limit": max(
+                          0, len(reconciliation["open_trades"]) -
+                          self.risk_limits(float(reconciliation["summary"]["nav"]))["maximum_open_positions"]),
                       "current_open_risk_usd": self.ledger.open_risk(),
-                      "daily_loss_limit_usd": min(5.0, max(0.50, float(os.getenv("FOREX_DAILY_LOSS_LIMIT_USD", "2.50")))),
-                      "maximum_notional_usd": max(1.0, float(os.getenv("FOREX_MAX_NOTIONAL_USD", "50"))),
-                      "maximum_margin_used_usd": max(0.50, float(os.getenv("FOREX_MAX_MARGIN_USED_USD", "5"))),
+                      "current_open_notional_usd": self.open_notional_home(reconciliation["open_trades"]),
                       "currency_overlap_guard": True,
+                      "correlation_guard": "shared base or quote currency prohibited",
+                      "minimum_reward_risk_ratio": 2.0,
+                      "high_impact_calendar_blackout": True,
                   },
                   "capital_baseline_nav": float(os.getenv("FOREX_LIVE_BASELINE_USD", "0") or 0),
                   "daily_baseline_nav": float(self.ledger.setting("daily_baseline_nav", str(reconciliation["summary"]["nav"])))}
