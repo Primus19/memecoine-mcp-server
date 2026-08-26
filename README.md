@@ -50,7 +50,7 @@ New entries pause automatically after any of:
 
 Every hourly `pilot_status` snapshot creates at most one review record for that UTC hour. Every closed trade creates a trade-specific review. Reviews track sample size, wins/losses, win rate, net expectancy and profit factor.
 
-Model 3.1 remains locked until at least 30 closed outcomes exist. The server does not rewrite weights after one win or loss and never loosens safety controls automatically.
+The champion remains locked until at least 100 closed outcomes exist. Promotion also requires a positive 95% lower confidence bound, positive cost-stressed expectancy, and prospective challenger performance without worse drawdown. The server does not rewrite weights after a handful of wins or losses and never loosens safety controls automatically.
 
 ## Email reporting without SMTP
 
@@ -281,7 +281,7 @@ is verified, disable the old connected-Gmail Forex task to avoid duplicates.
 a sentinel used by another sleeve cannot silently disable Forex. Every closed
 trade is reviewed net of financing, with win rate, expectancy, profit factor,
 maximum favorable/adverse excursion, profit capture and symbol breakdowns.
-The champion remains locked for at least 30 closed trades. Any later change
+The champion remains locked for at least 100 closed trades. Any later change
 must be evaluated as a prospective challenger and cannot loosen risk controls.
 
 ## Emerging meme-coin tier
