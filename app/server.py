@@ -17,6 +17,7 @@ from .meme_email import MemeReportEmailer
 from .policy import OpportunityPolicy
 from .risk import TicketRejected,risk_size_ticket,validate_ticket
 from .store import Store
+from .version import CRYPTO_MODEL_VERSION, deployment_info
 
 BASE_URL=validate_public_base_url(os.environ["PUBLIC_BASE_URL"]);SETUP_TOKEN=os.environ["SETUP_TOKEN"];REST_API_TOKEN=os.getenv("REST_API_TOKEN","")
 LIVE_ARMED=os.getenv("LIVE_TRADING","false").lower()=="true" and os.getenv("LIVE_CONFIRMATION","")=="I_ACCEPT_THE_25_USDC_LIVE_RISK"
@@ -70,6 +71,8 @@ def reconcile():
     return {"open_position":{**position,"status":status,"mark_price":product["price"],"mark_value_usdc":mark_value,"net_unrealized_pnl_usdc":unrealized,"fills":summary},"usdc_total":pf["usdc_total"],"controls":controls,"equity_reconciliation":reconciliation}
 
 def supervise(regime="",momentum_1h_pct=None):
+    tracked=store.open_position()
+    if not tracked:return {"status":"IDLE","state":{"open_position":None},"broker_calls_skipped":True}
     state=reconcile();position=state.get("open_position")
     if not position:return {"status":"IDLE","state":state}
     if position.get("status")=="EXIT_SUBMITTED":
@@ -174,8 +177,8 @@ def auto_process(candidate):
 
 def hourly_snapshot(since_seq=0):
     state=reconcile() if store.setting("pilot_baseline_usdc") else {"open_position":store.open_position()};bucket=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
-    review=store.model_review("hourly_report","hourly:"+bucket)
-    return {"timestamp":datetime.now(timezone.utc).isoformat(),"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED","paused":store.paused(),"baseline_usdc":float(store.setting("pilot_baseline_usdc","0") or 0),"net_external_flows_usdc":float(store.setting("net_external_flows_usdc","0") or 0),"realized_pnl_usdc":float(store.setting("realized_pnl_usdc","0") or 0),"permitted_capital_usdc":store.permitted_capital(),"portfolio":state,"recommendations":store.recent_recommendations(),"model_review":review,"recent_reviews":store.recent_reviews(),"notification_events":store.recent(since_seq=since_seq),"email_delivery":meme_emailer.status()}
+    review=store.model_review("hourly_report","hourly:"+CRYPTO_MODEL_VERSION+":"+bucket)
+    return {"timestamp":datetime.now(timezone.utc).isoformat(),"deployment":deployment_info(),"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED","paused":store.paused(),"baseline_usdc":float(store.setting("pilot_baseline_usdc","0") or 0),"net_external_flows_usdc":float(store.setting("net_external_flows_usdc","0") or 0),"realized_pnl_usdc":float(store.setting("realized_pnl_usdc","0") or 0),"permitted_capital_usdc":store.permitted_capital(),"portfolio":state,"recommendations":store.recent_recommendations(),"model_review":review,"recent_reviews":store.recent_reviews(),"notification_events":store.recent(since_seq=since_seq),"email_delivery":meme_emailer.status()}
 
 meme_emailer=MemeReportEmailer(store)
 def meme_email_loop():
@@ -203,7 +206,7 @@ def unauthorized():return JSONResponse({"error":"unauthorized"},status_code=401,
 
 @mcp.custom_route("/health",methods=["GET"])
 async def health(_):
-    return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED","schema_version":"3.3","preauthorized_auto_execution":PREAUTHORIZED_AUTO_EXECUTION,"expected_tool_count":9,"opportunity_policy":{"version":"1.0",**asdict(OpportunityPolicy.from_env())},"oauth":{"provider":"github","base_url":BASE_URL,"callback_url":oauth_callback_url(BASE_URL),"persistent_client_storage":os.path.abspath(OAUTH_STORAGE_DIR).startswith("/app/data/"),"jwt_signing_key_configured":True,"jwt_signing_key_source":JWT_SIGNING_KEY_SOURCE,"fastmcp_version":package_version("fastmcp")}})
+    return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED",**deployment_info(),"preauthorized_auto_execution":PREAUTHORIZED_AUTO_EXECUTION,"expected_tool_count":9,"opportunity_policy":{"version":"1.0",**asdict(OpportunityPolicy.from_env())},"oauth":{"provider":"github","base_url":BASE_URL,"callback_url":oauth_callback_url(BASE_URL),"persistent_client_storage":os.path.abspath(OAUTH_STORAGE_DIR).startswith("/app/data/"),"jwt_signing_key_configured":True,"jwt_signing_key_source":JWT_SIGNING_KEY_SOURCE,"fastmcp_version":package_version("fastmcp")}})
 @mcp.custom_route("/setup",methods=["GET","POST"])
 async def setup(request):
     if not hmac.compare_digest(request.query_params.get("token",""),SETUP_TOKEN):return HTMLResponse("Not found",status_code=404)
