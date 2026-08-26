@@ -15,11 +15,13 @@ from .broker_adapters import BrokerError, OandaAdapter
 from .forex_email import ForexReportEmailer
 from .forex_report import render_forex_report
 from .multi_asset import AssetPolicy, ForexEngine, MultiAssetRejected
+from .validation import promotion_gate
 
 UTC = timezone.utc
 LOCK = threading.RLock()
 STATE = {"ok": False, "mode": "STARTING", "last_scan": "", "last_error": "", "open_positions": 0,
          "report": {}}
+FOREX_MODEL_VERSION = "FOREX_MULTI_HORIZON_2.0"
 
 
 def truthy(name: str) -> bool:
@@ -119,7 +121,7 @@ class Ledger:
               maximum_loss_usd,mode,status,score,model_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (proposal["proposal_id"], utcnow(), proposal["expires_at"], proposal["symbol"], proposal["side"], proposal["reference_price"],
                proposal["quantity"], proposal["stop_price"], proposal["target_price"], proposal["maximum_loss_usd"], mode, status,
-               proposal.get("score"), proposal.get("model_version", "FOREX_TREND_1.1")))
+               proposal.get("score"), proposal.get("model_version", FOREX_MODEL_VERSION)))
 
     def update_intent(self, intent_id: str, status: str, order_id: str = "", trade_id: str = "") -> None:
         with self.db:
@@ -180,8 +182,9 @@ class Ledger:
             bucket["sample_size"] += 1
             bucket["net_pnl_usd"] = round(bucket["net_pnl_usd"] + float(row["realized_pnl_usd"]), 8)
             bucket["wins"] += int(float(row["realized_pnl_usd"]) > 0)
+        gate = promotion_gate(pnls, minimum_samples=100, cost_stress=.05)
         review = {
-            "model_version": "FOREX_TREND_1.1", "sample_size": sample,
+            "model_version": FOREX_MODEL_VERSION, "sample_size": sample,
             "wins": len(wins), "losses": len(losses),
             "win_rate": len(wins) / sample if sample else None,
             "net_pnl_usd": round(sum(pnls), 8),
@@ -194,9 +197,12 @@ class Ledger:
             "average_profit_capture": sum(captured) / len(captured) if captured else None,
             "by_symbol": by_symbol,
             "champion_minimum_score": minimum_score,
-            "status": "MODEL LOCKED - COLLECTING EVIDENCE" if sample < 30 else "ELIGIBLE FOR PROSPECTIVE CHALLENGER REVIEW",
+            "status": "ELIGIBLE FOR PROSPECTIVE CHALLENGER REVIEW" if gate.eligible else "MODEL LOCKED - COLLECTING EVIDENCE",
             "parameters_changed": False,
-            "promotion_rule": "At least 30 closed trades, positive net expectancy and profit factor above 1.0; challenger must then win prospectively without worse drawdown",
+            "promotion_gate": {"eligible": gate.eligible, "reasons": list(gate.reasons),
+                               "lower_confidence_bound": gate.lower_confidence_bound,
+                               "cost_stressed_expectancy": gate.stressed_mean_return},
+            "promotion_rule": "At least 100 closed trades, a positive 95% lower confidence bound, positive cost-stressed expectancy, and prospective challenger performance without worse drawdown",
         }
         last_sample = int(self.setting("model_review_sample_size", "-1"))
         if sample != last_sample:
@@ -265,7 +271,7 @@ def recoverable_managed_trade(trade: dict, maximum_loss_usd: float, transactions
         "target_price": float(target_order["price"]),
         "maximum_loss_usd": maximum_loss_usd,
         "score": None,
-        "model_version": "FOREX_TREND_1.1",
+        "model_version": FOREX_MODEL_VERSION,
     }
 
 
@@ -415,7 +421,7 @@ class Executor:
 
     def process(self, snapshot: dict) -> dict:
         proposal = vars(self.engine.evaluate(snapshot))
-        proposal["model_version"] = "FOREX_TREND_1.1"
+        proposal["model_version"] = FOREX_MODEL_VERSION
         calendar_ok = snapshot.get("calendar_verified") is True and str(snapshot.get("economic_event_source", "")).startswith("https://")
         mode = "LIVE" if live_armed(self.adapter) else "PRACTICE" if practice_armed(self.adapter) else "PAPER_ONLY"
         if mode in {"LIVE", "PRACTICE"} and not calendar_ok:
@@ -515,7 +521,11 @@ class Executor:
             score = round(self.engine.score(snapshot), 2)
             alignment, alignment_points, proposed_side = self.engine.alignment(snapshot)
             diagnostics = {"alignment": alignment, "alignment_points": alignment_points,
-                           "proposed_side": proposed_side}
+                           "proposed_side": proposed_side,
+                           "horizon_agreement": snapshot.get("horizon_agreement"),
+                           "liquidity_score": snapshot.get("liquidity_score"),
+                           "atr_14": snapshot.get("atr_14"),
+                           "ewma_volatility_price": snapshot.get("ewma_volatility_price")}
             try:
                 outcomes.append({"symbol": snapshot.get("symbol"), "score": score,
                                  "minimum_score": self.engine.policy.minimum_score, **diagnostics,

@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .quant import conservative_probability, expected_net_value, multi_horizon_consensus
+
 UTC = timezone.utc
 SUPPORTED_ASSET_CLASSES = {"FOREX", "EQUITY", "OPTION"}
 
@@ -66,6 +68,10 @@ class Proposal:
     invalidation: str
     source_urls: tuple[str, ...]
     snapshot_hash: str
+    expected_net_bps: float = 0.0
+    signal_probability: float = 0.0
+    horizon_agreement: float = 0.0
+    volatility_stop_distance: float = 0.0
 
 
 class MultiAssetRejected(ValueError):
@@ -121,6 +127,19 @@ class StrategyEngine:
         snapshot_hash = _hash(frozen)
         expiry_seconds = min(3600, max(30, int(snapshot.get("expiry_seconds") or 300)))
         expires_at = datetime.fromtimestamp(now_utc().timestamp() + expiry_seconds, UTC).isoformat()
+        agreement = float(snapshot.get("horizon_agreement") or 0)
+        probability = conservative_probability(score, agreement)
+        loss_bps = stop_distance / price * 10_000
+        financing_rate = float((snapshot.get("long_financing_rate") if side == "BUY" else snapshot.get("short_financing_rate")) or 0)
+        financing_bps = max(0.0, -financing_rate * 10_000 / 365 * max(1.0, float(snapshot.get("expected_holding_days") or 2)))
+        value = expected_net_value(
+            win_probability=probability,
+            expected_gain_bps=loss_bps * reward_multiple,
+            expected_loss_bps=loss_bps,
+            spread_bps=float(snapshot.get("spread_bps") or 0),
+            slippage_bps=float(snapshot.get("estimated_slippage_bps") or 0),
+            financing_bps=financing_bps,
+        )
         return Proposal(
             proposal_id=str(uuid.uuid4()), asset_class=self.asset_class, strategy=strategy,
             symbol=str(snapshot["symbol"]).upper(), side=side, score=round(score, 2),
@@ -130,6 +149,10 @@ class StrategyEngine:
             invalidation=str(snapshot.get("invalidation") or "")[:1000],
             source_urls=tuple(dict.fromkeys(str(url) for url in snapshot["source_urls"])),
             snapshot_hash=snapshot_hash,
+            expected_net_bps=round(value.expected_net_bps, 4),
+            signal_probability=round(probability, 6),
+            horizon_agreement=round(agreement, 6),
+            volatility_stop_distance=round(stop_distance, 10),
         )
 
 
@@ -142,6 +165,12 @@ class ForexEngine(StrategyEngine):
         one = float(snapshot.get("change_1h_pct") or 0)
         day = float(snapshot.get("change_24h_pct") or 0)
         trend = float(snapshot.get("trend_strength") or 0)
+        horizon_direction = int(snapshot.get("horizon_direction") or 0)
+        horizon_agreement = float(snapshot.get("horizon_agreement") or 0)
+        if horizon_direction and horizon_agreement >= .60:
+            side = "BUY" if horizon_direction > 0 else "SELL"
+            if not day or (day > 0) == (horizon_direction > 0):
+                return "MULTI_HORIZON", 15.0, side
         if one and day and one * day > 0:
             return "CONTINUATION", 15.0, "BUY" if day > 0 else "SELL"
         pullback_limit = max(0.01, float(snapshot.get("pullback_max_1h_pct") or 0.10))
@@ -153,15 +182,24 @@ class ForexEngine(StrategyEngine):
     def score(cls, snapshot: dict[str, Any]) -> float:
         trend = float(snapshot.get("trend_strength") or 0)
         liquidity = float(snapshot.get("liquidity_score") or 0)
-        _, alignment_points, _ = cls.alignment(snapshot)
-        return min(100.0, 25 + min(25, abs(trend) * 25) + min(20, liquidity * 20)
-                   + alignment_points
-                   + (15 if snapshot.get("session_liquid") is True else 0))
+        alignment, alignment_points, _ = cls.alignment(snapshot)
+        if "horizon_agreement" in snapshot:
+            agreement = float(snapshot.get("horizon_agreement") or 0)
+        else:
+            one, day = float(snapshot.get("change_1h_pct") or 0), float(snapshot.get("change_24h_pct") or 0)
+            agreement = .75 if alignment == "CONTROLLED_PULLBACK" else multi_horizon_consensus((one, day))["agreement"]
+        return min(100.0, 20 + min(20, abs(trend) * 20) + min(20, liquidity * 20)
+                   + alignment_points + min(15, agreement * 15)
+                   + (10 if snapshot.get("session_liquid") is True else 0))
 
     def evaluate(self, snapshot: dict[str, Any]) -> Proposal:
         failures = self.common_checks(snapshot)
         if snapshot.get("economic_event_within_minutes", 999) < 30:
             failures.append("high-impact economic event too close")
+        if float(snapshot.get("quote_age_seconds") or 0) > 10:
+            failures.append("broker quote stale")
+        if "horizon_agreement" in snapshot and float(snapshot.get("horizon_agreement") or 0) < .60:
+            failures.append("multi-horizon agreement below 60%")
         alignment, _, side = self.alignment(snapshot)
         score = self.score(snapshot)
         if alignment == "CONTRADICTORY":
@@ -170,8 +208,13 @@ class ForexEngine(StrategyEngine):
             failures.append(f"score {score:.2f} below policy minimum {self.policy.minimum_score:.2f}")
         if failures:
             raise MultiAssetRejected("; ".join(failures))
-        strategy = "FOREX_TREND_PULLBACK" if alignment == "CONTROLLED_PULLBACK" else "FOREX_TREND_CONTINUATION"
-        return self.proposal(snapshot, strategy=strategy, score=score, side=side)
+        strategy = ("FOREX_MULTI_HORIZON_TREND" if alignment == "MULTI_HORIZON" else
+                    "FOREX_TREND_PULLBACK" if alignment == "CONTROLLED_PULLBACK" else
+                    "FOREX_TREND_CONTINUATION")
+        proposal = self.proposal(snapshot, strategy=strategy, score=score, side=side)
+        if proposal.expected_net_bps <= 0:
+            raise MultiAssetRejected("estimated net expected value is not positive")
+        return proposal
 
 
 class EquityEngine(StrategyEngine):

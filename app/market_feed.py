@@ -6,13 +6,16 @@ import statistics
 import threading
 import time
 import urllib.request
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .broker_adapters import OandaAdapter
+from .quant import average_true_range, ewma_volatility, horizon_return, liquidity_quality, multi_horizon_consensus
 
 LOCK = threading.RLock()
 STATE = {"ok": False, "scanned_at": "", "snapshots": [], "error": "not scanned"}
+SPREAD_HISTORY: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=240))
 CORE_FOREX_SYMBOLS = (
     "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD",
     "USD_CHF", "NZD_USD", "EUR_JPY", "GBP_JPY", "EUR_GBP",
@@ -55,25 +58,58 @@ def calendar_evidence(symbol: str) -> dict:
 
 
 def forex_snapshot(adapter: OandaAdapter, symbol: str) -> dict:
-    h1 = [c for c in adapter.candles(symbol, "H1", 30) if c.get("complete")]
-    d1 = [c for c in adapter.candles(symbol, "D", 3) if c.get("complete")]
+    h1 = [c for c in adapter.candles(symbol, "H1", 120) if c.get("complete")]
+    h4 = [c for c in adapter.candles(symbol, "H4", 90) if c.get("complete")]
+    d1 = [c for c in adapter.candles(symbol, "D", 35) if c.get("complete")]
     quote = adapter.price(symbol); bids = quote.get("bids", []); asks = quote.get("asks", [])
-    if len(h1) < 25 or len(d1) < 2 or not bids or not asks: raise ValueError("insufficient broker market data")
+    if len(h1) < 100 or len(h4) < 30 or len(d1) < 20 or not bids or not asks: raise ValueError("insufficient broker market data")
     closes = [float(c["mid"]["c"]) for c in h1]
+    h4_closes = [float(c["mid"]["c"]) for c in h4]
+    d1_closes = [float(c["mid"]["c"]) for c in d1]
     bid, ask = float(bids[0]["price"]), float(asks[0]["price"]); mid = (bid + ask) / 2
-    change_1h = pct(closes[-2], closes[-1]); change_24h = pct(closes[-25], closes[-1])
+    spread_bps = (ask - bid) / mid * 10000
+    history = SPREAD_HISTORY[symbol]
+    median_spread = statistics.median(history) if history else spread_bps
+    history.append(spread_bps)
+    bid_liquidity = sum(float(item.get("liquidity") or 0) for item in bids[:4])
+    ask_liquidity = sum(float(item.get("liquidity") or 0) for item in asks[:4])
+    try:
+        quote_time = datetime.fromisoformat(str(quote["time"]).replace("Z", "+00:00"))
+        quote_age = max(0.0, (datetime.now(timezone.utc) - quote_time).total_seconds())
+    except Exception:
+        quote_age = 9999.0
+    change_1h = horizon_return(closes, 1); change_4h = horizon_return(h4_closes, 1)
+    change_24h = horizon_return(closes, 24)
+    change_5d = horizon_return(h4_closes, 30); change_20d = horizon_return(d1_closes, 20)
+    consensus = multi_horizon_consensus((change_1h, change_4h, change_24h, change_5d, change_20d), (.10, .15, .25, .25, .25))
     trend = (closes[-1] - statistics.mean(closes[-20:])) / max(abs(closes[-1]) * .01, 1e-9)
+    atr = average_true_range(h1, 14)
+    ewma = ewma_volatility(closes[-60:]) * mid
+    stop_distance = max(1.5 * atr, 2.0 * ewma, mid * .0015)
+    instrument = adapter.instrument(symbol)
+    financing = instrument.get("financing") or {}
     # Event distance is fail-closed unless an independently normalized calendar service attests it.
     calendar = calendar_evidence(symbol); event_minutes = calendar["minutes"]
     return {"asset_class": "FOREX", "symbol": symbol, "price": mid,
-            "spread_bps": (ask - bid) / mid * 10000, "tradable": quote.get("status") == "tradeable",
+            "spread_bps": spread_bps, "median_spread_bps": median_spread,
+            "bid_liquidity": bid_liquidity, "ask_liquidity": ask_liquidity,
+            "quote_age_seconds": quote_age, "tradable": quote.get("status") == "tradeable",
             "market_veto": event_minutes < 30, "observed_at": datetime.now(timezone.utc).isoformat(),
             "source_urls": [f"https://developer.oanda.com/rest-live-v20/pricing-ep/"],
-            "change_1h_pct": change_1h, "change_24h_pct": change_24h,
-            "trend_strength": max(-1, min(1, trend)), "liquidity_score": 1.0,
-            "session_liquid": quote.get("status") == "tradeable", "economic_event_within_minutes": event_minutes,
+            "change_1h_pct": change_1h, "change_4h_pct": change_4h, "change_24h_pct": change_24h,
+            "change_5d_pct": change_5d, "change_20d_pct": change_20d,
+            "horizon_direction": consensus["direction"], "horizon_agreement": consensus["agreement"],
+            "trend_strength": max(-1, min(1, trend)),
+            "liquidity_score": liquidity_quality(spread_bps=spread_bps, median_spread_bps=median_spread,
+                                                 bid_liquidity=bid_liquidity, ask_liquidity=ask_liquidity,
+                                                 quote_age_seconds=quote_age),
+            "session_liquid": quote.get("status") == "tradeable" and quote_age <= 10,
+            "economic_event_within_minutes": event_minutes,
             "calendar_verified": calendar["verified"], "economic_event_source": calendar["source"],
-            "stop_distance": max(abs(closes[-1] - statistics.mean(closes[-10:])), mid * .0025),
+            "atr_14": atr, "ewma_volatility_price": ewma, "stop_distance": stop_distance,
+            "long_financing_rate": float(financing.get("longRate") or 0),
+            "short_financing_rate": float(financing.get("shortRate") or 0),
+            "financing_days": financing.get("financingDaysOfWeek") or [],
             "maximum_loss_usd": float(os.getenv("FOREX_PAPER_MAX_LOSS_USD", "2.50")),
             "reward_multiple": 2.0, "expiry_seconds": 300,
             "thesis": "Broker-attested liquid-session trend continuation",

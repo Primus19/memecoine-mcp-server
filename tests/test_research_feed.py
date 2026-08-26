@@ -68,10 +68,11 @@ class ResearchFeedTests(unittest.TestCase):
         self.assertIn("liquidity", candidate["component_scores"])
         self.assertEqual(1, candidate["change_1h_pct"])
         self.assertEqual(.25, candidate["turnover"])
-        self.assertAlmostEqual(.106, candidate["target_1_price"])
-        self.assertAlmostEqual(.12, candidate["target_price"])
-        self.assertEqual(5, candidate["trail_activation_pct"])
-        self.assertEqual(4, candidate["trail_pct"])
+        self.assertGreater(candidate["target_1_price"], .1)
+        self.assertGreater(candidate["target_price"], candidate["target_1_price"])
+        self.assertGreater(candidate["stop_price"], .092)
+        self.assertEqual("MULTI_HORIZON_REALIZED_PROXY", candidate["volatility_method"])
+        self.assertGreater(candidate["expected_net_bps_shadow"], 0)
         self.assertEqual("ESTABLISHED", candidate["opportunity_tier"])
 
     def test_emerging_candidate_uses_smaller_capital_and_higher_score(self):
@@ -87,7 +88,8 @@ class ResearchFeedTests(unittest.TestCase):
         self.assertEqual("EMERGING", candidate["opportunity_tier"])
         self.assertEqual(5.0, candidate["notional_usdc"])
         self.assertEqual(.25, candidate["max_loss_usdc"])
-        self.assertAlmostEqual(.095, candidate["stop_price"])
+        self.assertGreater(candidate["stop_price"], .095)
+        self.assertLess(candidate["stop_price"], .1)
 
     def test_too_thin_coin_remains_ineligible(self):
         feed = self.make_feed()
