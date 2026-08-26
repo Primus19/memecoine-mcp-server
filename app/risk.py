@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 from .policy import OpportunityPolicy
+from .quant import conservative_probability, expected_net_value
 
 UTC = timezone.utc
 
@@ -93,6 +94,19 @@ def validate_ticket(
                                     + 2 * float(t.get("slippage_bps", 9999)))
     if expected_gross_bps < expected_round_trip_cost_bps + policy.minimum_net_edge_bps:
         errors.append("target does not clear estimated round-trip costs and minimum net edge")
+    stop = float(t.get("stop_price", 0) or 0)
+    expected_loss_bps = ((entry - stop) / entry) * 10_000 if entry > stop > 0 else 0
+    probability = conservative_probability(float(t.get("score") or 0), float(t.get("horizon_agreement") or .5))
+    net_value = expected_net_value(
+        win_probability=probability,
+        expected_gain_bps=expected_gross_bps,
+        expected_loss_bps=expected_loss_bps,
+        fee_bps=2 * policy.estimated_fee_bps_per_side,
+        spread_bps=float(t.get("spread_bps", 9999)),
+        slippage_bps=2 * float(t.get("slippage_bps", 9999)),
+    )
+    if net_value.expected_net_bps <= 0:
+        errors.append("estimated net expected value is not positive")
     if not all(t.get(k) is True for k in ("identity_verified", "spot_available", "no_safety_veto")):
         errors.append("identity/spot/safety verification failed")
 
