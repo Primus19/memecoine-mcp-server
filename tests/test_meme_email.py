@@ -35,23 +35,29 @@ ENV = {
 
 
 class MemeEmailTests(unittest.TestCase):
-    def test_subject_and_hour_use_eastern_time(self):
+    def test_subject_is_trade_event_and_uses_eastern_time(self):
         now = datetime(2026, 8, 25, 22, 20, tzinfo=timezone.utc)
         with patch.dict(os.environ, ENV, clear=False):
-            self.assertEqual("2026-08-25T18-0400", MemeReportEmailer.hour_key(now))
-            self.assertEqual("[HOURLY] Meme Coin Live Trading Dashboard - 2026-08-25 18:00 ET",
-                             MemeReportEmailer.subject(now))
+            self.assertEqual("[TRADE] Meme Coin ENTRY FILLED - 2026-08-25 18:20 ET",
+                             MemeReportEmailer.subject(now,{"kind":"ENTRY_FILLED"}))
 
     def test_success_is_restart_safe_and_duplicate_suppressed(self):
         ledger = Ledger()
         emailer = MemeReportEmailer(ledger)
         now = datetime(2026, 8, 25, 22, 20, tzinfo=timezone.utc)
+        report={"mode":"LIVE_ARMED","notification_events":[{"seq":42,"kind":"ENTRY_FILLED","payload":{}}]}
         with patch.dict(os.environ, ENV, clear=False), patch.object(emailer, "_send"):
-            emailer._deliver({"mode": "LIVE_ARMED"}, emailer.hour_key(now), now)
-            result = emailer.maybe_send({"mode": "LIVE_ARMED"}, now)
-        self.assertEqual("DUPLICATE_SUPPRESSED", result["status"])
-        self.assertEqual("2026-08-25T18-0400", ledger.settings["meme_email_last_sent_hour"])
-        self.assertEqual("MEME_EMAIL_SENT", ledger.events[-1][0])
+            emailer._deliver([{"event_id":"42","kind":"ENTRY_FILLED","event":report["notification_events"][0],"report":report}],now)
+            result = emailer.maybe_send(report, now)
+        self.assertEqual("NO_NEW_TRADE_OR_CRITICAL_EVENT", result["status"])
+        self.assertEqual(["42"], __import__("json").loads(ledger.settings["meme_email_sent_event_ids"]))
+        self.assertEqual("MEME_TRADE_ALERT_SENT", ledger.events[-1][0])
+
+    def test_routine_events_never_queue_email(self):
+        ledger=Ledger();emailer=MemeReportEmailer(ledger)
+        report={"notification_events":[{"seq":1,"kind":"MODEL_REVIEW","payload":{}},{"seq":2,"kind":"PREFLIGHT_OK","payload":{}}]}
+        with patch.dict(os.environ,ENV,clear=False):result=emailer.maybe_send(report)
+        self.assertEqual("NO_NEW_TRADE_OR_CRITICAL_EVENT",result["status"])
 
     def test_report_contains_live_state_without_scripts(self):
         body = render_meme_report({
