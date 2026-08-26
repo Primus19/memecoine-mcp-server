@@ -407,11 +407,11 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             value = dict(STATE)
         if self.path == "/health":
-            value = {"ok": value["ok"], "service": "solana-early-discovery",
+            value = {"ok": True, "operational": value["ok"], "service": "solana-early-discovery",
                      "mode": "PAPER_ONLY", "scanned_at": value["scanned_at"], "error": value["error"],
                      "feed": value.get("feed", ""), "wallet_events": value.get("wallet_events", 0)}
         body = json.dumps(value).encode()
-        self.send_response(200 if value.get("ok", True) else 503)
+        self.send_response(200 if self.path == "/health" or value.get("ok", True) else 503)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers(); self.wfile.write(body)
