@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .policy import OpportunityPolicy
+from .quant import conservative_probability, expected_net_value, multi_horizon_consensus
 
 try:
     from starlette.applications import Starlette
@@ -205,6 +206,24 @@ class ResearchFeed:
         sources = [f"https://www.coingecko.com/en/coins/{market['id']}", *evidence["source_urls"]]
         tier = self.policy.tier(market.get("market_cap"), market.get("total_volume"))
         emerging = tier == "EMERGING"
+        one = float(market.get("price_change_percentage_1h_in_currency") or 0)
+        day = float(market.get("price_change_percentage_24h_in_currency") or 0)
+        week = float(market.get("price_change_percentage_7d_in_currency") or 0)
+        consensus = multi_horizon_consensus((one, day, week), (.20, .35, .45))
+        # CoinGecko does not provide OHLC in this scan. This is a conservative
+        # multi-horizon realized-volatility proxy, recorded explicitly as such.
+        hourly_volatility_pct = max(abs(one), abs(day) / (24 ** .5), abs(week) / (168 ** .5))
+        stop_pct = clamp(hourly_volatility_pct * (2.25 if emerging else 2.50), 3.0 if emerging else 4.0, 7.0 if emerging else 8.0)
+        reward_multiple = 2.5
+        target_pct = clamp(stop_pct * reward_multiple, 8.0, 20.0)
+        total_score = sum(components.values())
+        probability = conservative_probability(total_score, consensus["agreement"])
+        value = expected_net_value(
+            win_probability=probability,
+            expected_gain_bps=target_pct * 100,
+            expected_loss_bps=stop_pct * 100,
+            fee_bps=2 * self.policy.estimated_fee_bps_per_side,
+        )
         candidate = {
             "signal_id": signal_id, "product_id": product_id, "opportunity_tier": tier,
             "regime": regime["classification"],
@@ -212,6 +231,9 @@ class ResearchFeed:
             "change_1h_pct": float(market.get("price_change_percentage_1h_in_currency") or 0),
             "change_24h_pct": float(market.get("price_change_percentage_24h_in_currency") or 0),
             "change_7d_pct": float(market.get("price_change_percentage_7d_in_currency") or 0),
+            "horizon_direction": consensus["direction"], "horizon_agreement": consensus["agreement"],
+            "volatility_proxy_pct": hourly_volatility_pct, "volatility_method": "MULTI_HORIZON_REALIZED_PROXY",
+            "signal_probability_shadow": probability, "expected_net_bps_shadow": value.expected_net_bps,
             "market_cap_usd": float(market.get("market_cap") or 0),
             "volume_24h_usd": float(market.get("total_volume") or 0),
             "turnover": float(market.get("total_volume") or 0) / float(market.get("market_cap") or 1),
@@ -219,9 +241,11 @@ class ResearchFeed:
             "notional_usdc": self.emerging_notional if emerging else self.notional,
             "max_loss_usdc": self.emerging_max_loss if emerging else self.max_loss,
             "reference_price": price, "limit_price": price * 1.0035,
-            "stop_price": price * (.95 if emerging else .92), "target_1_price": price * 1.06,
-            "target_price": price * (1.15 if emerging else 1.20),
-            "trail_activation_pct": 5, "trail_pct": 4,
+            "stop_price": price * (1 - stop_pct / 100),
+            "target_1_price": price * (1 + min(target_pct / 2, stop_pct * 1.25) / 100),
+            "target_price": price * (1 + target_pct / 100),
+            "trail_activation_pct": clamp(stop_pct * .75, 3.0, 6.0),
+            "trail_pct": clamp(stop_pct * .50, 2.0, 4.0),
             "thesis": str(evidence.get("thesis") or "Fresh verified catalyst with positive liquid-market momentum"),
             "invalidation": str(evidence.get("invalidation") or "Safety veto, catalyst invalidation, spread/slippage failure, or momentum reversal"),
             "evidence_urls": list(dict.fromkeys(sources)), "source_timestamp": at.isoformat(), "expiry_seconds": 90,
@@ -268,10 +292,11 @@ class ResearchFeed:
                 "best_missed_return_pct": max((float(x.get("max_return_pct") or 0) for x in shadows), default=None)}
 
     @staticmethod
-    def candidate_rank_key(candidate: dict[str, Any]) -> tuple[float, float, float, float, str]:
-        """Rank equal-score candidates on observed facts, never feed ordering."""
+    def candidate_rank_key(candidate: dict[str, Any]) -> tuple[float, float, float, float, float, str]:
+        """Rank by shadow net value, then evidence quality, never feed ordering."""
         components = candidate.get("component_scores") or {}
         return (
+            -float(candidate.get("expected_net_bps_shadow") or 0),
             -float(sum(components.values())),
             -float(components.get("safety") or 0),
             -float(components.get("news") or 0),
@@ -313,7 +338,8 @@ class ResearchFeed:
         for rank, candidate in enumerate(candidates, 1):
             candidate["candidate_rank"] = rank
             candidate["selection_rationale"] = (
-                "Ranked by total Model 3.1 score, safety, verified news, then 1h momentum; "
+                "Ranked by conservative shadow net expected value, total Model 3.1 score, safety, "
+                "verified news, then 1h momentum; "
                 "product identity adds no preference or restriction, and all live risk gates remain authoritative."
             )
         ranked = [{
@@ -323,6 +349,9 @@ class ResearchFeed:
             "component_scores": item["component_scores"],
             "change_1h_pct": item["change_1h_pct"],
             "change_24h_pct": item["change_24h_pct"],
+            "horizon_agreement": item["horizon_agreement"],
+            "volatility_proxy_pct": item["volatility_proxy_pct"],
+            "expected_net_bps_shadow": item["expected_net_bps_shadow"],
             "selection_rationale": item["selection_rationale"],
         } for item in candidates[:10]]
         matched_products = sum(
