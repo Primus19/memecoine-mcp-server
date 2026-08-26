@@ -1,4 +1,5 @@
 import unittest
+import urllib.parse
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
@@ -107,6 +108,21 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(first, second)
         adapter.json.assert_called_once()
 
+    def test_native_asset_does_not_require_a_token_contract(self):
+        adapter = EvidenceAdapter.__new__(EvidenceAdapter)
+        clean, score, failures, identity = adapter.security({"asset_platform_id": None, "platforms": {}})
+        self.assertTrue(clean)
+        self.assertEqual(15, score)
+        self.assertEqual([], failures)
+        self.assertEqual("NATIVE_ASSET", identity)
+
+    def test_unresolved_token_contract_still_fails_closed(self):
+        adapter = EvidenceAdapter.__new__(EvidenceAdapter)
+        clean, score, failures, _ = adapter.security({"platforms": {"ethereum": "", "base": ""}})
+        self.assertFalse(clean)
+        self.assertEqual(0, score)
+        self.assertIn("canonical contract platform unavailable", failures)
+
     def test_market_page_uses_requested_page_for_full_research_coverage(self):
         adapter = EvidenceAdapter.__new__(EvidenceAdapter)
         adapter.cg_base = "https://api.example"
@@ -115,6 +131,14 @@ class EvidenceWorkerTests(unittest.TestCase):
         adapter.market_page(2)
 
         self.assertIn("page=2", adapter.json.call_args.args[0])
+
+    def test_market_page_is_not_restricted_to_meme_tokens(self):
+        adapter = EvidenceAdapter.__new__(EvidenceAdapter)
+        adapter.cg_base = "https://api.example"
+        adapter.json = Mock(return_value=[])
+        adapter.market_page(1)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(adapter.json.call_args.args[0]).query)
+        self.assertNotIn("category", query)
 
     def test_evidence_policy_includes_documented_emerging_tier(self):
         policy = OpportunityPolicy()

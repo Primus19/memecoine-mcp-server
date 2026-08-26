@@ -12,7 +12,7 @@ def ticket(notional=23.75):
         "market_cap_usd": 100_000_000, "volume_24h_usd": 20_000_000, "turnover": .2,
         "spread_bps": 20, "slippage_bps": 20, "identity_verified": True,
         "spot_available": True, "no_safety_veto": True, "notional_usdc": notional,
-        "max_loss_usdc": 2, "limit_price": .1, "stop_price": .092, "target_price": .115,
+        "max_loss_usdc": .48, "limit_price": .1, "stop_price": .098, "target_price": .115,
         "reference_price": .1, "source_timestamp": datetime.now(timezone.utc).isoformat(),
         "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=90)).isoformat(),
     }
@@ -32,7 +32,9 @@ class RiskTests(unittest.TestCase):
         with self.assertRaisesRegex(TicketRejected, "USDC-quoted"):
             self.validate(t, product={**PRODUCT, "product_id": "BTC-USD"})
 
-    def test_compounds_realized_profit(self): self.validate(ticket(28.5), cash=30, capital=30)
+    def test_compounds_realized_profit(self):
+        t=ticket(28.5);t["stop_price"]=.0983;t["max_loss_usdc"]=.4845
+        self.validate(t,cash=30,capital=30)
 
     def test_rejects_external_cash_above_permitted_capital(self):
         with self.assertRaisesRegex(TicketRejected, "envelope"): self.validate(ticket(28), cash=40, capital=25)
@@ -60,7 +62,7 @@ class RiskTests(unittest.TestCase):
         with self.assertRaises(TicketRejected): self.validate(ticket(), positions=1)
 
     def test_reject_excess_loss(self):
-        t = ticket(); t["max_loss_usdc"] = 3
+        t = ticket(); t["max_loss_usdc"] = .51
         with self.assertRaises(TicketRejected): self.validate(t)
 
     def test_reject_stale_source(self):

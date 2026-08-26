@@ -457,7 +457,8 @@ task must use `pilot_status` as the live-pilot source of truth in every report.
 ## Continuous research-feed producer
 
 Run `python -m app.research_feed` as a third Railway service from this same
-repository. It continuously scans up to 750 CoinGecko meme-category markets,
+repository. It continuously scans the broad CoinGecko market universe, using
+four pages or 1,000 assets by default and up to 2,500 when configured, then
 intersects unique symbols with the executor's actual eligible Coinbase USDC
 products, classifies liquid breadth, calculates the bounded Model 3.1
 components, and publishes fresh candidates at `GET /candidates`.
@@ -474,7 +475,7 @@ Research-feed variables:
 ```text
 RESEARCH_FEED_ENABLED=true
 RESEARCH_SCAN_INTERVAL_SECONDS=30
-RESEARCH_MARKET_PAGES=2
+RESEARCH_MARKET_PAGES=4
 RESEARCH_HTTP_MAX_RETRIES=3
 RESEARCH_HTTP_RETRY_BACKOFF_SECONDS=1
 RESEARCH_REQUEST_SPACING_SECONDS=1
@@ -514,8 +515,8 @@ End-to-end Railway topology:
 ## Continuous evidence adapter
 
 Run `python -m app.evidence_worker` as a fourth Railway service. It intersects
-unique CoinGecko meme symbols with eligible Coinbase USDC products, verifies
-CoinGecko contract identity, requires complete clean GoPlus EVM token-security
+unique symbols from the broad crypto market with eligible Coinbase USDC products, verifies
+CoinGecko asset identity, requires complete clean GoPlus token-security
 facts, and requires positive catalyst coverage from at least two independent
 configured RSS domains. A two-source exploit, hack, rug, honeypot, delisting,
 compromise, breach or chain-halt report is a veto. Missing contract fields,
@@ -523,12 +524,16 @@ unsupported chains, ambiguous symbols, missing holder data and single-source
 news all fail closed. Social receives zero because the adapter has no reliable
 public account-quality and bot-analysis source.
 
+Native assets with no token contract are recognized explicitly, so contract-only
+checks such as mint authority and honeypot status are treated as not applicable.
+Tokens that advertise a platform but lack one canonical contract still fail closed.
+
 Required variables:
 
 ```text
 EVIDENCE_ADAPTER_ENABLED=true
 EVIDENCE_SCAN_INTERVAL_SECONDS=300
-EVIDENCE_MARKET_PAGES=2
+EVIDENCE_MARKET_PAGES=4
 EVIDENCE_REQUEST_SPACING_SECONDS=2.5
 EVIDENCE_HTTP_MAX_RETRIES=3
 EXECUTOR_BASE_URL=https://memecoin-mcp-server-production.up.railway.app

@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib,hmac,html,os,time,uuid
+import hashlib,hmac,html,os,time,uuid,threading
 from dataclasses import asdict
 from datetime import datetime,timezone
 from importlib.metadata import version as package_version
@@ -13,8 +13,9 @@ from .decision import build_recommendation,canonical_hash
 from .enrichment import enrich_with_coinbase
 from .exchange import CoinbaseOrderRejected,Exchange
 from .lifecycle import profit_protection_challenger,supervision_levels
+from .meme_email import MemeReportEmailer
 from .policy import OpportunityPolicy
-from .risk import TicketRejected,validate_ticket
+from .risk import TicketRejected,risk_size_ticket,validate_ticket
 from .store import Store
 
 BASE_URL=validate_public_base_url(os.environ["PUBLIC_BASE_URL"]);SETUP_TOKEN=os.environ["SETUP_TOKEN"];REST_API_TOKEN=os.getenv("REST_API_TOKEN","")
@@ -68,7 +69,7 @@ def reconcile():
     reconciliation={"risk_equity_usdc":equity,"account_snapshot_equity_usdc":pf["usdc_total"]+mark_value,"settlement_gap_usdc":equity-(pf["usdc_total"]+mark_value),"source":"FILLS_AND_MARK"}
     return {"open_position":{**position,"status":status,"mark_price":product["price"],"mark_value_usdc":mark_value,"net_unrealized_pnl_usdc":unrealized,"fills":summary},"usdc_total":pf["usdc_total"],"controls":controls,"equity_reconciliation":reconciliation}
 
-def supervise(regime=""):
+def supervise(regime="",momentum_1h_pct=None):
     state=reconcile();position=state.get("open_position")
     if not position:return {"status":"IDLE","state":state}
     if position.get("status")=="EXIT_SUBMITTED":
@@ -79,7 +80,7 @@ def supervise(regime=""):
         store.update_position(position["ticket_id"],"FILLED")
     record=store.recommendation(position["ticket_id"]);ticket=record["payload"]
     mark=float(position["mark_price"]);fills=position.get("fills") or {};entry=float(fills.get("buy_cost_usdc") or 0)/float(fills.get("buy_qty") or 1) if float(fills.get("buy_qty") or 0)>0 else float(position["entry_price"]);ticket_id=position["ticket_id"]
-    high_key="high_water:"+ticket_id;levels=supervision_levels(ticket,entry=entry,mark=mark,high_water=float(store.setting(high_key,str(entry)) or entry),regime=str(regime));high=levels["high_water_price"];trail_active=levels["trail_active"];trail_stop=levels["effective_stop_price"];store.set_setting(high_key,high)
+    high_key="high_water:"+ticket_id;levels=supervision_levels(ticket,entry=entry,mark=mark,high_water=float(store.setting(high_key,str(entry)) or entry),regime=str(regime),momentum_1h_pct=momentum_1h_pct);high=levels["high_water_price"];trail_active=levels["trail_active"];trail_stop=levels["effective_stop_price"];store.set_setting(high_key,high)
     challenger=profit_protection_challenger(ticket,entry=entry,mark=mark,high_water=high)
     target_1=float(ticket.get("target_1_price") or 0);milestone_key="target_1_seen:"+ticket_id
     if target_1 and mark>=target_1 and store.setting(milestone_key)!="1":
@@ -101,7 +102,13 @@ def issue(candidate):
     pf=run_preflight();ex=exchange();draft=build_recommendation(candidate);product=ex.product(draft["product_id"])
     quote=ex.execution_quote(draft["product_id"],draft["notional_usdc"])
     enriched=enrich_with_coinbase(candidate,product=product,quote=quote)
-    recommendation=build_recommendation(enriched)
+    recommendation=risk_size_ticket(build_recommendation(enriched),permitted_capital=store.permitted_capital(),available_usdc=pf["usdc_available"],allocation_fraction=ALLOCATION_FRACTION)
+    prior=store.latest_closed_for_product(recommendation["product_id"])
+    if prior:
+        closed=datetime.fromisoformat(str(prior["closed_at"]).replace("Z","+00:00"));source=datetime.fromisoformat(recommendation["source_timestamp"].replace("Z","+00:00"))
+        reset_seconds=max(60,int(os.getenv("MEME_REENTRY_RESET_SECONDS","300")))
+        if (source-closed).total_seconds()<reset_seconds:
+            raise TicketRejected(f"fresh re-entry setup not established for {reset_seconds} seconds after prior close")
     recommendation["coinbase_evidence"]=enriched["coinbase_evidence"]
     recommendation["coinbase_checked_at"]=enriched["coinbase_checked_at"]
     validate_ticket(recommendation,available_usdc=pf["usdc_available"],permitted_capital=store.permitted_capital(),open_positions=0,product=product,allocation_fraction=ALLOCATION_FRACTION)
@@ -168,7 +175,14 @@ def auto_process(candidate):
 def hourly_snapshot(since_seq=0):
     state=reconcile() if store.setting("pilot_baseline_usdc") else {"open_position":store.open_position()};bucket=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
     review=store.model_review("hourly_report","hourly:"+bucket)
-    return {"timestamp":datetime.now(timezone.utc).isoformat(),"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED","paused":store.paused(),"baseline_usdc":float(store.setting("pilot_baseline_usdc","0") or 0),"net_external_flows_usdc":float(store.setting("net_external_flows_usdc","0") or 0),"realized_pnl_usdc":float(store.setting("realized_pnl_usdc","0") or 0),"permitted_capital_usdc":store.permitted_capital(),"portfolio":state,"recommendations":store.recent_recommendations(),"model_review":review,"recent_reviews":store.recent_reviews(),"notification_events":store.recent(since_seq=since_seq)}
+    return {"timestamp":datetime.now(timezone.utc).isoformat(),"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED","paused":store.paused(),"baseline_usdc":float(store.setting("pilot_baseline_usdc","0") or 0),"net_external_flows_usdc":float(store.setting("net_external_flows_usdc","0") or 0),"realized_pnl_usdc":float(store.setting("realized_pnl_usdc","0") or 0),"permitted_capital_usdc":store.permitted_capital(),"portfolio":state,"recommendations":store.recent_recommendations(),"model_review":review,"recent_reviews":store.recent_reviews(),"notification_events":store.recent(since_seq=since_seq),"email_delivery":meme_emailer.status()}
+
+meme_emailer=MemeReportEmailer(store)
+def meme_email_loop():
+    while True:
+        try:meme_emailer.maybe_send(hourly_snapshot())
+        except Exception as exc:store.event("MEME_EMAIL_LOOP_ERROR",{"error":type(exc).__name__,"detail":str(exc)[:240]})
+        time.sleep(max(60,int(os.getenv("MEME_EMAIL_LOOP_SECONDS","300"))))
 
 def pause(reason):store.event("PAUSED",{"reason":reason,"automatic":False});return {"paused":True,"reason":reason}
 def resume(acknowledgement):
@@ -252,9 +266,11 @@ async def rest_auto_candidate(request):
 async def rest_position_supervision(request):
     if not rest_authorized(request):return unauthorized()
     try:
-        payload=await request.json();return JSONResponse(supervise(str(payload.get("regime", ""))))
+        payload=await request.json();momentum=payload.get("momentum_1h_pct");return JSONResponse(supervise(str(payload.get("regime", "")),None if momentum is None else float(momentum)))
     except Exception as exc:
         store.event("POSITION_SUPERVISION_ERROR",{"error":type(exc).__name__,"detail":str(exc)[:500]})
         return JSONResponse({"error":str(exc)},status_code=500)
 
-if __name__=="__main__":mcp.run(transport="http",host="0.0.0.0",port=int(os.getenv("PORT","8080")))
+if __name__=="__main__":
+    if meme_emailer.enabled():threading.Thread(target=meme_email_loop,daemon=True,name="meme-email-reporter").start()
+    mcp.run(transport="http",host="0.0.0.0",port=int(os.getenv("PORT","8080")))

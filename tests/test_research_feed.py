@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 import urllib.error
+import urllib.parse
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -70,7 +71,7 @@ class ResearchFeedTests(unittest.TestCase):
         self.assertAlmostEqual(.106, candidate["target_1_price"])
         self.assertAlmostEqual(.12, candidate["target_price"])
         self.assertEqual(5, candidate["trail_activation_pct"])
-        self.assertEqual(3, candidate["trail_pct"])
+        self.assertEqual(4, candidate["trail_pct"])
         self.assertEqual("ESTABLISHED", candidate["opportunity_tier"])
 
     def test_emerging_candidate_uses_smaller_capital_and_higher_score(self):
@@ -190,6 +191,18 @@ class ResearchFeedTests(unittest.TestCase):
             self.assertEqual({"ok": True}, feed.fetch("https://api.example/data"))
         self.assertEqual(2, request.call_count)
         sleep.assert_called_once()
+
+    def test_market_discovery_is_not_limited_to_meme_category(self):
+        feed = self.make_feed()
+        with patch.object(feed, "fetch", return_value=[]) as fetch:
+            feed.market_page(1)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(fetch.call_args.args[0]).query)
+        self.assertNotIn("category", query)
+        self.assertEqual(["market_cap_desc"], query["order"])
+
+    def test_default_discovery_covers_one_thousand_assets(self):
+        with patch.dict(os.environ, {"RESEARCH_MARKET_PAGES":"4"}, clear=False):
+            self.assertEqual(4, self.make_feed().pages)
 
 
 if __name__ == "__main__":

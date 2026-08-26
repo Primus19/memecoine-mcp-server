@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import os
 from typing import Any
 
 from .policy import OpportunityPolicy
@@ -10,6 +11,26 @@ UTC = timezone.utc
 
 class TicketRejected(ValueError):
     pass
+
+
+def risk_size_ticket(t: dict[str, Any], *, permitted_capital: float,
+                     available_usdc: float, allocation_fraction: float = .95) -> dict[str, Any]:
+    """Return an executor-sized ticket whose stop loss risks at most 2% capital."""
+    result = dict(t)
+    entry = float(result.get("limit_price") or 0)
+    stop = float(result.get("stop_price") or 0)
+    if not 0 < stop < entry:
+        return result
+    risk_fraction = min(.05, max(.005, float(os.getenv("MEME_MAX_RISK_FRACTION", ".02"))))
+    risk_budget = min(float(os.getenv("MEME_MAX_RISK_USDC", ".50")), permitted_capital * risk_fraction)
+    stop_fraction = (entry - stop) / entry
+    capital_limit = min(available_usdc, permitted_capital) * allocation_fraction
+    proposed = min(float(result.get("notional_usdc") or 0), capital_limit, risk_budget / stop_fraction)
+    result["notional_usdc"] = round(proposed, 8)
+    result["max_loss_usdc"] = round(proposed * stop_fraction, 8)
+    result["risk_budget_usdc"] = round(risk_budget, 8)
+    result["risk_sizing"] = "STOP_DISTANCE_2PCT_CAPITAL"
+    return result
 
 
 def validate_ticket(
@@ -82,9 +103,10 @@ def validate_ticket(
     if tier == "EMERGING" and notional > 5.0:
         errors.append("emerging-tier notional exceeds $5")
 
-    maximum_loss = min(2.50, permitted_capital * 0.10)
+    maximum_loss = min(float(os.getenv("MEME_MAX_RISK_USDC", ".50")),
+                       permitted_capital * min(.05, max(.005, float(os.getenv("MEME_MAX_RISK_FRACTION", ".02")))))
     if float(t.get("max_loss_usdc", 9999)) > maximum_loss:
-        errors.append("loss exceeds 10% capital/$2.50 cap")
+        errors.append(f"loss exceeds risk-sized ${maximum_loss:.2f} cap")
     if tier == "EMERGING" and float(t.get("max_loss_usdc", 9999)) > .25:
         errors.append("emerging-tier loss exceeds $0.25")
     try:

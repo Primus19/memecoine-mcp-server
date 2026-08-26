@@ -178,7 +178,7 @@ class EvidenceAdapter:
         self.cg_key = os.getenv("COINGECKO_API_KEY", "")
         configured = [value.strip() for value in os.getenv("EVIDENCE_NEWS_RSS_URLS", "").split(",") if value.strip()]
         self.news_feeds = tuple(configured) or DEFAULT_NEWS_FEEDS
-        self.pages = max(1, min(3, int(os.getenv("EVIDENCE_MARKET_PAGES", os.getenv("RESEARCH_MARKET_PAGES", "2")))))
+        self.pages = max(1, min(10, int(os.getenv("EVIDENCE_MARKET_PAGES", os.getenv("RESEARCH_MARKET_PAGES", "4")))))
         self.interval = min(900, max(60, int(os.getenv("EVIDENCE_SCAN_INTERVAL_SECONDS", "300"))))
         self.request_spacing = max(0.5, float(os.getenv("EVIDENCE_REQUEST_SPACING_SECONDS", "2.5")))
         self.max_retries = min(5, max(1, int(os.getenv("EVIDENCE_HTTP_MAX_RETRIES", "3"))))
@@ -230,7 +230,7 @@ class EvidenceAdapter:
 
     def market_page(self, page: int = 1) -> list[dict[str, Any]]:
         query = urllib.parse.urlencode({
-            "vs_currency": "usd", "category": "meme-token", "order": "market_cap_desc",
+            "vs_currency": "usd", "order": "market_cap_desc",
             "per_page": 250, "page": page, "sparkline": "false", "price_change_percentage": "1h,24h,7d",
         })
         result = self.json(f"{self.cg_base}/coins/markets?{query}")
@@ -267,6 +267,13 @@ class EvidenceAdapter:
 
     def security(self, detail: dict[str, Any]) -> tuple[bool, int, list[str], str]:
         platform, address = canonical_contract(detail)
+        platforms = detail.get("platforms") or {}
+        # Native assets (for example BTC) legitimately have no token contract,
+        # so contract-only controls such as mint authority and honeypot status
+        # do not apply. A token that advertises platforms but cannot resolve one
+        # canonical contract still fails closed below.
+        if not platform and not address and isinstance(platforms, dict) and not platforms:
+            return True, 15, [], "NATIVE_ASSET"
         if not platform or not address:
             return False, 0, ["canonical contract platform unavailable"], ""
         query = urllib.parse.urlencode({"contract_addresses": address})
@@ -324,15 +331,16 @@ class EvidenceAdapter:
                 "news_score": news_score, "news_veto": news_veto, "social_score": 0,
                 "source_urls": list(dict.fromkeys([*news_urls, *explorer_urls[:1], "https://docs.gopluslabs.io/reference/api-overview"])),
                 "observed_at": observed.isoformat(), "expires_at": (observed + timedelta(hours=2)).isoformat(),
-                "thesis": ("Two-source catalyst corroboration, verified token identity, and clean contract-security checks."
+                "thesis": ("Two-source catalyst corroboration, verified asset identity, and applicable security checks."
                            if news_score >= 4 else
-                           "Verified token identity and clean contract-security checks; no positive news points awarded."),
+                           "Verified asset identity and applicable security checks; no positive news points awarded."),
                 "invalidation": "Catalyst reversal, safety warning, identity mismatch, liquidity deterioration, or momentum reversal.",
             }
             self.post(f"{self.research_url}/evidence", payload, self.feed_token)
             submitted.append(product_id)
             time.sleep(0.25)
-        result = {"ok": True, "scanned_at": iso_now(), "duration_ms": round((now_utc() - started).total_seconds() * 1000), "market_count": len(markets), "article_count": len(articles), "submitted": submitted, "rejected": rejected[:30]}
+        matched = sum(f"{str(market.get('symbol', '')).upper()}-USDC" in eligible for market in markets)
+        result = {"ok": True, "scanned_at": iso_now(), "duration_ms": round((now_utc() - started).total_seconds() * 1000), "universe":"ALL_CRYPTO_USDC_SPOT", "market_count": len(markets), "coinbase_product_count": len(eligible), "matched_coinbase_products": matched, "article_count": len(articles), "submitted": submitted, "rejected": rejected[:30]}
         with self.lock:
             self.status = result
         return result
