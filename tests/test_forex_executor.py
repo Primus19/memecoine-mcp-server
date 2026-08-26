@@ -183,12 +183,42 @@ class ForexExecutorTests(unittest.TestCase):
             self.assertEqual(.5,ledger.open_risk())
             self.assertEqual(["AUD_USD"],ledger.open_symbols())
 
-    def test_forex_position_limit_cannot_be_raised_by_environment(self):
+    def test_forex_position_limit_defaults_to_two_and_cannot_exceed_two(self):
         with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("FOREX_MAX_OPEN_POSITIONS",None)
-            self.assertEqual(1,Executor.max_positions())
-        with patch.dict(os.environ,{"FOREX_MAX_OPEN_POSITIONS":"8"},clear=False):
-            self.assertEqual(1,Executor.max_positions())
+            os.environ.pop("FOREX_MAX_OPEN_POSITIONS", None)
+            self.assertEqual(2, Executor.max_positions())
+        with patch.dict(os.environ, {"FOREX_MAX_OPEN_POSITIONS":"1"}, clear=False):
+            self.assertEqual(1, Executor.max_positions())
+        with patch.dict(os.environ, {"FOREX_MAX_OPEN_POSITIONS":"8"}, clear=False):
+            self.assertEqual(2, Executor.max_positions())
+
+    def test_nav_compounding_and_drawdown_throttle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executor = object.__new__(Executor)
+            executor.ledger = Ledger(directory + "/forex.sqlite3")
+            executor.base_risk_pct = 0.01
+            normal = executor.risk_limits(100.0)
+            self.assertEqual(1.0, normal["risk_per_trade_usd"])
+            self.assertEqual(2.0, normal["combined_risk_usd"])
+            self.assertEqual(2, normal["maximum_open_positions"])
+            self.assertEqual(175.0, normal["combined_notional_usd"])
+            reduced = executor.risk_limits(95.0)
+            self.assertEqual(0.475, reduced["risk_per_trade_usd"])
+            self.assertEqual(2, reduced["maximum_open_positions"])
+            severe = executor.risk_limits(92.0)
+            self.assertEqual(0.23, severe["risk_per_trade_usd"])
+            self.assertEqual(1, severe["maximum_open_positions"])
+            halted = executor.risk_limits(90.0)
+            self.assertTrue(halted["new_entries_halted"])
+            self.assertEqual(0, halted["maximum_open_positions"])
+
+    def test_dynamic_notional_budget_controls_sizing(self):
+        proposal = {"symbol":"EUR_USD","reference_price":1.1,"stop_price":1.095}
+        self.assertEqual(
+            20.0,
+            safe_quantity(Adapter(), proposal, 2.5, margin_budget_usd=10.0,
+                          notional_budget_usd=22.0),
+        )
 
     def test_impossible_score_threshold_fails_readiness(self):
         executor = object.__new__(Executor)
