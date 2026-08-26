@@ -16,12 +16,12 @@ from .forex_email import ForexReportEmailer
 from .forex_report import render_forex_report
 from .multi_asset import AssetPolicy, ForexEngine, MultiAssetRejected
 from .validation import promotion_gate
+from .version import FOREX_MODEL_VERSION, deployment_info
 
 UTC = timezone.utc
 LOCK = threading.RLock()
 STATE = {"ok": False, "mode": "STARTING", "last_scan": "", "last_error": "", "open_positions": 0,
          "report": {}}
-FOREX_MODEL_VERSION = "FOREX_MULTI_HORIZON_2.0"
 
 
 def truthy(name: str) -> bool:
@@ -536,7 +536,7 @@ class Executor:
                                  **diagnostics,
                                  "status": "REJECTED", "reason": str(exc)[:300]})
         self.ledger.event("SCAN", {"outcomes": outcomes, "paper_closes": closes})
-        report = {"generated_at": utcnow(), "mode": "LIVE_ARMED" if live_armed(self.adapter) else
+        report = {"generated_at": utcnow(), "deployment": deployment_info(), "mode": "LIVE_ARMED" if live_armed(self.adapter) else
                   "PRACTICE_ARMED" if practice_armed(self.adapter) else "PAPER_ONLY",
                   "executor_ready": True, "last_scan": utcnow(), "last_error": "",
                   "broker": reconciliation["summary"],
