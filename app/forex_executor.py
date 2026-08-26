@@ -357,9 +357,10 @@ class Executor:
 
     def risk_limits(self, nav: float) -> dict:
         nav = max(0.0, float(nav))
-        stored_peak = float(self.ledger.setting("peak_nav", str(nav)) or nav)
+        stored_peak_value = self.ledger.setting("peak_nav", "")
+        stored_peak = float(stored_peak_value or nav)
         peak_nav = max(nav, stored_peak)
-        if peak_nav > stored_peak:
+        if not stored_peak_value or peak_nav > stored_peak:
             self.ledger.set_setting("peak_nav", str(peak_nav))
         drawdown_pct = 0.0 if peak_nav <= 0 else max(0.0, (peak_nav - nav) / peak_nav)
         risk_pct, positions = self.base_risk_pct, self.max_positions()
