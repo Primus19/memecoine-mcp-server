@@ -287,8 +287,12 @@ def jupiter_sell_check(mint: str, decimals: int, price_usd: float) -> tuple[bool
 
 def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
     key = os.environ["COINGECKO_API_KEY"]
-    base = os.getenv("COINGECKO_ONCHAIN_BASE_URL", "https://pro-api.coingecko.com/api/v3/onchain").rstrip("/")
-    headers = {"x-cg-pro-api-key": key}
+    base = os.getenv("COINGECKO_ONCHAIN_BASE_URL", "https://api.coingecko.com/api/v3/onchain").rstrip("/")
+    # CoinGecko Demo and Pro credentials use different hosts and header names.
+    # Select the header from the configured host so a Demo key is never sent as
+    # a Pro credential (or vice versa).
+    header = "x-cg-pro-api-key" if "pro-api.coingecko.com" in base else "x-cg-demo-api-key"
+    headers = {header: key}
     payload = json_request(f"{base}/networks/solana/new_pools?include=base_token,quote_token,dex&page=1", headers)
     now = datetime.now(UTC)
     results: list[dict[str, Any]] = []
