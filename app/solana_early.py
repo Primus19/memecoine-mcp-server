@@ -322,9 +322,25 @@ def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
         buys15, sells15 = _count(tx, "m15", "buys"), _count(tx, "m15", "sells")
         volume5 = _number(volume.get("m5"))
         volume15 = _number(volume.get("m15"))
-        safety = goplus_safety(mint)
-        sell_ok, sell_impact = jupiter_sell_check(mint, int(base_token.get("decimals") or 0),
-                                                  _number(attributes.get("base_token_price_usd")))
+        try:
+            safety = goplus_safety(mint)
+        except Exception:
+            # Missing safety evidence must reject only this token, not stop the
+            # complete discovery cycle.
+            safety = {
+                "mint_authority_active": True, "freeze_authority_active": True,
+                "transfer_hook_active": True, "non_transferable": True,
+                "top10_holder_fraction": 1.0, "creator_fraction": 1.0,
+                "creator_selling": True,
+            }
+        try:
+            sell_ok, sell_impact = jupiter_sell_check(
+                mint, int(base_token.get("decimals") or 0),
+                _number(attributes.get("base_token_price_usd")))
+        except Exception:
+            # New Pump.fun tokens often have no Jupiter route yet. They are
+            # ineligible until a real sell route exists.
+            sell_ok, sell_impact = False, 9999.0
         results.append({
             "mint": mint, "pool": pool, "symbol": str(base_token.get("symbol") or ""),
             "price_usd": _number(attributes.get("base_token_price_usd")),
