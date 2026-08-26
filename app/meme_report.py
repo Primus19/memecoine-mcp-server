@@ -1,22 +1,133 @@
 from __future__ import annotations
 
 import html
+import json
 from datetime import datetime, timezone
 
 
+def esc(value: object, default: str = "N/A") -> str:
+    text = default if value is None or value == "" else str(value)
+    return html.escape(text)
+
+
 def money(value: object) -> str:
-    try:return f"${float(value):,.4f}"
-    except (TypeError,ValueError):return "$0.0000"
+    try:
+        return f"${float(value):,.4f}"
+    except (TypeError, ValueError):
+        return "$0.0000"
+
+
+def number(value: object, digits: int = 2, default: str = "N/A") -> str:
+    try:
+        return f"{float(value):,.{digits}f}"
+    except (TypeError, ValueError):
+        return default
+
+
+def yes_no(value: object) -> str:
+    return "Yes" if bool(value) else "No"
+
+
+def _event_detail(event: dict) -> str:
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict) or not payload:
+        return ""
+    preferred = ("product_id", "reason", "error", "detail", "status", "score", "hour")
+    selected = {key: payload[key] for key in preferred if payload.get(key) not in (None, "")}
+    if not selected:
+        selected = dict(list(payload.items())[:3])
+    return esc(json.dumps(selected, separators=(", ", ": "), default=str)[:300])
+
+
+def _row(label: str, value: object, label2: str = "", value2: object = "") -> str:
+    cells = (f'<td style="padding:9px 11px;color:#64748b;border-bottom:1px solid #e5e7eb">{esc(label)}</td>'
+             f'<td style="padding:9px 11px;font-weight:700;border-bottom:1px solid #e5e7eb">{value}</td>')
+    if label2:
+        cells += (f'<td style="padding:9px 11px;color:#64748b;border-bottom:1px solid #e5e7eb">{esc(label2)}</td>'
+                  f'<td style="padding:9px 11px;font-weight:700;border-bottom:1px solid #e5e7eb">{value2}</td>')
+    else:
+        cells += '<td colspan="2" style="border-bottom:1px solid #e5e7eb"></td>'
+    return f"<tr>{cells}</tr>"
 
 
 def render_meme_report(report: dict) -> str:
-    portfolio=report.get("portfolio") or {};position=portfolio.get("open_position")
-    controls=portfolio.get("controls") or {};review=report.get("model_review") or {}
-    mode=html.escape(str(report.get("mode") or "UNKNOWN"));paused=bool(report.get("paused"))
-    verdict=f"{mode} | {'PAUSED' if paused else 'AUTO EXECUTION ENABLED'}"
-    position_text=(f"{html.escape(str(position.get('product_id')))} at {money(position.get('mark_value_usdc'))}, "
-                   f"unrealized {money(position.get('net_unrealized_pnl_usdc'))}") if position else "No open position"
-    stamp=html.escape(str(report.get("timestamp") or datetime.now(timezone.utc).isoformat()))
-    events=report.get("notification_events") or []
-    event_rows="".join(f"<tr><td>{html.escape(str(x.get('at','')))}</td><td>{html.escape(str(x.get('kind','')))}</td></tr>" for x in events[:20]) or "<tr><td colspan=2>No recent events</td></tr>"
-    return f'''<!doctype html><html><body style="margin:0;background:#f1f5f9;font-family:Arial,sans-serif;color:#0f172a"><div style="max-width:850px;margin:auto;padding:18px"><div style="background:#111827;color:white;border-radius:16px;padding:24px"><small>MEME COIN LIVE TRADING | {stamp}</small><h1>Production Dashboard</h1><b>{verdict}</b></div><div style="display:flex;gap:12px;flex-wrap:wrap;margin:14px 0"><div style="background:white;padding:16px;border-radius:12px;flex:1"><small>Permitted capital</small><h2>{money(report.get('permitted_capital_usdc'))}</h2></div><div style="background:white;padding:16px;border-radius:12px;flex:1"><small>Realized P&amp;L</small><h2>{money(report.get('realized_pnl_usdc'))}</h2></div><div style="background:white;padding:16px;border-radius:12px;flex:1"><small>Peak drawdown</small><h2>{float(controls.get('drawdown_pct') or 0):.2f}%</h2></div></div><div style="background:white;padding:18px;border-radius:12px;margin-bottom:14px"><h2>Position and protection</h2><p>{position_text}</p><p><b>Circuit breakers:</b> {html.escape(str(controls.get('circuit_breakers') or 'None'))}</p></div><div style="background:white;padding:18px;border-radius:12px;margin-bottom:14px"><h2>Guarded learning</h2><p>Closed sample {int(review.get('sample_size') or 0)}, wins {int(review.get('wins') or 0)}, losses {int(review.get('losses') or 0)}, expectancy {money(review.get('net_expectancy_usdc'))}, profit factor {html.escape(str(review.get('profit_factor') if review.get('profit_factor') is not None else 'N/A'))}.</p><p>{html.escape(str(review.get('status') or 'MODEL LOCKED - COLLECTING EVIDENCE'))}</p></div><div style="background:white;padding:18px;border-radius:12px"><h2>Recent audit events</h2><table style="width:100%;border-collapse:collapse"><tr><th>Time</th><th>Event</th></tr>{event_rows}</table></div></div></body></html>'''
+    portfolio = report.get("portfolio") or {}
+    position = portfolio.get("open_position")
+    controls = portfolio.get("controls") or {}
+    review = report.get("model_review") or {}
+    deployment = report.get("deployment") or {}
+    recommendations = report.get("recommendations") or []
+    events = report.get("notification_events") or []
+    mode = str(report.get("mode") or "UNKNOWN")
+    paused = bool(report.get("paused"))
+    breakers = controls.get("circuit_breakers") or []
+    ready = mode == "LIVE_ARMED" and not paused and not breakers
+    status_color = "#166534" if ready else "#991b1b"
+    status_bg = "#dcfce7" if ready else "#fee2e2"
+    stamp = esc(report.get("timestamp") or datetime.now(timezone.utc).isoformat())
+
+    if position:
+        position_rows = "".join([
+            _row("Product", esc(position.get("product_id")), "Status", esc(position.get("status"))),
+            _row("Entry price", money(position.get("entry_price")), "Mark price", money(position.get("mark_price"))),
+            _row("Mark value", money(position.get("mark_value_usdc")), "Unrealized P&L", money(position.get("net_unrealized_pnl_usdc"))),
+            _row("High-water price", money(position.get("high_water_price")), "Order ID", esc(position.get("order_id"))),
+        ])
+    else:
+        position_rows = '<tr><td colspan="4" style="padding:14px;color:#475569">No open position. No capital is currently exposed.</td></tr>'
+
+    rec_rows = []
+    for item in recommendations[:10]:
+        payload = item.get("payload") or {}
+        rec_rows.append(
+            '<tr>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{esc(item.get("created_at") or payload.get("created_at"))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{esc(item.get("product_id") or payload.get("product_id"))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{esc(item.get("status"))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right">{esc(payload.get("score"))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right">{money(item.get("realized_pnl")) if item.get("realized_pnl") is not None else "N/A"}</td>'
+            '</tr>')
+    recommendations_html = "".join(rec_rows) or '<tr><td colspan="5" style="padding:12px;color:#64748b">No recent recommendations.</td></tr>'
+
+    event_rows = []
+    for event in events[:20]:
+        kind = str(event.get("kind") or "")
+        detail_color = "#991b1b" if "ERROR" in kind or "FAILED" in kind else "#475569"
+        event_rows.append(
+            '<tr>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb;white-space:nowrap">{esc(event.get("at"))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb;font-weight:700">{esc(kind)}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb;color:{detail_color}">{_event_detail(event)}</td>'
+            '</tr>')
+    events_html = "".join(event_rows) or '<tr><td colspan="3" style="padding:12px;color:#64748b">No recent audit events.</td></tr>'
+
+    capital_rows = "".join([
+        _row("Pilot baseline", money(report.get("baseline_usdc")), "Permitted capital", money(report.get("permitted_capital_usdc"))),
+        _row("Realized P&L", money(report.get("realized_pnl_usdc")), "Unrealized P&L", money(position.get("net_unrealized_pnl_usdc")) if position else "$0.0000"),
+        _row("Peak drawdown", esc(number(controls.get("drawdown_pct"), default="0.00")) + "%", "Daily drawdown", esc(number(controls.get("daily_drawdown_pct"), default="0.00")) + "%"),
+        _row("Consecutive losses", esc(controls.get("consecutive_losses", 0)), "Circuit breakers", esc(", ".join(map(str, breakers)) if breakers else "None")),
+    ])
+    learning_rows = "".join([
+        _row("Model", esc(review.get("model_version")), "Status", esc(review.get("status"))),
+        _row("Closed sample", esc(review.get("sample_size", 0)), "Wins / losses", f'{esc(review.get("wins", 0))} / {esc(review.get("losses", 0))}'),
+        _row("Win rate", esc(number((review.get("win_rate") or 0) * 100)) + "%", "Profit factor", esc(number(review.get("profit_factor"), 4))),
+        _row("Net P&L", money(review.get("net_pnl_usdc")), "Expectancy", money(review.get("net_expectancy_usdc"))),
+        _row("Average win", money(review.get("average_win_usdc")), "Average loss", money(review.get("average_loss_usdc"))),
+        _row("Average MFE", money(review.get("average_max_favorable_excursion_usdc")), "Average MAE", money(review.get("average_max_adverse_excursion_usdc"))),
+        _row("Parameters changed", yes_no(review.get("parameters_changed")), "Promotion eligible", yes_no((review.get("promotion_gate") or {}).get("eligible"))),
+    ])
+
+    section = 'style="padding:22px 26px 8px;font-size:18px;font-weight:700;color:#172033"'
+    table = 'width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;border-collapse:separate;overflow:hidden;font-size:13px"'
+    return f'''<!doctype html><html><body style="margin:0;background:#eef2f7;font-family:Arial,Helvetica,sans-serif;color:#0f172a">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f7"><tr><td align="center" style="padding:24px 10px">
+<table role="presentation" width="760" cellpadding="0" cellspacing="0" style="width:100%;max-width:760px;background:#ffffff;border:1px solid #dbe3ec;border-radius:14px;overflow:hidden">
+<tr><td style="padding:26px;background:#111827;color:#fff"><div style="font-size:12px;letter-spacing:1.2px;color:#93c5fd;font-weight:700">CRYPTO LIVE TRADING INTELLIGENCE</div><h1 style="margin:8px 0 5px;font-size:27px">Production Dashboard</h1><div style="color:#cbd5e1;font-size:13px">{stamp}</div></td></tr>
+<tr><td style="padding:18px 26px;background:{status_bg};color:{status_color}"><table role="presentation" width="100%"><tr><td><div style="font-size:11px">MODE</div><div style="font-size:20px;font-weight:800">{esc(mode)}</div></td><td><div style="font-size:11px">AUTO EXECUTION</div><div style="font-size:20px;font-weight:800">{'PAUSED' if paused else 'ENABLED'}</div></td><td><div style="font-size:11px">POSITION</div><div style="font-size:20px;font-weight:800">{'OPEN' if position else 'FLAT'}</div></td></tr></table></td></tr>
+<tr><td {section}>Capital and risk controls</td></tr><tr><td style="padding:6px 26px 18px"><table role="presentation" {table}>{capital_rows}</table></td></tr>
+<tr><td {section}>Position and protection</td></tr><tr><td style="padding:6px 26px 18px"><table role="presentation" {table}>{position_rows}</table></td></tr>
+<tr><td {section}>Recent decisions and completed trades</td></tr><tr><td style="padding:6px 26px 18px;overflow-x:auto"><table role="presentation" {table}><tr style="background:#f8fafc"><th style="padding:8px;text-align:left">Created</th><th style="padding:8px;text-align:left">Product</th><th style="padding:8px;text-align:left">Status</th><th style="padding:8px;text-align:right">Score</th><th style="padding:8px;text-align:right">P&L</th></tr>{recommendations_html}</table></td></tr>
+<tr><td {section}>Guarded model learning</td></tr><tr><td style="padding:6px 26px 18px"><table role="presentation" {table}>{learning_rows}</table><div style="margin-top:10px;padding:11px;background:#f8fafc;color:#475569;font-size:12px;line-height:18px">Model changes remain locked until the documented sample-size, confidence, cost-stress, and prospective challenger gates pass.</div></td></tr>
+<tr><td {section}>Recent audit events and errors</td></tr><tr><td style="padding:6px 26px 22px;overflow-x:auto"><table role="presentation" {table}><tr style="background:#f8fafc"><th style="padding:8px;text-align:left">Time</th><th style="padding:8px;text-align:left">Event</th><th style="padding:8px;text-align:left">Detail</th></tr>{events_html}</table></td></tr>
+<tr><td style="padding:14px 26px;background:#f8fafc;border-top:1px solid #e5e7eb;color:#64748b;font-size:11px;line-height:17px">Service {esc(deployment.get('service_name'))} | Commit {esc(deployment.get('git_commit_sha'))} | Report generated directly by Railway. This report does not authorize, issue, modify, or close trades.</td></tr>
+</table></td></tr></table></body></html>'''
