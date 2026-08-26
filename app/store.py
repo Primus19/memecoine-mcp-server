@@ -3,6 +3,7 @@ import hashlib,json,sqlite3
 from datetime import datetime,timedelta,timezone
 from pathlib import Path
 from cryptography.fernet import Fernet
+from .validation import promotion_gate
 
 def utcnow(): return datetime.now(timezone.utc).isoformat()
 
@@ -129,7 +130,8 @@ class Store:
             peak=max(stored_peak,legacy_peak);peak_opportunities.append(peak)
             favorable.append(peak);adverse.append(float(row.get("max_adverse_pnl") or 0))
             if peak>0:captures.append(pnl/peak)
-        p={"model_version":"3.1","sample_size":len(pnls),"wins":len(wins),"losses":len(losses),"win_rate":len(wins)/len(pnls) if pnls else None,"net_pnl_usdc":sum(pnls),"net_expectancy_usdc":sum(pnls)/len(pnls) if pnls else None,"profit_factor":sum(wins)/abs(sum(losses)) if losses else None,"average_win_usdc":sum(wins)/len(wins) if wins else None,"average_loss_usdc":sum(losses)/len(losses) if losses else None,"average_peak_opportunity_usdc":sum(peak_opportunities)/len(peak_opportunities) if peak_opportunities else None,"average_max_favorable_excursion_usdc":sum(favorable)/len(favorable) if favorable else None,"average_max_adverse_excursion_usdc":sum(adverse)/len(adverse) if adverse else None,"average_profit_capture":sum(captures)/len(captures) if captures else None,"by_product":by_product,"status":"MODEL LOCKED - COLLECTING EVIDENCE" if len(pnls)<30 else "ELIGIBLE FOR PROSPECTIVE CHALLENGER REVIEW","parameters_changed":False,"promotion_rule":"At least 30 closed trades; positive expectancy and profit factor above 1.0; challenger must then outperform prospectively without materially worse drawdown","trigger":trigger}
+        gate=promotion_gate(pnls,minimum_samples=100,cost_stress=.05)
+        p={"model_version":"CRYPTO_MULTI_HORIZON_4.0","sample_size":len(pnls),"wins":len(wins),"losses":len(losses),"win_rate":len(wins)/len(pnls) if pnls else None,"net_pnl_usdc":sum(pnls),"net_expectancy_usdc":sum(pnls)/len(pnls) if pnls else None,"profit_factor":sum(wins)/abs(sum(losses)) if losses else None,"average_win_usdc":sum(wins)/len(wins) if wins else None,"average_loss_usdc":sum(losses)/len(losses) if losses else None,"average_peak_opportunity_usdc":sum(peak_opportunities)/len(peak_opportunities) if peak_opportunities else None,"average_max_favorable_excursion_usdc":sum(favorable)/len(favorable) if favorable else None,"average_max_adverse_excursion_usdc":sum(adverse)/len(adverse) if adverse else None,"average_profit_capture":sum(captures)/len(captures) if captures else None,"by_product":by_product,"status":"ELIGIBLE FOR PROSPECTIVE CHALLENGER REVIEW" if gate.eligible else "MODEL LOCKED - COLLECTING EVIDENCE","parameters_changed":False,"promotion_gate":{"eligible":gate.eligible,"reasons":list(gate.reasons),"lower_confidence_bound":gate.lower_confidence_bound,"cost_stressed_expectancy":gate.stressed_mean_return},"promotion_rule":"At least 100 closed trades; positive 95% lower confidence bound; positive cost-stressed expectancy; challenger must then outperform prospectively without materially worse drawdown","trigger":trigger}
         self.db.execute("INSERT INTO reviews(review_key,at,trigger,payload) VALUES(?,?,?,?)",(key,utcnow(),trigger,json.dumps(p,sort_keys=True)));self.db.commit();self.event("MODEL_REVIEW",p);return p
     def recent_reviews(self,limit=10):
         return [{**dict(r),"payload":json.loads(r["payload"])} for r in self.db.execute("SELECT review_key,at,trigger,payload FROM reviews ORDER BY at DESC LIMIT ?",(limit,)).fetchall()]
