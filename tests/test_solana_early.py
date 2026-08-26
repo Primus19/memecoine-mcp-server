@@ -66,6 +66,25 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertIn("top-10 concentration too high", result["failures"])
         self.assertIn("buyers are not accelerating", result["failures"])
 
+    def test_wallet_events_close_timestamped_outcomes(self):
+        for index in range(20):
+            opened = f"2026-08-26T12:{index:02d}:00+00:00"
+            closed = f"2026-08-26T13:{index:02d}:00+00:00"
+            self.assertTrue(self.ledger.store_wallet_event({"signature": f"b{index}", "wallet": "proven",
+                "mint": f"m{index}", "side": "BUY", "quantity": 10, "quote_usdc": 1, "observed_at": opened}))
+            self.assertTrue(self.ledger.store_wallet_event({"signature": f"s{index}", "wallet": "proven",
+                "mint": f"m{index}", "side": "SELL", "quantity": 10, "quote_usdc": 1.2, "observed_at": closed}))
+        stats = self.ledger.wallet_stats("proven")
+        self.assertEqual(20, stats["sample_size"])
+        self.assertAlmostEqual(1, stats["win_rate"])
+        self.assertAlmostEqual(.2, stats["mean_return"])
+
+    def test_duplicate_wallet_event_is_idempotent(self):
+        event = {"signature": "same", "wallet": "w", "mint": "m", "side": "BUY",
+                 "quantity": 1, "quote_usdc": 1, "observed_at": "2026-08-26T12:00:00+00:00"}
+        self.assertTrue(self.ledger.store_wallet_event(event))
+        self.assertFalse(self.ledger.store_wallet_event(event))
+
 
 if __name__ == "__main__":
     unittest.main()
