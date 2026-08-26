@@ -348,8 +348,13 @@ def confirmed_trade_actions(transactions: list[dict], summary: dict, open_trades
     def base(tx: dict, pair: str, action_id: str) -> dict:
         outcome = outcome_by_symbol.get(pair, {})
         score = outcome.get("score")
-        signal = (f"Signal score {score:.2f} versus {outcome.get('minimum_score', risk.get('minimum_score'))}; "
-                  f"{outcome.get('alignment', 'broker fill confirmation')}") if isinstance(score, (int, float)) else +                 "Confirmed broker fill; original signal details are retained in the trade ledger."
+        signal = (
+            f"Signal score {score:.2f} versus "
+            f"{outcome.get('minimum_score', risk.get('minimum_score'))}; "
+            f"{outcome.get('alignment', 'broker fill confirmation')}"
+        ) if isinstance(score, (int, float)) else (
+            "Confirmed broker fill; original signal details are retained in the trade ledger."
+        )
         return {
             "action_id": action_id,
             "pair": pair,
