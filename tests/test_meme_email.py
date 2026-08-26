@@ -45,6 +45,7 @@ class MemeEmailTests(unittest.TestCase):
         ledger = Ledger()
         emailer = MemeReportEmailer(ledger)
         now = datetime(2026, 8, 25, 22, 20, tzinfo=timezone.utc)
+        ledger.set_setting("meme_email_event_mode_initialized","1")
         report={"mode":"LIVE_ARMED","notification_events":[{"seq":42,"kind":"ENTRY_FILLED","payload":{}}]}
         with patch.dict(os.environ, ENV, clear=False), patch.object(emailer, "_send"):
             emailer._deliver([{"event_id":"42","kind":"ENTRY_FILLED","event":report["notification_events"][0],"report":report}],now)
