@@ -102,10 +102,18 @@ def issue(candidate):
     if store.paused():raise RuntimeError("live pilot is paused")
     state=reconcile()
     if state.get("open_position"):raise RuntimeError("one-position limit reached")
+    controls=state.get("controls") or {}
+    if controls.get("new_entries_halted"):raise RuntimeError("hard drawdown circuit breaker active")
+    effective_allocation=min(ALLOCATION_FRACTION,float(controls.get("recommended_allocation_fraction",ALLOCATION_FRACTION)))
+    risk_multiplier=float(controls.get("risk_multiplier",1.0))
+    score_boost=float(controls.get("minimum_score_boost",0.0))
     pf=run_preflight();ex=exchange();draft=build_recommendation(candidate);product=ex.product(draft["product_id"])
     quote=ex.execution_quote(draft["product_id"],draft["notional_usdc"])
     enriched=enrich_with_coinbase(candidate,product=product,quote=quote)
-    recommendation=risk_size_ticket(build_recommendation(enriched),permitted_capital=store.permitted_capital(),available_usdc=pf["usdc_available"],allocation_fraction=ALLOCATION_FRACTION)
+    recommendation=risk_size_ticket(build_recommendation(enriched),permitted_capital=store.permitted_capital(),available_usdc=pf["usdc_available"],allocation_fraction=effective_allocation,risk_multiplier=risk_multiplier)
+    recommendation["recovery_mode"]=controls.get("recovery_mode","NORMAL")
+    recommendation["effective_allocation_fraction"]=effective_allocation
+    recommendation["minimum_score_boost"]=score_boost
     prior=store.latest_closed_for_product(recommendation["product_id"])
     if prior:
         closed=datetime.fromisoformat(str(prior["closed_at"]).replace("Z","+00:00"));source=datetime.fromisoformat(recommendation["source_timestamp"].replace("Z","+00:00"))
@@ -114,7 +122,7 @@ def issue(candidate):
             raise TicketRejected(f"fresh re-entry setup not established for {reset_seconds} seconds after prior close")
     recommendation["coinbase_evidence"]=enriched["coinbase_evidence"]
     recommendation["coinbase_checked_at"]=enriched["coinbase_checked_at"]
-    validate_ticket(recommendation,available_usdc=pf["usdc_available"],permitted_capital=store.permitted_capital(),open_positions=0,product=product,allocation_fraction=ALLOCATION_FRACTION)
+    validate_ticket(recommendation,available_usdc=pf["usdc_available"],permitted_capital=store.permitted_capital(),open_positions=0,product=product,allocation_fraction=effective_allocation,minimum_score_boost=score_boost)
     recommendation["verified_product"]={k:product.get(k) for k in ("product_id","product_type","price","volume_24h","base_min_size","quote_min_size","trading_disabled","view_only")}
     recommendation["recommendation_hash"]=canonical_hash({k:v for k,v in recommendation.items() if k!="recommendation_hash"})
     store.issue_recommendation(recommendation);return recommendation
@@ -153,8 +161,13 @@ def execute(ticket_id,recommendation_hash):
     if datetime.fromisoformat(ticket["expires_at"])<=datetime.now(timezone.utc):store.mark_recommendation(ticket_id,"EXPIRED");raise RuntimeError("ticket expired")
     state=reconcile()
     if state.get("open_position"):raise RuntimeError("one-position limit reached")
+    controls=state.get("controls") or {}
+    if controls.get("new_entries_halted"):raise RuntimeError("hard drawdown circuit breaker active")
+    effective_allocation=min(ALLOCATION_FRACTION,float(controls.get("recommended_allocation_fraction",ALLOCATION_FRACTION)))
+    score_boost=max(float(ticket.get("minimum_score_boost",0.0)),
+                    float(controls.get("minimum_score_boost",0.0)))
     ex=exchange();pf=run_preflight();product=ex.product(ticket["product_id"])
-    validate_ticket(ticket,available_usdc=pf["usdc_available"],permitted_capital=store.permitted_capital(),open_positions=0,product=product,allocation_fraction=ALLOCATION_FRACTION)
+    validate_ticket(ticket,available_usdc=pf["usdc_available"],permitted_capital=store.permitted_capital(),open_positions=0,product=product,allocation_fraction=effective_allocation,minimum_score_boost=score_boost)
     live_quote=validate_live_execution(ticket,ex,product)
     preview=ex.preview_buy(ticket,product);store.event("ORDER_PREVIEWED",{"preview_sha256":hashlib.sha256(str(preview).encode()).hexdigest()},ticket_id)
     if not LIVE_ARMED:return {"status":"DRY_RUN_ONLY","ticket_id":ticket_id,"recommendation_hash":recommendation_hash,"live_quote":live_quote,"message":"No real order submitted"}
