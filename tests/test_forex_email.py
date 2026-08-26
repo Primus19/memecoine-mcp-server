@@ -74,12 +74,20 @@ class ForexEmailTests(unittest.TestCase):
         ledger = Ledger()
         emailer = ForexReportEmailer(ledger)
         now = datetime(2026, 8, 25, 13, 42, tzinfo=timezone.utc)
+        ledger.set_setting("forex_email_event_mode_initialized", "1")
         with patch.dict(os.environ, ENV, clear=False), patch.object(emailer, "_send"):
             emailer._deliver([self.action()], now)
             result = emailer.maybe_send({"_trade_actions": [self.action()]}, now)
         self.assertEqual("NO_NEW_TRADE_ACTION", result["status"])
         self.assertIn(self.action()["action_id"], ledger.settings["forex_email_sent_action_ids"])
         self.assertEqual("FOREX_TRADE_EMAIL_SENT", ledger.events[-1][0])
+
+    def test_first_scan_establishes_history_baseline_without_email(self):
+        ledger=Ledger();emailer=ForexReportEmailer(ledger)
+        with patch.dict(os.environ,ENV,clear=False),patch.object(emailer,"_send") as send:
+            result=emailer.maybe_send({"_trade_actions":[self.action()]})
+        self.assertEqual("HISTORY_BASELINE_ESTABLISHED",result["status"])
+        send.assert_not_called()
 
     def test_failure_is_audited_and_action_remains_pending(self):
         ledger = Ledger()
