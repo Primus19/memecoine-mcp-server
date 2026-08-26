@@ -79,6 +79,9 @@ class Store:
         result=dict(row); result["payload"]=json.loads(result["payload"]); return result
     def recent_recommendations(self,limit=20):
         return [dict(r) for r in self.db.execute("SELECT ticket_id,recommendation_hash,model_version,created_at,expires_at,product_id,status,rejection_reason,net_return,realized_pnl,closed_at FROM recommendations ORDER BY created_at DESC LIMIT ?",(limit,)).fetchall()]
+    def latest_closed_for_product(self,product_id):
+        row=self.db.execute("SELECT closed_at,payload FROM recommendations WHERE product_id=? AND status='CLOSED' AND closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1",(product_id,)).fetchone()
+        return {"closed_at":row[0],"payload":json.loads(row[1])} if row else None
     def mark_recommendation(self,ticket_id,status,**values):
         allowed={"order_id","rejection_reason","net_return","realized_pnl","closed_at"}; u={"status":status,**{k:v for k,v in values.items() if k in allowed}}
         self.db.execute("UPDATE recommendations SET "+",".join(f"{k}=?" for k in u)+" WHERE ticket_id=?",(*u.values(),ticket_id)); self.db.commit()

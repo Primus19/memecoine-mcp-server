@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 
-def supervision_levels(ticket: dict, *, entry: float, mark: float, high_water: float, regime: str = "") -> dict:
+def supervision_levels(ticket: dict, *, entry: float, mark: float, high_water: float, regime: str = "",
+                       momentum_1h_pct: float | None = None) -> dict:
     high = max(entry, mark, high_water)
-    activation = entry * (1 + float(ticket.get("trail_activation_pct", 12)) / 100)
+    fee_bps = 2 * float((ticket.get("opportunity_policy") or {}).get("estimated_fee_bps_per_side", 120))
+    execution_bps = float(ticket.get("spread_bps") or 0) + 2 * float(ticket.get("slippage_bps") or 0)
+    edge_bps = float((ticket.get("opportunity_policy") or {}).get("minimum_net_edge_bps", 50))
+    break_even_activation_pct = max(2.0, (fee_bps + execution_bps + edge_bps) / 100)
+    break_even_active = high >= entry * (1 + break_even_activation_pct / 100)
+    activation = entry * (1 + float(ticket.get("trail_activation_pct", 5)) / 100)
     trail_active = high >= activation
     hard_stop = float(ticket["stop_price"])
-    effective_stop = max(hard_stop, high * (1 - float(ticket.get("trail_pct", 8)) / 100)) if trail_active else hard_stop
-    reason = "FALLING_REGIME" if regime.upper() == "FALLING" else ("TRAILING_STOP" if trail_active and mark <= effective_stop else "HARD_STOP_FALLBACK" if mark <= hard_stop else "")
-    return {"high_water_price": high, "trail_active": trail_active, "effective_stop_price": effective_stop, "exit_reason": reason}
+    gain_pct = (high / entry - 1) * 100 if entry else 0
+    trail_pct = 2.5 if gain_pct >= 8 else float(ticket.get("trail_pct", 4))
+    candidate_stop = high * (1 - trail_pct / 100) if trail_active else entry if break_even_active else hard_stop
+    effective_stop = max(hard_stop, candidate_stop)
+    deteriorating = momentum_1h_pct is not None and momentum_1h_pct <= -1.0 and mark < high * .98
+    reason = "FALLING_REGIME" if regime.upper() == "FALLING" else ("POSITION_MOMENTUM_REVERSAL" if deteriorating else "TRAILING_STOP" if mark <= effective_stop and (trail_active or break_even_active) else "HARD_STOP_FALLBACK" if mark <= hard_stop else "")
+    return {"high_water_price": high, "break_even_active":break_even_active,"break_even_activation_pct":break_even_activation_pct,"trail_active": trail_active,"trail_pct":trail_pct, "effective_stop_price": effective_stop, "position_deteriorating":deteriorating,"exit_reason": reason}
 
 
 def profit_protection_challenger(ticket: dict, *, entry: float, mark: float, high_water: float) -> dict:

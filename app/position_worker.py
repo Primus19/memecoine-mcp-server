@@ -34,7 +34,12 @@ def main() -> None:
             feed=request_json(research+"/status",feed_token);feed_status=feed.get("status",{});stamp=str(feed_status.get("scanned_at", ""))
             observed=datetime.fromisoformat(stamp.replace("Z","+00:00"));age=(datetime.now(timezone.utc)-observed).total_seconds()
             regime=str(feed_status.get("regime",{}).get("classification", "")) if -5<=age<=120 else ""
-            result=request_json(executor+"/api/position-supervision",executor_token,payload={"regime":regime,"observed_at":datetime.now(timezone.utc).isoformat()})
+            position=request_json(executor+"/api/pilot-status",executor_token).get("portfolio",{}).get("open_position") or {}
+            product_id=str(position.get("product_id") or "")
+            ranked=feed_status.get("ranked_candidates") or []
+            match=next((item for item in ranked if item.get("product_id")==product_id),None)
+            momentum=None if not match else match.get("change_1h_pct")
+            result=request_json(executor+"/api/position-supervision",executor_token,payload={"regime":regime,"momentum_1h_pct":momentum,"observed_at":datetime.now(timezone.utc).isoformat()})
             print(json.dumps({"event":"POSITION_SUPERVISION","regime":regime,"result":result},default=str),flush=True)
         except Exception as exc:print(json.dumps({"event":"POSITION_SUPERVISION_ERROR","error":type(exc).__name__,"detail":str(exc)[:500]}),flush=True)
         time.sleep(interval)

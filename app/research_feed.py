@@ -60,7 +60,10 @@ class ResearchFeed:
         self.executor_token = os.environ["REST_API_TOKEN"]
         self.cg_base = os.getenv("COINGECKO_BASE_URL", "https://api.coingecko.com/api/v3").rstrip("/")
         self.cg_key = os.getenv("COINGECKO_API_KEY", "")
-        self.pages = max(1, min(3, int(os.getenv("RESEARCH_MARKET_PAGES", "2"))))
+        # Scan the broad crypto market instead of CoinGecko's meme-only category.
+        # Four pages covers the leading 1,000 assets; operators can extend this
+        # without changing code when Coinbase adds deeper USDC markets.
+        self.pages = max(1, min(10, int(os.getenv("RESEARCH_MARKET_PAGES", "4"))))
         self.interval = max(15, min(300, int(os.getenv("RESEARCH_SCAN_INTERVAL_SECONDS", "30"))))
         self.http_max_retries = max(1, min(5, int(os.getenv("RESEARCH_HTTP_MAX_RETRIES", "3"))))
         self.http_retry_backoff = max(.25, min(10.0, float(os.getenv("RESEARCH_HTTP_RETRY_BACKOFF_SECONDS", "1"))))
@@ -116,7 +119,7 @@ class ResearchFeed:
 
     def market_page(self, page: int) -> list[dict[str, Any]]:
         query = urllib.parse.urlencode({
-            "vs_currency": "usd", "category": "meme-token", "order": "market_cap_desc",
+            "vs_currency": "usd", "order": "market_cap_desc",
             "per_page": 250, "page": page, "sparkline": "false",
             "price_change_percentage": "1h,24h,7d",
         })
@@ -218,7 +221,7 @@ class ResearchFeed:
             "reference_price": price, "limit_price": price * 1.0035,
             "stop_price": price * (.95 if emerging else .92), "target_1_price": price * 1.06,
             "target_price": price * (1.15 if emerging else 1.20),
-            "trail_activation_pct": 5, "trail_pct": 3,
+            "trail_activation_pct": 5, "trail_pct": 4,
             "thesis": str(evidence.get("thesis") or "Fresh verified catalyst with positive liquid-market momentum"),
             "invalidation": str(evidence.get("invalidation") or "Safety veto, catalyst invalidation, spread/slippage failure, or momentum reversal"),
             "evidence_urls": list(dict.fromkeys(sources)), "source_timestamp": at.isoformat(), "expiry_seconds": 90,
@@ -322,7 +325,12 @@ class ResearchFeed:
             "change_24h_pct": item["change_24h_pct"],
             "selection_rationale": item["selection_rationale"],
         } for item in candidates[:10]]
-        status = {"ok": True, "scanned_at": iso_now(), "duration_ms": round((now_utc() - started).total_seconds() * 1000), "market_count": len(markets), "coinbase_product_count": len(products), "regime": regime, "candidate_count": len(candidates), "candidate_tiers": {"established": sum(x.get("opportunity_tier") == "ESTABLISHED" for x in candidates), "emerging": sum(x.get("opportunity_tier") == "EMERGING" for x in candidates)}, "ranked_candidates": ranked, "shadow_summary": self.shadow_summary(), "rejected_attested": rejected[:50]}
+        matched_products = sum(
+            str(product.get("product_id", "")).endswith("-USDC")
+            and str(product.get("product_id", ""))[:-5].upper() in by_symbol
+            for product in products
+        )
+        status = {"ok": True, "scanned_at": iso_now(), "duration_ms": round((now_utc() - started).total_seconds() * 1000), "universe":"ALL_CRYPTO_USDC_SPOT", "market_count": len(markets), "coinbase_product_count": len(products), "matched_coinbase_products": matched_products, "unmatched_coinbase_products": max(0, len(products) - matched_products), "regime": regime, "candidate_count": len(candidates), "candidate_tiers": {"established": sum(x.get("opportunity_tier") == "ESTABLISHED" for x in candidates), "emerging": sum(x.get("opportunity_tier") == "EMERGING" for x in candidates)}, "ranked_candidates": ranked, "shadow_summary": self.shadow_summary(), "rejected_attested": rejected[:50]}
         with self.lock:
             self.state["candidates"], self.state["status"] = candidates, status
             self._save()
