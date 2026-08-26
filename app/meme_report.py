@@ -106,6 +106,10 @@ def render_meme_report(report: dict) -> str:
         _row("Realized P&L", money(report.get("realized_pnl_usdc")), "Unrealized P&L", money(position.get("net_unrealized_pnl_usdc")) if position else "$0.0000"),
         _row("Peak drawdown", esc(number(controls.get("drawdown_pct"), default="0.00")) + "%", "Daily drawdown", esc(number(controls.get("daily_drawdown_pct"), default="0.00")) + "%"),
         _row("Consecutive losses", esc(controls.get("consecutive_losses", 0)), "Circuit breakers", esc(", ".join(map(str, breakers)) if breakers else "None")),
+        _row("Trading posture", esc(controls.get("recovery_mode", "NORMAL")),
+             "Entry sizing", esc(number((controls.get("recommended_allocation_fraction") or .95) * 100, 1)) + "% capital maximum"),
+        _row("Risk multiplier", esc(number(controls.get("risk_multiplier", 1), 3)),
+             "Extra score required", "+" + esc(number(controls.get("minimum_score_boost", 0), 1)) + " points"),
     ])
     learning_rows = "".join([
         _row("Model", esc(review.get("model_version")), "Status", esc(review.get("status"))),
