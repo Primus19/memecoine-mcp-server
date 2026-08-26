@@ -68,6 +68,29 @@ class MemeEmailTests(unittest.TestCase):
         self.assertIn("AUTO EXECUTION ENABLED", body)
         self.assertNotIn("<script", body.lower())
 
+    def test_forex_gmail_configuration_is_reused_when_meme_values_are_absent(self):
+        forex_env = {
+            "FOREX_EMAIL_REPORT_ENABLED": "true",
+            "FOREX_EMAIL_PROVIDER": "gmail_api",
+            "FOREX_EMAIL_FROM": "shared@example.test",
+            "FOREX_EMAIL_RECIPIENTS": "one@example.test,two@example.test",
+            "FOREX_EMAIL_GMAIL_CLIENT_ID": "shared-client-id",
+            "FOREX_EMAIL_GMAIL_CLIENT_SECRET": "shared-client-secret",
+            "FOREX_EMAIL_GMAIL_REFRESH_TOKEN": "shared-refresh-token",
+            "FOREX_EMAIL_TIMEZONE": "America/New_York",
+        }
+        meme_keys = [key for key in os.environ if key.startswith("MEME_EMAIL_")]
+        saved = {key: os.environ.pop(key) for key in meme_keys}
+        try:
+            with patch.dict(os.environ, forex_env, clear=False):
+                config = MemeReportEmailer._configuration()
+                self.assertTrue(MemeReportEmailer.enabled())
+                self.assertEqual("shared@example.test", config["from_address"])
+                self.assertEqual("shared-client-id", config["client_id"])
+                self.assertEqual(["one@example.test", "two@example.test"], config["recipients"])
+        finally:
+            os.environ.update(saved)
+
 
 if __name__ == "__main__":
     unittest.main()
