@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from cryptography.fernet import Fernet
 from app.store import Store
+from app.version import CRYPTO_MODEL_VERSION
 
 
 class StoreTests(unittest.TestCase):
@@ -117,3 +118,16 @@ class StoreTests(unittest.TestCase):
         review=self.store.model_review("trade_close","trade:t-legacy")
         self.assertAlmostEqual(1.0,review["average_max_favorable_excursion_usdc"])
         self.assertAlmostEqual(.50,review["average_profit_capture"])
+
+    def test_stale_cached_review_is_rebuilt_for_current_model(self):
+        self.store.db.execute(
+            "INSERT INTO reviews(review_key,at,trigger,payload) VALUES(?,?,?,?)",
+            ("hourly:old", datetime.now(timezone.utc).isoformat(), "hourly_report",
+             '{"model_version":"3.1","sample_size":3}'),
+        )
+        self.store.db.commit()
+
+        review = self.store.model_review("hourly_report", "hourly:old")
+
+        self.assertEqual(CRYPTO_MODEL_VERSION, review["model_version"])
+        self.assertIn("100", review["promotion_rule"])
