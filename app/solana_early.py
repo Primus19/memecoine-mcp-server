@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.request
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +45,11 @@ class EarlyPolicy:
     maximum_price_impact_bps: float = 250.0
     maximum_probe_usd: float = 3.0
     maximum_loss_usd: float = 1.0
+    paper_minimum_score: float = 25.0
+    paper_minimum_liquidity_usd: float = 2_500.0
+    paper_maximum_token_age_minutes: float = 1_440.0
+    paper_minimum_unique_buyers_5m: int = 3
+    paper_maximum_price_impact_bps: float = 500.0
 
     @classmethod
     def from_env(cls) -> "EarlyPolicy":
@@ -54,6 +60,11 @@ class EarlyPolicy:
             minimum_unique_buyers_5m=int(os.getenv("SOLANA_EARLY_MIN_BUYERS_5M", "25")),
             maximum_probe_usd=min(5.0, max(1.0, float(os.getenv("SOLANA_EARLY_MAX_PROBE_USD", "3")))),
             maximum_loss_usd=min(1.0, max(0.25, float(os.getenv("SOLANA_EARLY_MAX_LOSS_USD", "1")))),
+            paper_minimum_score=max(0.0, min(100.0, float(os.getenv("SOLANA_PAPER_MIN_SCORE", "25")))),
+            paper_minimum_liquidity_usd=max(500.0, float(os.getenv("SOLANA_PAPER_MIN_LIQUIDITY_USD", "2500"))),
+            paper_maximum_token_age_minutes=max(90.0, float(os.getenv("SOLANA_PAPER_MAX_AGE_MINUTES", "1440"))),
+            paper_minimum_unique_buyers_5m=max(1, int(os.getenv("SOLANA_PAPER_MIN_BUYERS_5M", "3"))),
+            paper_maximum_price_impact_bps=max(250.0, float(os.getenv("SOLANA_PAPER_MAX_PRICE_IMPACT_BPS", "500"))),
         )
 
 
@@ -169,6 +180,20 @@ def safety_failures(candidate: dict[str, Any], policy: EarlyPolicy) -> list[str]
     return failures
 
 
+def contract_safety_failures(candidate: dict[str, Any]) -> list[str]:
+    """Non-negotiable controls shared by paper exploration and live selection."""
+    failures: list[str] = []
+    for field in ("mint_authority_active", "freeze_authority_active", "transfer_hook_active",
+                  "non_transferable", "creator_selling"):
+        if field not in candidate:
+            failures.append(f"{field} missing")
+        elif candidate.get(field) is True:
+            failures.append(field)
+    if candidate.get("sell_simulation_ok") is not True:
+        failures.append("sell simulation failed")
+    return failures
+
+
 def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPolicy) -> dict[str, Any]:
     failures = safety_failures(candidate, policy)
     age = float(candidate.get("token_age_minutes", 9999))
@@ -213,6 +238,17 @@ def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPoli
         failures.append("net buy pressure below minimum")
     if score < policy.minimum_score:
         failures.append(f"score {score:.2f} below {policy.minimum_score:.2f}")
+    paper_failures = contract_safety_failures(candidate)
+    if not 1 <= age <= policy.paper_maximum_token_age_minutes:
+        paper_failures.append("paper token age outside exploration window")
+    if liquidity < policy.paper_minimum_liquidity_usd:
+        paper_failures.append("paper liquidity below minimum")
+    if buyers < policy.paper_minimum_unique_buyers_5m:
+        paper_failures.append("paper unique buyers below minimum")
+    if impact > policy.paper_maximum_price_impact_bps:
+        paper_failures.append("paper sell price impact above maximum")
+    if score < policy.paper_minimum_score:
+        paper_failures.append(f"paper score {score:.2f} below {policy.paper_minimum_score:.2f}")
     return {
         "mint": str(candidate.get("mint") or ""), "symbol": str(candidate.get("symbol") or ""),
         "price_usd": _number(candidate.get("price_usd")),
@@ -221,14 +257,17 @@ def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPoli
         "buyer_acceleration": round(buyer_accel, 4), "volume_acceleration": round(volume_accel, 4),
         "net_buy_pressure": round(pressure, 4), "qualified_wallet_count": len(qualified_wallets),
         "qualified": not failures, "failures": list(dict.fromkeys(failures)),
-        "paper_probe_usd": policy.maximum_probe_usd if not failures else 0.0,
+        "paper_qualified": not paper_failures,
+        "paper_failures": list(dict.fromkeys(paper_failures)),
+        "paper_probe_usd": policy.maximum_probe_usd if not paper_failures else 0.0,
         "mode": "PAPER_ONLY",
     }
 
 
-def json_request(url: str, headers: dict[str, str] | None = None) -> Any:
+def json_request(url: str, headers: dict[str, str] | None = None, timeout: float | None = None) -> Any:
     values = {"Accept": "application/json", "User-Agent": "primus-solana-early/1.1", **(headers or {})}
-    with urllib.request.urlopen(urllib.request.Request(url, headers=values), timeout=20) as response:
+    effective_timeout = timeout or max(5.0, min(30.0, float(os.getenv("SOLANA_EARLY_HTTP_TIMEOUT_SECONDS", "12"))))
+    with urllib.request.urlopen(urllib.request.Request(url, headers=values), timeout=effective_timeout) as response:
         return json.loads(response.read().decode())
 
 
@@ -259,15 +298,25 @@ def goplus_safety(mint: str) -> dict[str, Any]:
     holders = facts.get("holders") or []
     creators = facts.get("creators") or facts.get("creator") or []
     def active(field: str) -> bool:
+        if field not in facts:
+            return True
         value = facts.get(field)
-        return not isinstance(value, dict) or str(value.get("status", "1")).lower() not in {"0", "false"}
+        if isinstance(value, dict):
+            value = value.get("status")
+        return str(value).strip().lower() not in {"0", "false", "none", "null", ""}
+
+    def fraction(values: list[dict[str, Any]]) -> float:
+        total = sum(_number(item.get("percent")) for item in values if isinstance(item, dict))
+        # Providers may encode percentages as either fractions (0.25) or
+        # percentage points (25). Normalize while failing closed on nonsense.
+        return total / 100 if 1 < total <= 100 else total
     return {
         "mint_authority_active": active("mintable"),
         "freeze_authority_active": active("freezable"),
-        "transfer_hook_active": bool(facts.get("transfer_hook")),
+        "transfer_hook_active": active("transfer_hook"),
         "non_transferable": str(facts.get("non_transferable", "1")).lower() not in {"0", "false"},
-        "top10_holder_fraction": sum(_number(item.get("percent")) for item in holders[:10]) if holders else 1.0,
-        "creator_fraction": sum(_number(item.get("percent")) for item in creators) if creators else 1.0,
+        "top10_holder_fraction": fraction(holders[:10]) if holders else 1.0,
+        "creator_fraction": fraction(creators) if creators else 1.0,
         "creator_selling": any(str(item.get("sell_all", "0")).lower() not in {"0", "false"}
                                for item in creators if isinstance(item, dict)),
     }
@@ -293,10 +342,29 @@ def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
     # a Pro credential (or vice versa).
     header = "x-cg-pro-api-key" if "pro-api.coingecko.com" in base else "x-cg-demo-api-key"
     headers = {header: key}
-    payload = json_request(f"{base}/networks/solana/new_pools?include=base_token,quote_token,dex&page=1", headers)
+    pages = max(1, min(5, int(os.getenv("SOLANA_EARLY_MARKET_PAGES", "3"))))
+    payloads: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for page in range(1, pages + 1):
+        try:
+            payloads.append(json_request(
+                f"{base}/networks/solana/new_pools?include=base_token,quote_token,dex&page={page}", headers))
+        except Exception as exc:
+            errors.append(f"page {page}: {exc}")
+    if not payloads:
+        raise RuntimeError("all CoinGecko new-pool pages failed: " + "; ".join(errors))
     now = datetime.now(UTC)
-    results: list[dict[str, Any]] = []
-    for row in payload.get("data") or []:
+    rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    seen_pools: set[str] = set()
+    for payload in payloads:
+        for row in payload.get("data") or []:
+            pool = str((row.get("attributes") or {}).get("address") or "")
+            if pool and pool not in seen_pools:
+                seen_pools.add(pool)
+                rows.append((row, payload))
+
+    def enrich(item: tuple[dict[str, Any], dict[str, Any]]) -> dict[str, Any] | None:
+        row, payload = item
         attributes = row.get("attributes") or {}
         relations = row.get("relationships") or {}
         base_token = _included(payload, relations.get("base_token") or {})
@@ -310,7 +378,7 @@ def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
             age = 9999
         # Ignore pools where SOL/USDC is the base rather than the discovered token.
         if not mint or base_token.get("symbol") in {"SOL", "WSOL", "USDC", "USDT"}:
-            continue
+            return None
         info = json_request(f"{base}/networks/solana/pools/{urllib.parse.quote(pool)}/info?include=pool", headers)
         token_info = next((item.get("attributes") or {} for item in info.get("data") or []
                            if (item.get("attributes") or {}).get("address") == mint), {})
@@ -341,7 +409,7 @@ def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
             # New Pump.fun tokens often have no Jupiter route yet. They are
             # ineligible until a real sell route exists.
             sell_ok, sell_impact = False, 9999.0
-        results.append({
+        return {
             "mint": mint, "pool": pool, "symbol": str(base_token.get("symbol") or ""),
             "price_usd": _number(attributes.get("base_token_price_usd")),
             "decimals": int(base_token.get("decimals") or 0),
@@ -357,7 +425,24 @@ def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
             "social_velocity_ratio": 0, "creator_history_score": 0,
             "buyer_wallets": ledger.recent_buyers(mint),
             "quote_symbol": str(quote_token.get("symbol") or ""), "source": "coingecko_onchain",
-        })
+        }
+
+    maximum = max(10, min(100, int(os.getenv("SOLANA_EARLY_MAX_CANDIDATES", "60"))))
+    workers = max(1, min(12, int(os.getenv("SOLANA_EARLY_ENRICH_WORKERS", "6"))))
+    results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(enrich, item) for item in rows[:maximum]]
+        for future in as_completed(futures):
+            try:
+                value = future.result()
+                if value:
+                    results.append(value)
+            except Exception:
+                # A single malformed or unavailable pool must not discard
+                # independently verified candidates from this scan.
+                continue
+    if not results:
+        raise RuntimeError("no candidate pools could be enriched")
     return results
 
 
