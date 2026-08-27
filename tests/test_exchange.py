@@ -49,6 +49,7 @@ class FillClient:
         return {"fills":[
             {"order_id":"wanted","side":"BUY","price":"1","size":"2","commission":".01","trade_time":"2026-08-27T00:01:00Z"},
             {"order_id":"other","side":"BUY","price":"1","size":"99","commission":".50","trade_time":"2026-08-27T00:02:00Z"},
+            {"order_id":"exit","side":"SELL","price":"1.1","size":"2","commission":".01","trade_time":"2026-08-27T00:03:00Z"},
         ]}
 
 class ExchangeTests(unittest.TestCase):
@@ -124,3 +125,14 @@ class ExchangeTests(unittest.TestCase):
         fills=ex.fills("AAA-USDC","2026-08-27T00:00:00+00:00","wanted")
         self.assertEqual(1,len(fills))
         self.assertEqual("wanted",fills[0]["order_id"])
+
+    def test_fills_can_reconcile_entry_and_exit_order_ids_together(self):
+        ex=Exchange.__new__(Exchange);ex.client=FillClient()
+        fills=ex.fills("AAA-USDC","2026-08-27T00:00:00+00:00",["wanted","exit"])
+        self.assertEqual(["wanted","exit"],[fill["order_id"] for fill in fills])
+        self.assertEqual(["BUY","SELL"],[fill["side"] for fill in fills])
+
+    def test_position_fills_include_bracket_exit_with_child_order_id(self):
+        ex=Exchange.__new__(Exchange);ex.client=FillClient()
+        fills=ex.position_fills("AAA-USDC","2026-08-27T00:00:00+00:00","wanted")
+        self.assertEqual(["wanted","exit"],[fill["order_id"] for fill in fills])

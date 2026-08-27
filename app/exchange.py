@@ -210,14 +210,17 @@ class Exchange:
         order_ids = [str(field(order, "order_id", "")) for order in field(response, "orders", []) if field(order, "order_id", "")]
         return {"order_ids": order_ids, "response": as_dict(self.client.cancel_orders(order_ids=order_ids)) if order_ids else {}}
 
-    def fills(self, product_id: str, opened_at: str, order_id: str = "") -> list[dict]:
+    def fills(self, product_id: str, opened_at: str, order_id: str | list[str] | tuple[str, ...] | set[str] = "") -> list[dict]:
         response = self.client.get_fills(product_ids=[product_id], limit=100)
         cutoff = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
+        tracked_order_ids = ({str(value) for value in order_id if value}
+                             if isinstance(order_id, (list, tuple, set))
+                             else ({str(order_id)} if order_id else set()))
         result = []
         for raw in field(response, "fills", []):
             data = as_dict(raw)
             fill_order_id = str(data.get("order_id", ""))
-            if order_id and fill_order_id != str(order_id):
+            if tracked_order_ids and fill_order_id not in tracked_order_ids:
                 continue
             stamp = str(data.get("trade_time") or data.get("trade_time_utc") or "")
             try:
@@ -227,6 +230,16 @@ class Exchange:
                 continue
             result.append({"order_id": fill_order_id, "side": str(data.get("side", "")).upper(), "price": float(data.get("price") or 0), "size": float(data.get("size") or 0), "commission": float(data.get("commission") or 0), "trade_time": stamp})
         return result
+
+    def position_fills(self, product_id: str, opened_at: str, entry_order_id: str) -> list[dict]:
+        """Return the tracked entry and any subsequent product exit fills.
+
+        Coinbase bracket children use order IDs different from their parent, so
+        filtering every fill by the entry ID permanently hides venue exits.
+        """
+        return [item for item in self.fills(product_id, opened_at)
+                if (item["side"] == "BUY" and item["order_id"] == str(entry_order_id))
+                or item["side"] == "SELL"]
 
     def cancel_order(self, order_id: str) -> dict:
         return as_dict(self.client.cancel_orders(order_ids=[order_id]))

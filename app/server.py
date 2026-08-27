@@ -41,6 +41,20 @@ def summarize_fills(fills):
     buy_cost=sum(f["size"]*f["price"] for f in buys)+sum(f["commission"] for f in buys);sell_value=sum(f["size"]*f["price"] for f in sells)-sum(f["commission"] for f in sells)
     return {"buy_qty":buy_qty,"sell_qty":sell_qty,"net_qty":max(0,buy_qty-sell_qty),"buy_cost_usdc":buy_cost,"sell_value_usdc":sell_value,"fees_usdc":fees,"fill_count":len(fills)}
 
+def merge_fill_summaries(*summaries):
+    result={"buy_qty":0.0,"sell_qty":0.0,"net_qty":0.0,"buy_cost_usdc":0.0,
+            "sell_value_usdc":0.0,"fees_usdc":0.0,"fill_count":0}
+    sources=[]
+    for summary in summaries:
+        if not summary:continue
+        for key in ("buy_qty","sell_qty","buy_cost_usdc","sell_value_usdc","fees_usdc"):
+            result[key]+=float(summary.get(key) or 0)
+        result["fill_count"]+=int(summary.get("fill_count") or 0)
+        if summary.get("source"):sources.append(str(summary["source"]))
+    result["net_qty"]=max(0,result["buy_qty"]-result["sell_qty"])
+    if sources:result["source"]="+".join(sources)
+    return result
+
 def cancellation_accepted(response):
     """Return true only when Coinbase positively acknowledges cancellation."""
     results=response.get("results") or response.get("cancel_orders") or []
@@ -54,15 +68,19 @@ def stale_unfilled(position):
     except (KeyError,TypeError,ValueError):
         return False
 
-def fill_from_completed_order(order):
+def fill_from_completed_order(order,side="BUY"):
     """Build a fill summary when Coinbase's bounded fill history omits it."""
     if str(order.get("status","")).upper()!="FILLED":return None
     size=float(order.get("filled_size") or order.get("filled_quantity") or 0)
     price=float(order.get("average_filled_price") or order.get("average_price") or 0)
     fees=float(order.get("total_fees") or order.get("fee") or 0)
     if size<=0 or price<=0:return None
+    side=str(side).upper()
+    if side=="SELL":
+        return {"buy_qty":0,"sell_qty":size,"net_qty":0,"buy_cost_usdc":0,
+                "sell_value_usdc":size*price-fees,"fees_usdc":fees,"fill_count":1,"source":"EXIT_ORDER_FALLBACK"}
     return {"buy_qty":size,"sell_qty":0,"net_qty":size,"buy_cost_usdc":size*price+fees,
-            "sell_value_usdc":0,"fees_usdc":fees,"fill_count":1,"source":"ORDER_FALLBACK"}
+            "sell_value_usdc":0,"fees_usdc":fees,"fill_count":1,"source":"ENTRY_ORDER_FALLBACK"}
 
 def run_preflight():
     pf=exchange().preflight();baseline=store.initialize_baseline(pf["usdc_total"]);flow=store.sync_external_flow(pf["usdc_total"])
@@ -72,12 +90,29 @@ def reconcile():
     position=store.open_position(); ex=exchange();pf=ex.preflight()
     if not position:
         flow=store.sync_external_flow(pf["usdc_total"]);controls=store.update_equity_controls(store.reconciled_equity(),source="PERMITTED_CAPITAL");return {"open_position":None,"usdc_total":pf["usdc_total"],"capital_flow":flow,"controls":controls}
-    fills=ex.fills(position["product_id"],position["opened_at"],position.get("order_id") or "");summary=summarize_fills(fills);product=ex.product(position["product_id"]);mark_value=summary["net_qty"]*product["price"]
+    exit_id=store.setting("exit_order:"+position["ticket_id"])
+    # Coinbase-managed bracket exits have their own order IDs. Restrict buys
+    # to our tracked entry, but accept product sells observed after entry.
+    fills=ex.position_fills(position["product_id"],position["opened_at"],position.get("order_id") or "")
+    summary=summarize_fills(fills);product=ex.product(position["product_id"])
     order=ex.get_order(position["order_id"]) if position.get("order_id") else {};order_status=str(order.get("status","")).upper()
     fallback=fill_from_completed_order(order) if summary["buy_qty"]<=0 else None
     if fallback:
-        summary=fallback;mark_value=summary["net_qty"]*product["price"]
-        store.event("ENTRY_FILL_RECOVERED_FROM_ORDER",{"order_id":position.get("order_id"),"fill_summary":summary},position["ticket_id"])
+        summary=merge_fill_summaries(summary,fallback)
+        recovered_key="entry_fill_recovered:"+str(position.get("order_id") or position["ticket_id"])
+        if store.setting(recovered_key)!="1":
+            store.set_setting(recovered_key,"1")
+            store.event("ENTRY_FILL_RECOVERED_FROM_ORDER",{"order_id":position.get("order_id"),"fill_summary":fallback},position["ticket_id"])
+    exit_order=ex.get_order(exit_id) if exit_id else {}
+    if exit_id and summary["sell_qty"]<=0:
+        exit_fallback=fill_from_completed_order(exit_order,"SELL")
+        if exit_fallback:
+            summary=merge_fill_summaries(summary,exit_fallback)
+            recovered_key="exit_fill_recovered:"+str(exit_id)
+            if store.setting(recovered_key)!="1":
+                store.set_setting(recovered_key,"1")
+                store.event("EXIT_FILL_RECOVERED_FROM_ORDER",{"order_id":exit_id,"fill_summary":exit_fallback},position["ticket_id"])
+    mark_value=summary["net_qty"]*product["price"]
     if summary["buy_qty"]<=0 and position.get("order_id") and stale_unfilled(position) and order_status not in {"FILLED","CANCELLED","FAILED","EXPIRED"}:
         cancel=ex.cancel_order(position["order_id"])
         store.event("STALE_ENTRY_CANCEL_REQUESTED",{"order_id":position["order_id"],"order_status":order_status,"response":str(cancel)},position["ticket_id"])
@@ -111,7 +146,11 @@ def supervise(regime="",momentum_1h_pct=None):
         exit_id=store.setting("exit_order:"+position["ticket_id"])
         if exit_id:
             exit_status=str(exchange().get_order(exit_id).get("status","")).upper()
-            if exit_status not in {"CANCELLED","FAILED","EXPIRED"}:return {"status":"AWAITING_EXIT_FILL","exit_order_id":exit_id,"exit_order_status":exit_status,"state":state}
+            if exit_status not in {"FILLED","CANCELLED","FAILED","EXPIRED"}:return {"status":"AWAITING_EXIT_FILL","exit_order_id":exit_id,"exit_order_status":exit_status,"state":state}
+            if exit_status=="FILLED":
+                # A FILLED exit must have been closed by reconcile(). If it is
+                # still open, retain the safety hold and expose the mismatch.
+                return {"status":"EXIT_FILL_RECONCILIATION_PENDING","exit_order_id":exit_id,"exit_order_status":exit_status,"state":state}
         store.update_position(position["ticket_id"],"FILLED")
     record=store.recommendation(position["ticket_id"]);ticket=record["payload"]
     mark=float(position["mark_price"]);fills=position.get("fills") or {};entry=float(fills.get("buy_cost_usdc") or 0)/float(fills.get("buy_qty") or 1) if float(fills.get("buy_qty") or 0)>0 else float(position["entry_price"]);ticket_id=position["ticket_id"]
@@ -240,9 +279,12 @@ def flatten(reason,confirmation):
     if confirmation!="CANCEL_AND_SELL_NOW":raise ValueError("flatten confirmation mismatch")
     pause(reason);position=store.open_position()
     if not position:return {"paused":True,"flattened":False,"reason":"no open position"}
-    ex=exchange();cancel=ex.cancel_order(position["order_id"]) if position.get("order_id") else {};size=ex.base_balance(position["product_id"]);sale={}
-    if size>0:sale=ex.market_sell(position["product_id"],size,"flatten-"+str(uuid.uuid4()))
-    store.event("EMERGENCY_FLATTEN_SUBMITTED",{"reason":reason,"base_size":size,"cancel_response":str(cancel),"sell_response":str(sale)},position["ticket_id"]);return {"paused":True,"flattened":bool(size>0),"base_size":size}
+    ex=exchange();cancel=ex.cancel_open_sell_orders(position["product_id"]);size=ex.available_base_balance(position["product_id"]);sale={};exit_id=""
+    if size>0:
+        sale=ex.market_sell(position["product_id"],size,"flatten-"+str(uuid.uuid4()));exit_id=order_id(sale)
+        if not exit_id:raise RuntimeError("Coinbase did not return an emergency exit order id")
+        store.set_setting("exit_order:"+position["ticket_id"],exit_id);store.update_position(position["ticket_id"],"EXIT_SUBMITTED")
+    store.event("EMERGENCY_FLATTEN_SUBMITTED",{"reason":reason,"base_size":size,"cancel_response":str(cancel),"sell_response":str(sale),"exit_order_id":exit_id},position["ticket_id"]);return {"paused":True,"flattened":bool(size>0),"base_size":size,"exit_order_id":exit_id}
 
 def rest_authorized(request):
     supplied=request.headers.get("authorization","");supplied=supplied[7:] if supplied.lower().startswith("bearer ") else supplied
