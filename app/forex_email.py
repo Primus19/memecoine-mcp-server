@@ -18,6 +18,7 @@ from .forex_report import render_forex_report
 
 
 UTC = timezone.utc
+BRYNE_STRATEGY_NAME = "Bryne and Lot-Bill Strategy"
 
 
 def _truthy(value: str | None) -> bool:
@@ -70,6 +71,8 @@ class ForexReportEmailer:
             current = (now or datetime.now(UTC)).astimezone(cls.timezone())
         kind = str(action.get("email_action") or "CLOSED").upper()
         pair = str(action.get("pair") or "FOREX").replace("_", "/")
+        if action.get("strategy_name") == BRYNE_STRATEGY_NAME:
+            return f"[TRADE] {BRYNE_STRATEGY_NAME} | NEW {kind} | {pair} | {current:%Y-%m-%d %H:%M} ET"
         return f"[TRADE] Forex {kind} - {pair} - {current:%Y-%m-%d %H:%M} ET"
 
     @staticmethod
@@ -120,10 +123,48 @@ class ForexReportEmailer:
         if value is None:
             return "Not reported"
         amount = float(value)
-        return f"{'+' if amount > 0 else ''}${amount:,.4f}"
+        if amount > 0:
+            return f"+${amount:,.4f}"
+        if amount < 0:
+            return f"-${abs(amount):,.4f}"
+        return f"${amount:,.4f}"
+
+    @classmethod
+    def _bryne_html(cls, action: dict) -> str:
+        esc = lambda value: html.escape(str(value if value not in (None, "") else "Not reported"))
+        pair = esc(action.get("pair")).replace("_", "/")
+        kind = esc(action.get("email_action")).upper()
+        closed = kind.endswith("CLOSED")
+        pnl = float(action.get("realized_pnl_usd") or 0)
+        pnl_color = "#15803d" if pnl > 0 else "#dc2626" if pnl < 0 else "#475569"
+        side = esc(action.get("side"))
+        reason = esc(action.get("entry_reason") or action.get("trigger"))
+        exit_reason = esc(action.get("exit_reason")) if closed else "Position remains open"
+        return f"""<!doctype html><html><body style="margin:0;background:#f5f3ff;font-family:Arial,sans-serif;color:#24143d">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:24px">
+<table role="presentation" width="760" cellpadding="0" cellspacing="0" style="max-width:760px;background:#fff;border-radius:18px;overflow:hidden;border:1px solid #ddd6fe">
+<tr><td style="padding:26px;background:#581c87;color:#fff"><div style="font-size:12px;letter-spacing:1.5px">BRYNE AND LOT-BILL STRATEGY</div>
+<div style="display:inline-block;background:#ef4444;color:#fff;padding:6px 11px;border-radius:999px;font-size:13px;font-weight:900;margin-top:8px">NEW ACTION</div>
+<div style="font-size:29px;font-weight:800;margin-top:8px">NEW {kind} {pair}</div>
+<div style="margin-top:8px;color:#e9d5ff">{esc(action.get('execution_time_et') or action.get('execution_time'))}</div></td></tr>
+<tr><td style="padding:22px"><div style="padding:16px;border:3px solid #f59e0b;background:#fef3c7;border-radius:10px">
+<b style="font-size:16px;color:#92400e">REASON FOR ENTRY / ACTION</b><div style="margin-top:7px;line-height:1.6;font-size:15px">{reason}</div></div>
+<h3 style="margin:22px 0 8px;color:#581c87">Latest strategy action</h3>
+<div style="overflow-x:auto"><table width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #ddd6fe;font-size:12px">
+<tr style="background:#581c87;color:#fff"><th>New</th><th>Signal UTC</th><th>Pair</th><th>Side</th><th>Status</th><th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>Reason for entry</th><th>Exit reason</th><th>P&amp;L</th></tr>
+<tr style="background:#fff7cc"><td><span style="display:inline-block;background:#ef4444;color:#fff;padding:4px 7px;border-radius:999px;font-weight:900">NEW</span></td>
+<td>{esc(action.get('signal_time'))}</td><td><b>{pair}</b></td><td>{side}</td><td><b>{'CLOSED' if closed else 'OPEN'}</b></td>
+<td>{esc(action.get('entry_price') or action.get('execution_price'))}</td><td>{esc(action.get('stop_price'))}</td><td>{esc(action.get('target_price'))}</td>
+<td>{cls._money(action.get('maximum_loss_usd'))}</td><td>{reason}</td><td>{exit_reason}</td><td style="color:{pnl_color};font-weight:800">{cls._money(action.get('realized_pnl_usd'))}</td></tr></table></div>
+<div style="margin-top:18px;padding:14px;background:#f5f3ff;border-left:5px solid #7e22ce;border-radius:8px"><b>What triggered this report</b><div style="margin-top:6px;line-height:1.5">{esc(action.get('trigger'))}</div></div>
+<div style="margin-top:18px;padding:12px;background:#faf5ff;color:#6b21a8;border-radius:8px"><b>Mode:</b> PAPER ONLY — no broker funds or live margin were used.</div>
+<div style="margin-top:20px;padding-top:14px;border-top:1px solid #ddd6fe;color:#64748b;font-size:12px">Bryne and Lot-Bill Strategy action report. The highlighted NEW row is the action that generated this email.</div>
+</td></tr></table></td></tr></table></body></html>"""
 
     @classmethod
     def _trade_html(cls, action: dict) -> str:
+        if action.get("strategy_name") == BRYNE_STRATEGY_NAME:
+            return cls._bryne_html(action)
         esc = lambda value: html.escape(str(value if value not in (None, "") else "Not reported"))
         pnl = float(action.get("realized_pnl_usd") or 0)
         pnl_color = "#16a34a" if pnl >= 0 else "#dc2626"
@@ -155,7 +196,7 @@ class ForexReportEmailer:
 <table role="presentation" width="100%" cellpadding="8" cellspacing="0" style="margin-top:16px">
 <tr><td style="background:#f8fafc"><b>What happened</b><br>{esc(action.get('action'))}</td><td style="background:#f8fafc"><b>Quantity</b><br>{esc(action.get('filled_quantity'))}</td><td style="background:#f8fafc"><b>Price</b><br>{esc(action.get('execution_price'))}</td></tr>
 <tr><td><b>This trade realized</b><br><span style="color:{pnl_color};font-size:22px;font-weight:700">{cls._money(action.get('realized_pnl_usd'))}</span></td><td><b>Today, including open positions</b><br>{cls._money(action.get('daily_pnl_usd'))}</td><td><b>Open-position P&amp;L</b><br>{cls._money(action.get('resulting_unrealized_pnl_usd'))}</td></tr>
-<tr><td><b>Total realized account P&amp;L</b><br>{cls._money(action.get('cumulative_realized_pnl_usd'))}</td><td><b>Trade status</b><br>{'CLOSED' if str(action.get('email_action'))=='CLOSED' else 'OPEN — profit/loss not final'}</td><td><b>Result</b><br>{'PROFIT' if pnl>0 else 'LOSS' if pnl<0 else 'NOT REALIZED YET'}</td></tr>
+<tr><td><b>Total realized account P&amp;L</b><br>{cls._money(action.get('cumulative_realized_pnl_usd'))}</td><td><b>Trade status</b><br>{'CLOSED' if str(action.get('email_action')).upper().endswith('CLOSED') else 'OPEN — profit/loss not final'}</td><td><b>Result</b><br>{'PROFIT' if pnl>0 else 'LOSS' if pnl<0 else 'NOT REALIZED YET'}</td></tr>
 <tr><td style="background:#f8fafc"><b>NAV</b><br>{cls._money(action.get('nav'))}</td><td style="background:#f8fafc"><b>Margin used</b><br>{cls._money(action.get('margin_used'))}</td><td style="background:#f8fafc"><b>Margin available</b><br>{cls._money(action.get('margin_available'))}</td></tr></table>
 <h3 style="margin:22px 0 8px">Position impact</h3><div style="line-height:1.55">{esc(action.get('position_impact'))}</div>
 <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px;border:1px solid #e5e7eb"><tr style="background:#172554;color:#fff"><th style="padding:8px">Pair</th><th>Units</th><th>Entry</th><th>Stop loss</th><th>Take profit</th></tr>{rows}</table>
@@ -171,7 +212,7 @@ class ForexReportEmailer:
         return {
             "subject": cls.subject(action, now),
             "text": (
-                f"Forex {action.get('email_action')} {str(action.get('pair') or '').replace('_', '/')}. "
+                f"{action.get('strategy_name') or 'Forex'} {action.get('email_action')} {str(action.get('pair') or '').replace('_', '/')}. "
                 f"Trigger: {action.get('trigger')}. Filled quantity: {action.get('filled_quantity')}; "
                 f"price: {action.get('execution_price')}; realized P&L: "
                 f"{cls._money(action.get('realized_pnl_usd'))}. Resulting unrealized P&L: "
