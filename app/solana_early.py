@@ -81,6 +81,7 @@ class PumpfunEvPolicy:
     maximum_age_minutes: float = 30.0
     assumed_loss_fraction: float = 0.50
     minimum_ev_rank: float = 0.15
+    minimum_stressed_expectancy: float = 0.0
     maximum_payoff_multiple: float = 8.0
 
     @classmethod
@@ -93,6 +94,7 @@ class PumpfunEvPolicy:
             maximum_age_minutes=float(os.getenv("SOLANA_PUMPFUN_EV_MAX_AGE_MINUTES", "30")),
             assumed_loss_fraction=clamp(float(os.getenv("SOLANA_PUMPFUN_EV_ASSUMED_LOSS", "0.50")), .10, .90),
             minimum_ev_rank=max(0.0, float(os.getenv("SOLANA_PUMPFUN_EV_MIN_EV_RANK", "0.15"))),
+            minimum_stressed_expectancy=max(0.0, float(os.getenv("SOLANA_PUMPFUN_EV_MIN_STRESSED_EXPECTANCY", "0"))),
         )
 
 
@@ -341,6 +343,11 @@ def score_pumpfun_ev_candidate(candidate: dict[str, Any], ledger: Ledger,
                             (1.0 - probability_proxy) * policy.assumed_loss_fraction)
     if ev_rank < policy.minimum_ev_rank:
         failures.append(f"EV rank {ev_rank:.4f} below {policy.minimum_ev_rank:.4f}")
+    if stressed_expectancy <= policy.minimum_stressed_expectancy:
+        failures.append(
+            f"cost-stressed expectancy {stressed_expectancy:.4f} is not above "
+            f"{policy.minimum_stressed_expectancy:.4f}"
+        )
 
     return {
         **control,
@@ -362,6 +369,13 @@ def score_pumpfun_ev_candidate(candidate: dict[str, Any], ledger: Ledger,
         "checkpoint": "5m_proxy",
         "live_eligible": False,
         "model_status": "UNCALIBRATED_PROXY_FORWARD_PAPER_ONLY",
+        "entry_reason": (
+            f"Paper-only Pump.fun EV v2 entry: market cap ${market_cap:,.0f} below "
+            f"${policy.maximum_entry_market_cap_usd:,.0f}; {trades_5m} trades in 5m; "
+            f"probability proxy {probability_proxy:.1%}; executable target return "
+            f"{win_return:.1%}; EV rank {ev_rank:.4f}; cost-stressed expectancy "
+            f"{stressed_expectancy:.4f}; Jupiter sell impact {impact_bps:.0f} bps."
+        ),
     }
 
 
