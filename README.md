@@ -57,6 +57,7 @@ until at least 50 paper observations and every live gate are present:
 ```text
 SOLANA_EXECUTOR_ENABLED=true
 SOLANA_DISCOVERY_URL=https://<discovery-service>.up.railway.app
+SOLANA_EXECUTOR_INTERVAL_SECONDS=60
 JUPITER_API_KEY=<secret>
 HELIUS_API_KEY=<secret>
 SOLANA_WALLET_PRIVATE_KEY=<base58-secret-stored-only-in-Railway>
