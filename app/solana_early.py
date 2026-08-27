@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.request
 import urllib.parse
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -18,6 +19,8 @@ from typing import Any
 UTC = timezone.utc
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 LOCK = threading.RLock()
+GOPLUS_LOCK = threading.RLock()
+GOPLUS_LAST_REQUEST = 0.0
 STATE: dict[str, Any] = {"ok": False, "scanned_at": "", "candidates": [], "error": "not scanned",
                          "feed": "", "wallet_events": 0}
 
@@ -291,8 +294,25 @@ def _included(payload: dict[str, Any], relation: dict[str, Any]) -> dict[str, An
 
 
 def goplus_safety(mint: str) -> dict[str, Any]:
+    global GOPLUS_LAST_REQUEST
     query = urllib.parse.urlencode({"contract_addresses": mint})
-    payload = json_request(f"https://api.gopluslabs.io/api/v1/solana/token_security?{query}")
+    payload = None
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with GOPLUS_LOCK:
+                spacing = max(.1, min(2.0, float(os.getenv("SOLANA_GOPLUS_REQUEST_SPACING_SECONDS", ".4"))))
+                remaining = spacing - (time.monotonic() - GOPLUS_LAST_REQUEST)
+                if remaining > 0:
+                    time.sleep(remaining)
+                payload = json_request(f"https://api.gopluslabs.io/api/v1/solana/token_security?{query}")
+                GOPLUS_LAST_REQUEST = time.monotonic()
+            break
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            time.sleep(.5 * (attempt + 1))
+    if payload is None:
+        raise RuntimeError(f"GoPlus safety unavailable after retries: {last_error}")
     values = payload.get("result") or {}
     facts = values.get(mint) or values.get(mint.lower()) or (next(iter(values.values())) if len(values) == 1 else {})
     holders = facts.get("holders") or []
@@ -303,6 +323,8 @@ def goplus_safety(mint: str) -> dict[str, Any]:
         value = facts.get(field)
         if isinstance(value, dict):
             value = value.get("status")
+        elif isinstance(value, (list, tuple, set)):
+            return bool(value)
         return str(value).strip().lower() not in {"0", "false", "none", "null", ""}
 
     def fraction(values: list[dict[str, Any]]) -> float:
@@ -319,6 +341,7 @@ def goplus_safety(mint: str) -> dict[str, Any]:
         "creator_fraction": fraction(creators) if creators else 1.0,
         "creator_selling": any(str(item.get("sell_all", "0")).lower() not in {"0", "false"}
                                for item in creators if isinstance(item, dict)),
+        "safety_evidence_status": "VERIFIED",
     }
 
 
@@ -392,7 +415,7 @@ def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
         volume15 = _number(volume.get("m15"))
         try:
             safety = goplus_safety(mint)
-        except Exception:
+        except Exception as exc:
             # Missing safety evidence must reject only this token, not stop the
             # complete discovery cycle.
             safety = {
@@ -400,6 +423,8 @@ def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
                 "transfer_hook_active": True, "non_transferable": True,
                 "top10_holder_fraction": 1.0, "creator_fraction": 1.0,
                 "creator_selling": True,
+                "safety_evidence_status": "UNAVAILABLE",
+                "safety_evidence_error": str(exc)[:180],
             }
         try:
             sell_ok, sell_impact = jupiter_sell_check(
