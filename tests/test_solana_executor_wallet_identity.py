@@ -24,7 +24,10 @@ def test_paper_exploration_is_separate_from_live_qualification():
     assert "x.paper_qualified===true" in SOURCE
     assert "x.qualified===true" in SOURCE
     assert "SOLANA_PAPER_MAX_HOLD_MINUTES" in SOURCE
-    assert "paper cost-stressed expectancy is not positive" in SOURCE
+    assert "live-strategy shadow cost-stressed expectancy is not positive" in SOURCE
+    assert "liveShadowPositions" in SOURCE
+    assert "liveShadowFills" in SOURCE
+    assert "liveShadowPromotion" in SOURCE
 
 
 def test_discovery_failure_does_not_skip_wallet_supervision():

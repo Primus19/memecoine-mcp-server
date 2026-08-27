@@ -81,7 +81,11 @@ tier so rejected live candidates can generate hypothetical outcomes without
 spending funds. Token-control checks, a real Jupiter sell route and the paper
 sell-impact ceiling remain mandatory. Paper observations never bypass the live
 candidate gates. Live readiness additionally requires positive cost-stressed
-paper expectancy after the minimum sample and soak period.
+paper expectancy after the minimum sample and soak period. The executor also
+runs every fully live-qualified candidate through a separate `liveShadow*`
+ledger using the exact live sizing, position limit and exit rules. Only that
+strict shadow ledger counts toward live promotion; relaxed exploration results
+remain visible but can never authorize real execution.
 
 ## One report-to-execution chain
 
