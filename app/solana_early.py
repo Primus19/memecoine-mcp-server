@@ -357,14 +357,15 @@ def jupiter_sell_check(mint: str, decimals: int, price_usd: float) -> tuple[bool
     return bool(payload.get("outAmount") or payload.get("outputAmount")), impact
 
 
-def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
-    key = os.environ["COINGECKO_API_KEY"]
-    base = os.getenv("COINGECKO_ONCHAIN_BASE_URL", "https://api.coingecko.com/api/v3/onchain").rstrip("/")
-    # CoinGecko Demo and Pro credentials use different hosts and header names.
-    # Select the header from the configured host so a Demo key is never sent as
-    # a Pro credential (or vice versa).
-    header = "x-cg-pro-api-key" if "pro-api.coingecko.com" in base else "x-cg-demo-api-key"
-    headers = {header: key}
+def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
+    """Discover Solana pools without consuming CoinGecko account credits.
+
+    GeckoTerminal's public API exposes the same new-pools JSON:API resource.
+    Keep this path deliberately unauthenticated: an exhausted CoinGecko key in
+    Railway must never stop paper discovery or silently consume a paid quota.
+    """
+    base = os.getenv("GECKOTERMINAL_BASE_URL", "https://api.geckoterminal.com/api/v2").rstrip("/")
+    headers = {"Accept": "application/json", "User-Agent": "primus-solana-early/1.0"}
     pages = max(1, min(5, int(os.getenv("SOLANA_EARLY_MARKET_PAGES", "3"))))
     payloads: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -375,7 +376,7 @@ def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
         except Exception as exc:
             errors.append(f"page {page}: {exc}")
     if not payloads:
-        raise RuntimeError("all CoinGecko new-pool pages failed: " + "; ".join(errors))
+        raise RuntimeError("all public GeckoTerminal new-pool pages failed: " + "; ".join(errors))
     now = datetime.now(UTC)
     rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
     seen_pools: set[str] = set()
@@ -402,13 +403,8 @@ def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
         # Ignore pools where SOL/USDC is the base rather than the discovered token.
         if not mint or base_token.get("symbol") in {"SOL", "WSOL", "USDC", "USDT"}:
             return None
-        info = json_request(f"{base}/networks/solana/pools/{urllib.parse.quote(pool)}/info?include=pool", headers)
-        token_info = next((item.get("attributes") or {} for item in info.get("data") or []
-                           if (item.get("attributes") or {}).get("address") == mint), {})
         tx = attributes.get("transactions") or {}
         volume = attributes.get("volume_usd") or {}
-        holders = token_info.get("holders") or {}
-        distribution = holders.get("distribution_percentage") or {}
         buys5, sells5 = _count(tx, "m5", "buys"), _count(tx, "m5", "sells")
         buys15, sells15 = _count(tx, "m15", "buys"), _count(tx, "m15", "sells")
         volume5 = _number(volume.get("m5"))
@@ -445,11 +441,10 @@ def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
             "sell_volume_5m_usd": volume5 * sells5 / max(buys5 + sells5, 1),
             "buy_volume_previous_5m_usd": max(0, volume15 - volume5) / 2,
             **safety,
-            "coingecko_top10_holder_fraction": _number(distribution.get("top_10"), 100) / 100,
             "sell_simulation_ok": sell_ok, "sell_price_impact_bps": sell_impact,
             "social_velocity_ratio": 0, "creator_history_score": 0,
             "buyer_wallets": ledger.recent_buyers(mint),
-            "quote_symbol": str(quote_token.get("symbol") or ""), "source": "coingecko_onchain",
+            "quote_symbol": str(quote_token.get("symbol") or ""), "source": "geckoterminal_public",
         }
 
     maximum = max(10, min(100, int(os.getenv("SOLANA_EARLY_MAX_CANDIDATES", "60"))))
@@ -474,7 +469,7 @@ def coingecko_candidates(ledger: Ledger) -> list[dict[str, Any]]:
 def fetch_candidates(ledger: Ledger) -> tuple[list[dict[str, Any]], str]:
     url = os.getenv("SOLANA_EARLY_FEED_URL", "").strip()
     if not url:
-        return coingecko_candidates(ledger), "coingecko_onchain"
+        return public_onchain_candidates(ledger), "geckoterminal_public"
     headers = {"Accept": "application/json", "User-Agent": "primus-solana-early/1.0"}
     token = os.getenv("SOLANA_EARLY_FEED_TOKEN", "")
     if token:
@@ -560,7 +555,9 @@ def main() -> None:
     policy = EarlyPolicy.from_env()
     server = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    interval = max(10, int(os.getenv("SOLANA_EARLY_SCAN_INTERVAL_SECONDS", "20")))
+    # Public GeckoTerminal allows 30 calls/minute. Three pages once a minute
+    # leaves ample headroom and prevents stale Railway settings from flooding it.
+    interval = max(60, int(os.getenv("SOLANA_EARLY_SCAN_INTERVAL_SECONDS", "60")))
     while True:
         try:
             results = []
