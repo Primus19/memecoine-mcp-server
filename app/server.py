@@ -54,6 +54,16 @@ def stale_unfilled(position):
     except (KeyError,TypeError,ValueError):
         return False
 
+def fill_from_completed_order(order):
+    """Build a fill summary when Coinbase's bounded fill history omits it."""
+    if str(order.get("status","")).upper()!="FILLED":return None
+    size=float(order.get("filled_size") or order.get("filled_quantity") or 0)
+    price=float(order.get("average_filled_price") or order.get("average_price") or 0)
+    fees=float(order.get("total_fees") or order.get("fee") or 0)
+    if size<=0 or price<=0:return None
+    return {"buy_qty":size,"sell_qty":0,"net_qty":size,"buy_cost_usdc":size*price+fees,
+            "sell_value_usdc":0,"fees_usdc":fees,"fill_count":1,"source":"ORDER_FALLBACK"}
+
 def run_preflight():
     pf=exchange().preflight();baseline=store.initialize_baseline(pf["usdc_total"]);flow=store.sync_external_flow(pf["usdc_total"])
     result={**pf,"pilot_baseline_usdc":baseline,"permitted_capital_usdc":store.permitted_capital(),"allocation_fraction":ALLOCATION_FRACTION,"capital_flow":flow};store.event("PREFLIGHT_OK",result);return result
@@ -64,7 +74,11 @@ def reconcile():
         flow=store.sync_external_flow(pf["usdc_total"]);controls=store.update_equity_controls(store.reconciled_equity(),source="PERMITTED_CAPITAL");return {"open_position":None,"usdc_total":pf["usdc_total"],"capital_flow":flow,"controls":controls}
     fills=ex.fills(position["product_id"],position["opened_at"],position.get("order_id") or "");summary=summarize_fills(fills);product=ex.product(position["product_id"]);mark_value=summary["net_qty"]*product["price"]
     order=ex.get_order(position["order_id"]) if position.get("order_id") else {};order_status=str(order.get("status","")).upper()
-    if summary["buy_qty"]<=0 and position.get("order_id") and stale_unfilled(position) and order_status not in {"CANCELLED","FAILED","EXPIRED"}:
+    fallback=fill_from_completed_order(order) if summary["buy_qty"]<=0 else None
+    if fallback:
+        summary=fallback;mark_value=summary["net_qty"]*product["price"]
+        store.event("ENTRY_FILL_RECOVERED_FROM_ORDER",{"order_id":position.get("order_id"),"fill_summary":summary},position["ticket_id"])
+    if summary["buy_qty"]<=0 and position.get("order_id") and stale_unfilled(position) and order_status not in {"FILLED","CANCELLED","FAILED","EXPIRED"}:
         cancel=ex.cancel_order(position["order_id"])
         store.event("STALE_ENTRY_CANCEL_REQUESTED",{"order_id":position["order_id"],"order_status":order_status,"response":str(cancel)},position["ticket_id"])
         if cancellation_accepted(cancel):
