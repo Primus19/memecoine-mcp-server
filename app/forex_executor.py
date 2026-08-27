@@ -60,6 +60,16 @@ def validated_snapshots(payload: dict, now: datetime | None = None) -> list[dict
 
 
 FIVE_STREAK_STRATEGY = "FOREX_FIVE_STREAK_EXPERIMENT"
+FIVE_STREAK_DISPLAY_NAME = "Bryne and Lot-Bill Strategy"
+
+
+def five_streak_position_pnl(position: dict, price: float) -> float:
+    direction = 1 if position["side"] == "BUY" else -1
+    risk_distance = abs(float(position["entry_price"]) - float(position["stop_price"]))
+    if risk_distance <= 0 or price <= 0:
+        return 0.0
+    return ((price - float(position["entry_price"])) * direction / risk_distance
+            * float(position["maximum_loss_usd"]))
 
 
 def five_streak_signals(snapshot: dict) -> list[dict]:
@@ -838,18 +848,26 @@ class Executor:
     def supervise_paper(self, snapshots: list[dict]) -> list[dict]:
         marks = {str(item.get("symbol")): float(item.get("price") or 0) for item in snapshots}
         closes = []
+        five_streak_max_hold = max(15, int(os.getenv("FOREX_FIVE_STREAK_MAX_HOLD_MINUTES", "60")))
         for position in self.ledger.paper_positions():
             price = marks.get(position["symbol"], 0)
             if price <= 0: continue
             side = position["side"]; stop = float(position["stop_price"]); target = float(position["target_price"])
             reason = "STOP" if (side == "BUY" and price <= stop) or (side == "SELL" and price >= stop) else \
                      "TARGET" if (side == "BUY" and price >= target) or (side == "SELL" and price <= target) else ""
+            if not reason and position.get("strategy") == FIVE_STREAK_STRATEGY:
+                try:
+                    opened = datetime.fromisoformat(str(position["created_at"]).replace("Z", "+00:00"))
+                    if opened.tzinfo is None:
+                        opened = opened.replace(tzinfo=UTC)
+                    if (datetime.now(UTC) - opened.astimezone(UTC)).total_seconds() >= five_streak_max_hold * 60:
+                        reason = "MAX_HOLD"
+                except (TypeError, ValueError):
+                    pass
             if reason:
                 direction = 1 if side == "BUY" else -1
                 if position.get("strategy") == FIVE_STREAK_STRATEGY:
-                    risk_distance = abs(float(position["entry_price"]) - float(position["stop_price"]))
-                    pnl = ((price - float(position["entry_price"])) * direction / risk_distance
-                           * float(position["maximum_loss_usd"]))
+                    pnl = five_streak_position_pnl(position, price)
                 else:
                     pnl = (price - float(position["entry_price"])) * float(position["quantity"]) * direction
                 self.ledger.update_intent(position["id"], "PAPER_CLOSED")
@@ -875,6 +893,9 @@ class Executor:
             except Exception as exc:
                 outcomes.append({"symbol": snapshot.get("symbol"), "status": "REJECTED", "reason": str(exc)[:300]})
                 continue
+            if not signals:
+                outcomes.append({"symbol": snapshot.get("symbol"), "status": "NO_SIGNAL",
+                                 "reason": "newest closed M5 candle has no qualifying five-candle streak"})
             for proposal in signals:
                 if self.ledger.has_intent(proposal["proposal_id"]):
                     continue
@@ -931,11 +952,19 @@ class Executor:
                   "pending_order_count": len(reconciliation["pending_orders"]),
                   "transaction_count_since_prior_scan": len(reconciliation["transactions"]),
                   "snapshots": snapshots, "outcomes": outcomes, "paper_closes": closes,
-                  "five_streak": {"mode": "PAPER_ONLY", "version": "v2", "timeframe": "M5",
+                  "five_streak": {"name": FIVE_STREAK_DISPLAY_NAME, "mode": "PAPER_ONLY",
+                                  "version": "v2", "timeframe": "M5",
                                   "enabled": five_streak_enabled(),
+                                  "maximum_hold_minutes": max(15, int(os.getenv(
+                                      "FOREX_FIVE_STREAK_MAX_HOLD_MINUTES", "60"))),
                                   "cost_model": "OANDA mid-candle signal; bid/ask entry; 1:1 bracket",
                                   "outcomes": five_streak_outcomes,
-                                  "performance": self.ledger.strategy_stats(FIVE_STREAK_STRATEGY),
+                                  "performance": {**self.ledger.strategy_stats(FIVE_STREAK_STRATEGY),
+                                      "unrealized_pnl_usd": round(sum(
+                                          five_streak_position_pnl(position, next((float(s.get("price") or 0)
+                                              for s in snapshots if s.get("symbol") == position.get("symbol")), 0))
+                                          for position in self.ledger.paper_positions()
+                                          if position.get("strategy") == FIVE_STREAK_STRATEGY), 8)},
                                   "trades": self.ledger.strategy_intents(FIVE_STREAK_STRATEGY)},
                   "intents": self.ledger.recent_intents(), "events": self.ledger.recent_events(),
                   "realized_pnl_usd": self.ledger.realized_pnl(),
