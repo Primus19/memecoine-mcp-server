@@ -145,10 +145,13 @@ class ForexReportEmailer:
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:24px">
 <table role="presentation" width="680" cellpadding="0" cellspacing="0" style="max-width:680px;background:#fff;border-radius:18px;overflow:hidden">
 <tr><td style="padding:26px;background:#172554;color:#fff"><div style="font-size:12px;letter-spacing:1.5px">FOREX TRADE ACTION</div>
-<div style="font-size:30px;font-weight:700;margin-top:7px">{esc(action.get('email_action'))} {pair}</div>
+<div style="display:inline-block;background:#dc2626;color:#fff;padding:6px 11px;border-radius:999px;font-size:13px;font-weight:900;margin-top:8px">NEW ACTION</div>
+<div style="font-size:30px;font-weight:700;margin-top:7px">NEW {esc(action.get('email_action'))} {pair}</div>
 <div style="margin-top:8px;color:#c7d2fe">{esc(action.get('execution_time_et') or action.get('execution_time'))}</div></td></tr>
 <tr><td style="padding:22px"><div style="padding:16px;border-left:5px solid #6366f1;background:#eef2ff;border-radius:8px">
 <b>Why this report was triggered</b><div style="margin-top:6px;line-height:1.5">{esc(action.get('trigger'))}</div></div>
+<div style="margin-top:12px;padding:16px;border:3px solid #f59e0b;background:#fef3c7;border-radius:8px">
+<b style="font-size:16px;color:#92400e">REASON FOR ENTRY / ACTION</b><div style="margin-top:7px;line-height:1.6;font-size:15px">{esc(action.get('entry_reason') or action.get('exit_reason') or action.get('trigger'))}</div></div>
 <table role="presentation" width="100%" cellpadding="8" cellspacing="0" style="margin-top:16px">
 <tr><td style="background:#f8fafc"><b>What happened</b><br>{esc(action.get('action'))}</td><td style="background:#f8fafc"><b>Quantity</b><br>{esc(action.get('filled_quantity'))}</td><td style="background:#f8fafc"><b>Price</b><br>{esc(action.get('execution_price'))}</td></tr>
 <tr><td><b>This trade realized</b><br><span style="color:{pnl_color};font-size:22px;font-weight:700">{cls._money(action.get('realized_pnl_usd'))}</span></td><td><b>Today, including open positions</b><br>{cls._money(action.get('daily_pnl_usd'))}</td><td><b>Open-position P&amp;L</b><br>{cls._money(action.get('resulting_unrealized_pnl_usd'))}</td></tr>
