@@ -3,7 +3,7 @@ import fs from "node:fs";
 import {Keypair,VersionedTransaction} from "@solana/web3.js";
 import bs58 from "bs58";
 const USDC="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",PATH=process.env.SOLANA_EXECUTOR_STATE_PATH||"/app/data/solana_executor.json",ACK="I_ACCEPT_THE_25_USD_SOLANA_EARLY_RISK";
-const num=(v,d=0)=>Number.isFinite(Number(v))?Number(v):d,env=(a,b="")=>process.env[a]||process.env[b]||"";
+const num=(v,d=0)=>String(v??"").trim()!==""&&Number.isFinite(Number(v))?Number(v):d,env=(a,b="")=>process.env[a]||process.env[b]||"";
 const cfg={discovery:env("SOLANA_DISCOVERY_URL").replace(/\/$/,""),jupiter:env("JUPITER_API_KEY"),helius:env("HELIUS_API_KEY"),secret:env("SOLANA_WALLET_PRIVATE_KEY"),enabled:env("SOLANA_EXECUTOR_ENABLED")==="true",live:env("SOLANA_LIVE_ENABLED")==="true"&&env("SOLANA_LIVE_ACK")===ACK,
  entry:Math.min(3,Math.max(1,num(env("SOLANA_MAX_ENTRY_USD"),3))),total:Math.min(6,Math.max(3,num(env("SOLANA_MAX_TOTAL_EXPOSURE_USD"),6))),max:Math.min(2,Math.max(1,num(env("SOLANA_MAX_POSITIONS"),2))),stop:Math.min(.25,Math.max(.08,num(env("SOLANA_STOP_LOSS_PCT"),.18))),target:Math.min(1,Math.max(.15,num(env("SOLANA_TAKE_PROFIT_PCT"),.4))),trail:Math.min(.25,Math.max(.08,num(env("SOLANA_TRAILING_STOP_PCT"),.15))),minPaper:Math.max(20,num(env("SOLANA_MIN_PAPER_OBSERVATIONS"),50)),
  paperEntry:Math.min(3,Math.max(.5,num(env("SOLANA_PAPER_ENTRY_USD"),2))),paperTotal:Math.min(25,Math.max(3,num(env("SOLANA_PAPER_TOTAL_EXPOSURE_USD"),20))),paperMax:Math.min(10,Math.max(1,num(env("SOLANA_PAPER_MAX_POSITIONS"),8))),
