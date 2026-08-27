@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app.solana_early import (EarlyPolicy, Ledger, PumpfunEvPolicy, contract_safety_failures,
@@ -157,6 +158,12 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertIn("api.geckoterminal.com/api/v2/networks/solana/new_pools", url)
         self.assertNotIn("x-cg-demo-api-key", headers)
         self.assertNotIn("/info", url)
+
+    def test_discovery_scan_is_bounded_by_default(self):
+        source = (Path(__file__).parents[1] / "app/solana_early.py").read_text()
+        self.assertIn('SOLANA_EARLY_MAX_CANDIDATES", "20"', source)
+        self.assertIn('scan_status="IN_PROGRESS"', source)
+        self.assertIn('timeout=5.0', source)
 
     def test_pumpfun_ev_is_separate_and_paper_only(self):
         result = score_pumpfun_ev_candidate(candidate(), self.ledger, self.policy, PumpfunEvPolicy())
