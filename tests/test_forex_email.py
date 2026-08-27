@@ -54,6 +54,7 @@ class ForexEmailTests(unittest.TestCase):
             "margin_used": 0,
             "margin_available": 50.25,
             "trigger": "The protective take-profit was executed.",
+            "entry_reason": "Multi Horizon BUY; score 82; trend and liquidity aligned.",
             "position_impact": "Exposure decreased by 42 units.",
             "remaining_positions": [],
             "signal_trigger": "Original signal score 82.",
@@ -203,6 +204,9 @@ class ForexEmailTests(unittest.TestCase):
 
     def test_html_explains_trigger_positions_and_profit(self):
         body = ForexReportEmailer._trade_html(self.action())
+        self.assertIn("NEW ACTION", body)
+        self.assertIn("REASON FOR ENTRY / ACTION", body)
+        self.assertIn("Multi Horizon BUY; score 82; trend and liquidity aligned.", body)
         self.assertIn("Why this report was triggered", body)
         self.assertIn("protective take-profit", body)
         self.assertIn("Position impact", body)
