@@ -1,7 +1,9 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from app.solana_early import EarlyPolicy, Ledger, safety_failures, score_candidate
+from app.solana_early import (EarlyPolicy, Ledger, contract_safety_failures,
+                              goplus_safety, safety_failures, score_candidate)
 
 
 def candidate(**changes):
@@ -41,6 +43,31 @@ class SolanaEarlyTests(unittest.TestCase):
         result = score_candidate(candidate(sell_simulation_ok=False), self.ledger, self.policy)
         self.assertFalse(result["qualified"])
         self.assertIn("sell simulation failed", result["failures"])
+        self.assertFalse(result["paper_qualified"])
+
+    def test_exploratory_paper_tier_relaxes_only_non_contract_gates(self):
+        result = score_candidate(candidate(
+            token_age_minutes=180, liquidity_usd=5000, unique_buyers_5m=20,
+            unique_buyers_previous_5m=5, buy_volume_5m_usd=10000,
+            buy_volume_previous_5m_usd=2000, sell_volume_5m_usd=1000,
+            sell_price_impact_bps=400, top10_holder_fraction=.8,
+            creator_fraction=.4, social_velocity_ratio=3, creator_history_score=3,
+        ), self.ledger, self.policy)
+        self.assertFalse(result["qualified"])
+        self.assertTrue(result["paper_qualified"])
+        self.assertEqual([], result["paper_failures"])
+
+    def test_paper_tier_never_relaxes_token_controls(self):
+        value = candidate(mint_authority_active=True, top10_holder_fraction=.8,
+                          creator_fraction=.4)
+        result = score_candidate(value, self.ledger, self.policy)
+        self.assertIn("mint_authority_active", contract_safety_failures(value))
+        self.assertFalse(result["paper_qualified"])
+
+    def test_paper_tier_never_relaxes_sellability(self):
+        result = score_candidate(candidate(sell_price_impact_bps=501), self.ledger, self.policy)
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("paper sell price impact above maximum", result["paper_failures"])
 
     def test_one_lucky_wallet_receives_no_credit(self):
         with self.ledger.db:
@@ -84,6 +111,29 @@ class SolanaEarlyTests(unittest.TestCase):
                  "quantity": 1, "quote_usdc": 1, "observed_at": "2026-08-26T12:00:00+00:00"}
         self.assertTrue(self.ledger.store_wallet_event(event))
         self.assertFalse(self.ledger.store_wallet_event(event))
+
+    @patch("app.solana_early.json_request")
+    def test_goplus_primitive_zero_flags_are_inactive(self, request):
+        request.return_value = {"result": {"mint1": {
+            "mintable": "0", "freezable": False, "transfer_hook": "",
+            "non_transferable": "0",
+            "holders": [{"percent": "2.5"}, {"percent": "7.5"}],
+            "creators": [{"percent": "5", "sell_all": "0"}],
+        }}}
+        result = goplus_safety("mint1")
+        self.assertFalse(result["mint_authority_active"])
+        self.assertFalse(result["freeze_authority_active"])
+        self.assertAlmostEqual(.10, result["top10_holder_fraction"])
+        self.assertAlmostEqual(.05, result["creator_fraction"])
+
+    @patch("app.solana_early.json_request")
+    def test_goplus_missing_authority_flags_fail_closed(self, request):
+        request.return_value = {"result": {"mint1": {
+            "holders": [{"percent": ".1"}], "creators": [{"percent": ".01"}],
+        }}}
+        result = goplus_safety("mint1")
+        self.assertTrue(result["mint_authority_active"])
+        self.assertTrue(result["freeze_authority_active"])
 
 
 if __name__ == "__main__":
