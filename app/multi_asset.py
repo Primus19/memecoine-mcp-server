@@ -339,6 +339,35 @@ class PaperLedger:
                             "proposal_id": proposal_id, "entry_price": entry, "fill_price": price,
                             "quantity": quantity, "reason": reason, "realized_pnl_usd": round(pnl, 8)})
 
+    def report(self) -> dict[str, Any]:
+        records = self.records()
+        closes = [item for item in records if item.get("type") == "PAPER_CLOSE"]
+        pnls = [float(item.get("realized_pnl_usd") or 0) for item in closes]
+        by_strategy: dict[str, dict[str, Any]] = {}
+        for item in records:
+            if item.get("type") not in {"PAPER_FILL", "PAPER_CLOSE"}:
+                continue
+            strategy = str(item.get("strategy") or "UNKNOWN")
+            bucket = by_strategy.setdefault(strategy, {"opened": 0, "closed": 0, "wins": 0,
+                                                        "losses": 0, "net_pnl_usd": 0.0})
+            if item.get("type") == "PAPER_FILL":
+                bucket["opened"] += 1
+            else:
+                pnl = float(item.get("realized_pnl_usd") or 0)
+                bucket["closed"] += 1
+                bucket["wins" if pnl > 0 else "losses"] += 1
+                bucket["net_pnl_usd"] = round(bucket["net_pnl_usd"] + pnl, 8)
+        return {
+            "paper_only": True,
+            "open_positions": self.positions(),
+            "closed": len(closes),
+            "wins": sum(value > 0 for value in pnls),
+            "losses": sum(value <= 0 for value in pnls),
+            "realized_pnl_usd": round(sum(pnls), 8),
+            "by_strategy": by_strategy,
+            "recent_closes": list(reversed(closes[-25:])),
+        }
+
 
 class MultiAssetEngine:
     def __init__(self, ledger: PaperLedger, policy: AssetPolicy | None = None) -> None:

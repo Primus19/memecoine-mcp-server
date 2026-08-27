@@ -10,6 +10,7 @@ from unittest.mock import patch
 from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServer,
                                 BrokerError, Executor, broker_client_id, closed_trade_pnl, live_armed, practice_armed, safe_quantity,
                                 five_streak_signals, recoverable_managed_trade,
+                                historical_managed_trade_outcomes,
                                 transaction_managed_intent_id, validated_snapshots)
 
 
@@ -198,6 +199,37 @@ class ForexExecutorTests(unittest.TestCase):
             self.assertAlmostEqual(-0.21, review["average_max_adverse_excursion_usd"])
             self.assertEqual("MODEL LOCKED - COLLECTING EVIDENCE", review["status"])
             self.assertFalse(review["parameters_changed"])
+
+    def test_tagged_closed_trade_history_backfills_learning_ledger(self):
+        transactions = [
+            {"id":"4", "type":"MARKET_ORDER", "time":"2026-08-24T10:00:00Z",
+             "instrument":"AUD_USD", "units":"-69",
+             "clientExtensions":{"id":"intent-closed", "tag":"primus-forex-v1"},
+             "stopLossOnFill":{"price":"0.71608"}, "takeProfitOnFill":{"price":"0.71072"}},
+            {"id":"5", "type":"ORDER_FILL", "orderID":"4", "time":"2026-08-24T10:00:01Z",
+             "instrument":"AUD_USD", "units":"-69", "price":"0.71429",
+             "tradeOpened":{"tradeID":"10", "units":"-69"}},
+            {"id":"8", "type":"ORDER_FILL", "time":"2026-08-24T11:00:00Z",
+             "tradesClosed":[{"tradeID":"10", "realizedPL":"-0.12", "financing":"0.01"}]},
+        ]
+        outcomes = historical_managed_trade_outcomes(transactions, "LIVE")
+        self.assertEqual(1, len(outcomes))
+        self.assertEqual("intent-closed", outcomes[0]["proposal_id"])
+        self.assertAlmostEqual(-.11, outcomes[0]["realized_pnl_usd"])
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(directory + "/forex.sqlite3")
+            self.assertTrue(ledger.import_closed_broker_intent(outcomes[0]))
+            self.assertFalse(ledger.import_closed_broker_intent(outcomes[0]))
+            self.assertEqual(1, ledger.model_review(80)["sample_size"])
+
+    def test_untagged_broker_history_is_not_imported(self):
+        transactions = [{"id":"4", "type":"MARKET_ORDER", "instrument":"AUD_USD", "units":"-69",
+                         "clientExtensions":{"id":"manual", "tag":"external"}},
+                        {"id":"5", "type":"ORDER_FILL", "orderID":"4", "price":"0.71429",
+                         "tradeOpened":{"tradeID":"10", "units":"-69"}},
+                        {"id":"8", "type":"ORDER_FILL",
+                         "tradesClosed":[{"tradeID":"10", "realizedPL":"2"}]}]
+        self.assertEqual([], historical_managed_trade_outcomes(transactions, "LIVE"))
 
     def test_cancelled_market_order_is_not_counted_open(self):
         with tempfile.TemporaryDirectory() as directory:

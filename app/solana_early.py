@@ -23,7 +23,7 @@ GOPLUS_LOCK = threading.RLock()
 GOPLUS_LAST_REQUEST = 0.0
 STATE: dict[str, Any] = {"ok": False, "scanned_at": "", "scan_started_at": "",
                          "scan_status": "NOT_STARTED", "candidates": [], "error": "not scanned",
-                         "feed": "", "wallet_events": 0}
+                         "feed": "", "wallet_events": 0, "strategy_diagnostics": {}}
 
 
 def utcnow() -> str:
@@ -302,7 +302,12 @@ def score_pumpfun_ev_candidate(candidate: dict[str, Any], ledger: Ledger,
     is paper-only. Jupiter's executable sell evidence remains a hard gate.
     """
     control = score_candidate(candidate, ledger, safety_policy)
-    failures = list(safety_failures(candidate, safety_policy))
+    # The experiment must preserve executable sellability and immutable-token
+    # controls, but it must not inherit the control arm's mature-token holder
+    # concentration gates. Those gates made every genuinely early Pump.fun
+    # candidate ineligible and prevented the requested forward paper test from
+    # collecting any observations at all.
+    failures = list(contract_safety_failures(candidate))
     market_cap = _number(candidate.get("market_cap_usd"))
     age = _number(candidate.get("token_age_minutes"), 9999)
     trades_5m = int(_number(candidate.get("trades_5m")))
@@ -358,6 +363,27 @@ def score_pumpfun_ev_candidate(candidate: dict[str, Any], ledger: Ledger,
         "live_eligible": False,
         "model_status": "UNCALIBRATED_PROXY_FORWARD_PAPER_ONLY",
     }
+
+
+def strategy_diagnostics(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Explain why each paper strategy did or did not produce candidates."""
+    diagnostics: dict[str, Any] = {}
+    for strategy in ("SOLANA_EARLY_CONTROL", "SOLANA_PUMPFUN_EV_EXPERIMENT"):
+        rows = [item for item in results if item.get("strategy") == strategy]
+        failure_counts: dict[str, int] = {}
+        for row in rows:
+            for reason in row.get("paper_failures") or []:
+                key = str(reason)
+                failure_counts[key] = failure_counts.get(key, 0) + 1
+        diagnostics[strategy] = {
+            "evaluated": len(rows),
+            "paper_qualified": sum(item.get("paper_qualified") is True for item in rows),
+            "top_rejections": [
+                {"reason": reason, "count": count}
+                for reason, count in sorted(failure_counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+            ],
+        }
+    return diagnostics
 
 
 def json_request(url: str, headers: dict[str, str] | None = None, timeout: float | None = None) -> Any:
@@ -647,7 +673,8 @@ class Handler(BaseHTTPRequestHandler):
                      "mode": "PAPER_ONLY", "scanned_at": value["scanned_at"], "error": value["error"],
                      "scan_started_at": value.get("scan_started_at", ""),
                      "scan_status": value.get("scan_status", "UNKNOWN"),
-                     "feed": value.get("feed", ""), "wallet_events": value.get("wallet_events", 0)}
+                     "feed": value.get("feed", ""), "wallet_events": value.get("wallet_events", 0),
+                     "strategy_diagnostics": value.get("strategy_diagnostics", {})}
         body = json.dumps(value).encode()
         self.send_response(200 if self.path == "/health" or value.get("ok", True) else 503)
         self.send_header("Content-Type", "application/json")
@@ -689,9 +716,11 @@ def main() -> None:
                 results.append(pumpfun)
             results.sort(key=lambda item: (item.get("paper_qualified", False),
                                            item.get("ev_rank", item["score"])), reverse=True)
+            diagnostics = strategy_diagnostics(results)
             with LOCK:
                 STATE.update(ok=True, scanned_at=utcnow(), scan_status="COMPLETE",
-                             candidates=results[:100], error="", feed=feed)
+                             candidates=results[:100], error="", feed=feed,
+                             strategy_diagnostics=diagnostics)
         except Exception as exc:
             with LOCK:
                 STATE.update(ok=False, scanned_at=utcnow(), scan_status="FAILED", error=str(exc)[:500])
