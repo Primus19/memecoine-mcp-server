@@ -175,11 +175,13 @@ class EvidenceAdapter:
         self.research_url = os.environ["RESEARCH_FEED_URL"].rstrip("/")
         self.feed_token = os.environ["SIGNAL_FEED_BEARER_TOKEN"]
         self.cg_base = os.getenv("COINGECKO_BASE_URL", "https://api.coingecko.com/api/v3").rstrip("/")
-        self.cg_key = os.getenv("COINGECKO_API_KEY", "")
+        self.cg_key = (os.getenv("COINGECKO_API_KEY", "")
+                       if os.getenv("COINGECKO_USE_ACCOUNT_KEY", "false").lower() == "true" else "")
         configured = [value.strip() for value in os.getenv("EVIDENCE_NEWS_RSS_URLS", "").split(",") if value.strip()]
         self.news_feeds = tuple(configured) or DEFAULT_NEWS_FEEDS
         self.pages = max(4, min(10, int(os.getenv("EVIDENCE_MARKET_PAGES", os.getenv("RESEARCH_MARKET_PAGES", "4")))))
-        self.interval = min(900, max(60, int(os.getenv("EVIDENCE_SCAN_INTERVAL_SECONDS", "300"))))
+        self.interval = min(3600, max(900, int(os.getenv("EVIDENCE_SCAN_INTERVAL_SECONDS", "900"))))
+        self.max_new_details = max(1, min(50, int(os.getenv("EVIDENCE_MAX_NEW_DETAILS_PER_SCAN", "25"))))
         self.request_spacing = max(0.5, float(os.getenv("EVIDENCE_REQUEST_SPACING_SECONDS", "2.5")))
         self.max_retries = min(5, max(1, int(os.getenv("EVIDENCE_HTTP_MAX_RETRIES", "3"))))
         self.policy = OpportunityPolicy.from_env()
@@ -296,6 +298,7 @@ class EvidenceAdapter:
         eligible = {str(item.get("product_id", "")) for item in products}
         markets = [market for page in range(1, self.pages + 1) for market in self.market_page(page)]
         symbol_counts: dict[str, int] = {}
+        new_details = 0
         for market in markets:
             symbol = str(market.get("symbol", "")).upper()
             symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
@@ -308,8 +311,16 @@ class EvidenceAdapter:
             tier = self.policy.tier(cap, volume)
             if product_id not in eligible or symbol_counts.get(symbol) != 1 or tier == "INELIGIBLE":
                 continue
+            coin_id = str(market.get("id") or "")
+            cached = self.detail_cache.get(coin_id)
+            if not cached or time.time() - cached[0] > 6 * 3600:
+                if new_details >= self.max_new_details:
+                    rejected.append({"product_id": product_id,
+                                     "source_error": "detail request budget deferred to a later scan"})
+                    continue
+                new_details += 1
             try:
-                detail = self.coin_detail(str(market["id"]))
+                detail = self.coin_detail(coin_id)
                 identity = str(detail.get("id", "")) == str(market["id"]) and str(detail.get("symbol", "")).upper() == symbol
                 clean, safety_score, safety_failures, contract = self.security(detail)
                 news_score, news_veto, news_urls = score_news(articles, name=str(detail.get("name") or market.get("name") or ""), symbol=symbol)
