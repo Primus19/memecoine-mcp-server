@@ -18,3 +18,16 @@ def test_balance_preflight_is_mainnet_native_usdc_and_fail_closed():
     assert "returned no result" in SOURCE
     assert "wallet balances stale" in SOURCE
     assert "wallet balance unavailable" in SOURCE
+
+
+def test_paper_exploration_is_separate_from_live_qualification():
+    assert "c.paper_qualified===true" in SOURCE
+    assert "c.qualified===true" in SOURCE
+    assert "SOLANA_PAPER_MAX_HOLD_MINUTES" in SOURCE
+    assert "paper cost-stressed expectancy is not positive" in SOURCE
+
+
+def test_discovery_failure_does_not_skip_wallet_supervision():
+    discovery_catch = SOURCE.index('state.discoveryError=e.message.slice(0,500)')
+    balance_check = SOURCE.index('if(wallet&&cfg.helius)try{await balances()}')
+    assert discovery_catch < balance_check
