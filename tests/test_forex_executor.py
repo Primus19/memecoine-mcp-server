@@ -50,6 +50,18 @@ class ForexExecutorTests(unittest.TestCase):
         self.assertEqual([], five_streak_signals({"symbol":"USD_JPY", "bid":100.7, "ask":100.9,
                                                   "five_streak_candles":candles}))
 
+    def test_five_streak_report_history_is_strategy_scoped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(directory + "/forex.sqlite3")
+            proposal = {"proposal_id":"five-1","expires_at":"2999-01-01T00:00:00Z",
+                        "signal_time":"2026-08-27T14:00:00Z", "symbol":"USD_JPY", "reference_price":150,
+                        "side":"BUY","quantity":1,"stop_price":149.8,"target_price":150.2,
+                        "maximum_loss_usd":.125,"strategy":"FOREX_FIVE_STREAK_EXPERIMENT"}
+            ledger.add_intent(proposal, "PAPER_ONLY", "PAPER_OPEN")
+            rows = ledger.strategy_intents("FOREX_FIVE_STREAK_EXPERIMENT")
+            self.assertEqual("2026-08-27T14:00:00Z", rows[0]["signal_time"])
+            self.assertEqual("USD_JPY", rows[0]["symbol"])
+
     def test_only_tagged_and_protected_trade_can_be_recovered_after_deploy(self):
         trade = {"id":"5", "instrument":"AUD_USD", "currentUnits":"-69", "price":"0.71429",
                  "openTime":"2026-08-24T17:57:54Z",

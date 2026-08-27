@@ -115,7 +115,7 @@ class Ledger:
             """)
             columns = {str(row[1]) for row in self.db.execute("PRAGMA table_info(intents)")}
             for name, kind in (("score", "REAL"), ("model_version", "TEXT"), ("closed_at", "TEXT"),
-                               ("strategy", "TEXT"),
+                               ("strategy", "TEXT"), ("signal_time", "TEXT"), ("close_reason", "TEXT"),
                                ("max_favorable_pnl_usd", "REAL DEFAULT 0"),
                                ("max_adverse_pnl_usd", "REAL DEFAULT 0")):
                 if name not in columns:
@@ -162,10 +162,11 @@ class Ledger:
     def add_intent(self, proposal: dict, mode: str, status: str) -> None:
         with self.db:
             self.db.execute("""INSERT INTO intents(id,created_at,expires_at,symbol,side,entry_price,quantity,stop_price,target_price,
-              maximum_loss_usd,mode,status,score,model_version,strategy) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              maximum_loss_usd,mode,status,score,model_version,strategy,signal_time) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (proposal["proposal_id"], utcnow(), proposal["expires_at"], proposal["symbol"], proposal["side"], proposal["reference_price"],
                proposal["quantity"], proposal["stop_price"], proposal["target_price"], proposal["maximum_loss_usd"], mode, status,
-               proposal.get("score"), proposal.get("model_version", FOREX_MODEL_VERSION), proposal.get("strategy", "FOREX_CONTROL")))
+               proposal.get("score"), proposal.get("model_version", FOREX_MODEL_VERSION),
+               proposal.get("strategy", "FOREX_CONTROL"), proposal.get("signal_time")))
 
     def strategy_stats(self, strategy: str) -> dict:
         rows = [dict(row) for row in self.db.execute(
@@ -176,6 +177,12 @@ class Ledger:
                 "closed": len(closed), "wins": wins, "losses": len(closed) - wins,
                 "win_rate": wins / len(closed) if closed else None, "net_pnl_usd": round(sum(closed), 8),
                 "expectancy_usd": sum(closed) / len(closed) if closed else None}
+
+    def strategy_intents(self, strategy: str, limit: int = 50) -> list[dict]:
+        return [dict(row) for row in self.db.execute(
+            "SELECT created_at,signal_time,closed_at,symbol,side,status,entry_price,stop_price,target_price,"
+            "maximum_loss_usd,realized_pnl_usd,close_reason FROM intents WHERE strategy=? "
+            "ORDER BY created_at DESC LIMIT ?", (strategy, limit)).fetchall()]
 
     def update_intent(self, intent_id: str, status: str, order_id: str = "", trade_id: str = "") -> None:
         with self.db:
@@ -758,8 +765,8 @@ class Executor:
                     pnl = (price - float(position["entry_price"])) * float(position["quantity"]) * direction
                 self.ledger.update_intent(position["id"], "PAPER_CLOSED")
                 with self.ledger.db:
-                    self.ledger.db.execute("UPDATE intents SET realized_pnl_usd=?,closed_at=? WHERE id=?",
-                                           (round(pnl, 8), utcnow(), position["id"]))
+                    self.ledger.db.execute("UPDATE intents SET realized_pnl_usd=?,closed_at=?,close_reason=? WHERE id=?",
+                                           (round(pnl, 8), utcnow(), reason, position["id"]))
                 event = {"intent_id": position["id"], "symbol": position["symbol"], "fill_price": price,
                          "reason": reason, "realized_pnl_usd": round(pnl, 8)}
                 self.ledger.event("PAPER_CLOSE", event); closes.append(event)
@@ -839,7 +846,8 @@ class Executor:
                                   "enabled": five_streak_enabled(),
                                   "cost_model": "OANDA mid-candle signal; bid/ask entry; 1:1 bracket",
                                   "outcomes": five_streak_outcomes,
-                                  "performance": self.ledger.strategy_stats(FIVE_STREAK_STRATEGY)},
+                                  "performance": self.ledger.strategy_stats(FIVE_STREAK_STRATEGY),
+                                  "trades": self.ledger.strategy_intents(FIVE_STREAK_STRATEGY)},
                   "intents": self.ledger.recent_intents(), "events": self.ledger.recent_events(),
                   "realized_pnl_usd": self.ledger.realized_pnl(),
                   "model_review": self.ledger.model_review(self.engine.policy.minimum_score),
