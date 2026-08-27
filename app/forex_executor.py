@@ -607,6 +607,56 @@ def confirmed_trade_actions(transactions: list[dict], summary: dict, open_trades
     return actions
 
 
+def five_streak_email_actions(outcomes: list[dict], closes: list[dict], intents: list[dict],
+                              summary: dict) -> list[dict]:
+    """Make Bryne and Lot-Bill paper fills first-class, idempotent email actions."""
+    by_id = {str(item.get("id") or ""): item for item in intents}
+    actions = []
+    for item in outcomes:
+        if item.get("status") != "PAPER_FILL":
+            continue
+        intent = by_id.get(str(item.get("intent_id") or ""), {})
+        side = str(item.get("side") or intent.get("side") or "")
+        reason = str(item.get("entry_reason") or intent.get("entry_reason") or
+                     "Five qualifying closed M5 candles triggered the paper entry.")
+        actions.append({
+            "action_id": f"five-streak:open:{item.get('intent_id')}",
+            "email_action": f"PAPER {side}", "action": "New Bryne and Lot-Bill paper position opened",
+            "pair": item.get("symbol"), "execution_time": item.get("signal_time"),
+            "filled_quantity": intent.get("quantity"), "execution_price": item.get("entry"),
+            "realized_pnl_usd": 0, "resulting_unrealized_pnl_usd": summary.get("unrealized_pl"),
+            "nav": summary.get("nav"), "margin_used": summary.get("margin_used"),
+            "margin_available": summary.get("margin_available"), "remaining_positions": [],
+            "trigger": reason, "entry_reason": reason, "signal_trigger": reason,
+            "position_impact": "Paper-only experiment; no broker funds or margin were used.",
+            "calendar_state": "Paper experiment; market feed calendar evidence retained.",
+            "executor_state": "PAPER ONLY", "risk_summary": "Paper risk cap and one-hour maximum hold apply.",
+            "warnings": ["Bryne and Lot-Bill Strategy is paper-only."],
+        })
+    for item in closes:
+        if item.get("strategy") != FIVE_STREAK_STRATEGY:
+            continue
+        intent = by_id.get(str(item.get("intent_id") or ""), {})
+        exit_reason = f"Paper exit: {item.get('reason')}; the position closed at {item.get('fill_price')}."
+        actions.append({
+            "action_id": f"five-streak:close:{item.get('intent_id')}:{item.get('reason')}",
+            "email_action": "PAPER CLOSED", "action": "Bryne and Lot-Bill paper position closed",
+            "pair": item.get("symbol"), "execution_time": item.get("closed_at") or utcnow(),
+            "filled_quantity": intent.get("quantity"), "execution_price": item.get("fill_price"),
+            "realized_pnl_usd": item.get("realized_pnl_usd"),
+            "resulting_unrealized_pnl_usd": summary.get("unrealized_pl"), "nav": summary.get("nav"),
+            "margin_used": summary.get("margin_used"), "margin_available": summary.get("margin_available"),
+            "remaining_positions": [], "trigger": exit_reason,
+            "entry_reason": intent.get("entry_reason") or "Historical paper entry reason was not stored.",
+            "exit_reason": exit_reason, "signal_trigger": intent.get("entry_reason"),
+            "position_impact": "Paper position closed; no broker funds or margin were used.",
+            "calendar_state": "Paper experiment", "executor_state": "PAPER ONLY",
+            "risk_summary": "Paper risk cap applied.",
+            "warnings": ["Bryne and Lot-Bill Strategy is paper-only."],
+        })
+    return actions
+
+
 class Executor:
     def __init__(self):
         self.adapter = OandaAdapter()
@@ -896,7 +946,8 @@ class Executor:
                     self.ledger.db.execute("UPDATE intents SET realized_pnl_usd=?,closed_at=?,close_reason=? WHERE id=?",
                                            (round(pnl, 8), utcnow(), reason, position["id"]))
                 event = {"intent_id": position["id"], "symbol": position["symbol"], "fill_price": price,
-                         "reason": reason, "realized_pnl_usd": round(pnl, 8)}
+                         "reason": reason, "realized_pnl_usd": round(pnl, 8),
+                         "strategy": position.get("strategy"), "closed_at": utcnow()}
                 self.ledger.event("PAPER_CLOSE", event); closes.append(event)
         return closes
 
@@ -937,6 +988,7 @@ class Executor:
                 self.ledger.event("FIVE_STREAK_PAPER_FILL", proposal)
                 outcomes.append({"symbol": proposal["symbol"], "side": proposal["side"],
                                  "status": "PAPER_FILL", "signal_time": proposal["signal_time"],
+                                 "intent_id": proposal["proposal_id"], "entry_reason": proposal["entry_reason"],
                                  "entry": proposal["reference_price"], "stop": proposal["stop_price"],
                                  "target": proposal["target_price"], "maximum_loss_usd": per_trade_risk})
         return outcomes
@@ -1016,6 +1068,8 @@ class Executor:
             reconciliation["transactions"], reconciliation["summary"],
             reconciliation["open_trades"], reconciliation["pending_orders"],
             report["risk_configuration"], snapshots, report["intents"], outcomes)
+        trade_actions.extend(five_streak_email_actions(
+            five_streak_outcomes, closes, report["intents"], reconciliation["summary"]))
         delivery = self.emailer.status()
         delivery_payload = dict(report)
         delivery_payload["_trade_actions"] = trade_actions
