@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from app.solana_early import (EarlyPolicy, Ledger, contract_safety_failures,
+from app.solana_early import (EarlyPolicy, Ledger, PumpfunEvPolicy, contract_safety_failures,
                               goplus_safety, public_onchain_candidates,
-                              safety_failures, score_candidate)
+                              safety_failures, score_candidate, score_pumpfun_ev_candidate)
 
 
 def candidate(**changes):
@@ -19,6 +19,7 @@ def candidate(**changes):
         "non_transferable": False, "creator_selling": False, "sell_simulation_ok": True,
         "top10_holder_fraction": .20, "creator_fraction": .02,
         "social_velocity_ratio": 3, "creator_history_score": 3, "buyer_wallets": [],
+        "market_cap_usd": 5000, "trades_5m": 120,
     }
     value.update(changes)
     return value
@@ -156,6 +157,34 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertIn("api.geckoterminal.com/api/v2/networks/solana/new_pools", url)
         self.assertNotIn("x-cg-demo-api-key", headers)
         self.assertNotIn("/info", url)
+
+    def test_pumpfun_ev_is_separate_and_paper_only(self):
+        result = score_pumpfun_ev_candidate(candidate(), self.ledger, self.policy, PumpfunEvPolicy())
+        self.assertEqual("SOLANA_PUMPFUN_EV_EXPERIMENT", result["strategy"])
+        self.assertFalse(result["live_eligible"])
+        self.assertFalse(result["qualified"])
+        self.assertFalse(result["probability_calibrated"])
+        self.assertEqual("5m_proxy", result["checkpoint"])
+        self.assertGreater(result["ev_rank"], 0)
+
+    def test_pumpfun_ev_requires_market_cap(self):
+        result = score_pumpfun_ev_candidate(candidate(market_cap_usd=0), self.ledger,
+                                            self.policy, PumpfunEvPolicy())
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("market cap missing", result["paper_failures"])
+
+    def test_pumpfun_ev_rejects_late_or_expensive_entry(self):
+        result = score_pumpfun_ev_candidate(candidate(market_cap_usd=20000, token_age_minutes=45),
+                                            self.ledger, self.policy, PumpfunEvPolicy())
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("above pumpfun entry market-cap ceiling", result["paper_failures"])
+        self.assertIn("outside pumpfun EV age window", result["paper_failures"])
+
+    def test_pumpfun_ev_keeps_jupiter_sellability_hard(self):
+        result = score_pumpfun_ev_candidate(candidate(sell_simulation_ok=False), self.ledger,
+                                            self.policy, PumpfunEvPolicy())
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("sell simulation failed", result["paper_failures"])
 
 
 if __name__ == "__main__":

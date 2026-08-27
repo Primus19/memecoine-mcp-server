@@ -71,6 +71,30 @@ class EarlyPolicy:
         )
 
 
+@dataclass(frozen=True)
+class PumpfunEvPolicy:
+    enabled: bool = True
+    target_market_cap_usd: float = 25_000.0
+    maximum_entry_market_cap_usd: float = 15_000.0
+    minimum_trades_5m: int = 5
+    maximum_age_minutes: float = 30.0
+    assumed_loss_fraction: float = 0.50
+    minimum_ev_rank: float = 0.15
+    maximum_payoff_multiple: float = 8.0
+
+    @classmethod
+    def from_env(cls) -> "PumpfunEvPolicy":
+        return cls(
+            enabled=os.getenv("SOLANA_PUMPFUN_EV_ENABLED", "true").lower() == "true",
+            target_market_cap_usd=float(os.getenv("SOLANA_PUMPFUN_EV_TARGET_MCAP_USD", "25000")),
+            maximum_entry_market_cap_usd=float(os.getenv("SOLANA_PUMPFUN_EV_MAX_ENTRY_MCAP_USD", "15000")),
+            minimum_trades_5m=int(os.getenv("SOLANA_PUMPFUN_EV_MIN_TRADES_5M", "5")),
+            maximum_age_minutes=float(os.getenv("SOLANA_PUMPFUN_EV_MAX_AGE_MINUTES", "30")),
+            assumed_loss_fraction=clamp(float(os.getenv("SOLANA_PUMPFUN_EV_ASSUMED_LOSS", "0.50")), .10, .90),
+            minimum_ev_rank=max(0.0, float(os.getenv("SOLANA_PUMPFUN_EV_MIN_EV_RANK", "0.15"))),
+        )
+
+
 class EarlyRejected(ValueError):
     pass
 
@@ -263,7 +287,75 @@ def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPoli
         "paper_qualified": not paper_failures,
         "paper_failures": list(dict.fromkeys(paper_failures)),
         "paper_probe_usd": policy.maximum_probe_usd if not paper_failures else 0.0,
-        "mode": "PAPER_ONLY",
+        "mode": "PAPER_ONLY", "strategy": "SOLANA_EARLY_CONTROL",
+    }
+
+
+def score_pumpfun_ev_candidate(candidate: dict[str, Any], ledger: Ledger,
+                               safety_policy: EarlyPolicy,
+                               policy: PumpfunEvPolicy) -> dict[str, Any]:
+    """Score the PumpBot idea without pretending that we have its trained model.
+
+    The shared CoinGecko feed has 5-minute aggregates, not a 15-second event tape.
+    This arm therefore uses a clearly labelled, uncalibrated probability proxy and
+    is paper-only. Jupiter's executable sell evidence remains a hard gate.
+    """
+    control = score_candidate(candidate, ledger, safety_policy)
+    failures = list(safety_failures(candidate, safety_policy))
+    market_cap = _number(candidate.get("market_cap_usd"))
+    age = _number(candidate.get("token_age_minutes"), 9999)
+    trades_5m = int(_number(candidate.get("trades_5m")))
+    impact_bps = _number(candidate.get("sell_price_impact_bps"), 9999)
+    if not policy.enabled:
+        failures.append("pumpfun EV strategy disabled")
+    if market_cap <= 0:
+        failures.append("market cap missing")
+    elif market_cap >= policy.maximum_entry_market_cap_usd:
+        failures.append("above pumpfun entry market-cap ceiling")
+    if not 0 <= age <= policy.maximum_age_minutes:
+        failures.append("outside pumpfun EV age window")
+    if trades_5m < policy.minimum_trades_5m:
+        failures.append("insufficient recent trades")
+    if impact_bps > safety_policy.maximum_price_impact_bps:
+        failures.append("sell price impact above maximum")
+
+    # This is intentionally conservative and transparent. It is a ranking
+    # proxy for forward paper collection, not a claimed calibrated probability.
+    flow_quality = clamp((control["buyer_acceleration"] - 1.0) / 3.0, 0.0, 1.0)
+    pressure_quality = clamp((control["net_buy_pressure"] - 0.05) / 0.75, 0.0, 1.0)
+    safety_quality = 1.0 if not safety_failures(candidate, safety_policy) else 0.0
+    probability_proxy = clamp(.01 + .09 * flow_quality + .07 * pressure_quality + .03 * safety_quality,
+                              .01, .20)
+    gross_multiple = policy.target_market_cap_usd / market_cap if market_cap > 0 else 0.0
+    executable_cost_fraction = .02 + impact_bps / 10_000.0
+    win_return = max(-1.0, min(policy.maximum_payoff_multiple - 1.0,
+                               gross_multiple * (1.0 - executable_cost_fraction) - 1.0))
+    ev_rank = probability_proxy * max(0.0, win_return)
+    stressed_expectancy = (probability_proxy * win_return -
+                            (1.0 - probability_proxy) * policy.assumed_loss_fraction)
+    if ev_rank < policy.minimum_ev_rank:
+        failures.append(f"EV rank {ev_rank:.4f} below {policy.minimum_ev_rank:.4f}")
+
+    return {
+        **control,
+        "strategy": "SOLANA_PUMPFUN_EV_EXPERIMENT",
+        "qualified": False,
+        "failures": ["experimental strategy is never live eligible"],
+        "paper_qualified": not failures,
+        "paper_failures": list(dict.fromkeys(failures)),
+        "paper_probe_usd": safety_policy.maximum_probe_usd if not failures else 0.0,
+        "probability_proxy": round(probability_proxy, 6),
+        "probability_calibrated": False,
+        "entry_market_cap_usd": round(market_cap, 2),
+        "target_market_cap_usd": policy.target_market_cap_usd,
+        "gross_target_multiple": round(gross_multiple, 6),
+        "executable_win_return": round(win_return, 6),
+        "ev_rank": round(ev_rank, 6),
+        "stressed_expectancy": round(stressed_expectancy, 6),
+        "assumed_loss_fraction": policy.assumed_loss_fraction,
+        "checkpoint": "5m_proxy",
+        "live_eligible": False,
+        "model_status": "UNCALIBRATED_PROXY_FORWARD_PAPER_ONLY",
     }
 
 
@@ -436,6 +528,8 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
             "decimals": int(base_token.get("decimals") or 0),
             "observed_at": utcnow(), "token_age_minutes": age,
             "liquidity_usd": _number(attributes.get("reserve_in_usd")),
+            "market_cap_usd": _number(attributes.get("market_cap_usd") or attributes.get("fdv_usd")),
+            "trades_5m": buys5 + sells5,
             "unique_buyers_5m": buys5, "unique_buyers_previous_5m": max(0, (buys15 - buys5) // 2),
             "buy_volume_5m_usd": volume5 * buys5 / max(buys5 + sells5, 1),
             "sell_volume_5m_usd": volume5 * sells5 / max(buys5 + sells5, 1),
@@ -553,6 +647,7 @@ def main() -> None:
     ledger = Ledger(os.getenv("SOLANA_EARLY_LEDGER_PATH", "/app/data/solana_early.sqlite3"))
     Handler.ledger = ledger
     policy = EarlyPolicy.from_env()
+    pumpfun_policy = PumpfunEvPolicy.from_env()
     server = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     # Public GeckoTerminal allows 30 calls/minute. Three pages once a minute
@@ -566,7 +661,13 @@ def main() -> None:
                 outcome = score_candidate(candidate, ledger, policy)
                 ledger.store_signal(candidate, outcome["score"], "QUALIFIED" if outcome["qualified"] else "REJECTED")
                 results.append(outcome)
-            results.sort(key=lambda item: item["score"], reverse=True)
+                pumpfun = score_pumpfun_ev_candidate(candidate, ledger, policy, pumpfun_policy)
+                pumpfun_payload = {**candidate, "strategy": pumpfun["strategy"], "ev_rank": pumpfun["ev_rank"]}
+                ledger.store_signal(pumpfun_payload, pumpfun["ev_rank"],
+                                    "PAPER_QUALIFIED" if pumpfun["paper_qualified"] else "REJECTED")
+                results.append(pumpfun)
+            results.sort(key=lambda item: (item.get("paper_qualified", False),
+                                           item.get("ev_rank", item["score"])), reverse=True)
             with LOCK:
                 STATE.update(ok=True, scanned_at=utcnow(), candidates=results[:100], error="", feed=feed)
         except Exception as exc:

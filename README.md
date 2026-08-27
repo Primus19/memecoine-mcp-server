@@ -46,6 +46,25 @@ Use `railway.solana-early.json` as the Railway config path. `/health` proves
 process and scan health, while `/status` and `/candidates` expose sanitized
 paper decisions.
 
+The same discovery process also emits a separate
+`SOLANA_PUMPFUN_EV_EXPERIMENT` sleeve. It reuses CoinGecko Onchain, GoPlus,
+Jupiter Swap V2, the existing ledger, executor and email path. Because the
+shared feed exposes 5-minute aggregates rather than a true 15-second tape, its
+probability is explicitly recorded as an uncalibrated proxy and the sleeve is
+hard-blocked from live execution. The executor records strategy identity on
+every paper position and fill while live execution accepts only
+`SOLANA_EARLY_CONTROL` candidates.
+
+```text
+SOLANA_PUMPFUN_EV_ENABLED=true
+SOLANA_PUMPFUN_EV_TARGET_MCAP_USD=25000
+SOLANA_PUMPFUN_EV_MAX_ENTRY_MCAP_USD=15000
+SOLANA_PUMPFUN_EV_MIN_TRADES_5M=5
+SOLANA_PUMPFUN_EV_MAX_AGE_MINUTES=30
+SOLANA_PUMPFUN_EV_ASSUMED_LOSS=0.50
+SOLANA_PUMPFUN_EV_MIN_EV_RANK=0.15
+```
+
 `services/solana-executor` is a separate signer/executor deployment using
 `Dockerfile.solana-executor` and `railway.solana-executor.json`. It consumes
 only qualified discovery records, uses Jupiter Swap V2 order/execute, persists
