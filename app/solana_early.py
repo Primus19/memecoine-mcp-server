@@ -21,7 +21,8 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 LOCK = threading.RLock()
 GOPLUS_LOCK = threading.RLock()
 GOPLUS_LAST_REQUEST = 0.0
-STATE: dict[str, Any] = {"ok": False, "scanned_at": "", "candidates": [], "error": "not scanned",
+STATE: dict[str, Any] = {"ok": False, "scanned_at": "", "scan_started_at": "",
+                         "scan_status": "NOT_STARTED", "candidates": [], "error": "not scanned",
                          "feed": "", "wallet_events": 0}
 
 
@@ -390,14 +391,17 @@ def goplus_safety(mint: str) -> dict[str, Any]:
     query = urllib.parse.urlencode({"contract_addresses": mint})
     payload = None
     last_error: Exception | None = None
-    for attempt in range(3):
+    # A missing safety response rejects this token. One bounded request keeps a
+    # complete discovery cycle from being held open by a degraded provider.
+    for attempt in range(1):
         try:
             with GOPLUS_LOCK:
                 spacing = max(.1, min(2.0, float(os.getenv("SOLANA_GOPLUS_REQUEST_SPACING_SECONDS", ".4"))))
                 remaining = spacing - (time.monotonic() - GOPLUS_LAST_REQUEST)
                 if remaining > 0:
                     time.sleep(remaining)
-                payload = json_request(f"https://api.gopluslabs.io/api/v1/solana/token_security?{query}")
+                payload = json_request(
+                    f"https://api.gopluslabs.io/api/v1/solana/token_security?{query}", timeout=5.0)
                 GOPLUS_LAST_REQUEST = time.monotonic()
             break
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
@@ -541,7 +545,7 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
             "quote_symbol": str(quote_token.get("symbol") or ""), "source": "geckoterminal_public",
         }
 
-    maximum = max(10, min(100, int(os.getenv("SOLANA_EARLY_MAX_CANDIDATES", "60"))))
+    maximum = max(10, min(100, int(os.getenv("SOLANA_EARLY_MAX_CANDIDATES", "20"))))
     workers = max(1, min(12, int(os.getenv("SOLANA_EARLY_ENRICH_WORKERS", "6"))))
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -628,6 +632,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             value = {"ok": True, "operational": value["ok"], "service": "solana-early-discovery",
                      "mode": "PAPER_ONLY", "scanned_at": value["scanned_at"], "error": value["error"],
+                     "scan_started_at": value.get("scan_started_at", ""),
+                     "scan_status": value.get("scan_status", "UNKNOWN"),
                      "feed": value.get("feed", ""), "wallet_events": value.get("wallet_events", 0)}
         body = json.dumps(value).encode()
         self.send_response(200 if self.path == "/health" or value.get("ok", True) else 503)
@@ -655,6 +661,8 @@ def main() -> None:
     interval = max(60, int(os.getenv("SOLANA_EARLY_SCAN_INTERVAL_SECONDS", "60")))
     while True:
         try:
+            with LOCK:
+                STATE.update(scan_started_at=utcnow(), scan_status="IN_PROGRESS", error="")
             results = []
             candidates, feed = fetch_candidates(ledger)
             for candidate in candidates:
@@ -669,10 +677,11 @@ def main() -> None:
             results.sort(key=lambda item: (item.get("paper_qualified", False),
                                            item.get("ev_rank", item["score"])), reverse=True)
             with LOCK:
-                STATE.update(ok=True, scanned_at=utcnow(), candidates=results[:100], error="", feed=feed)
+                STATE.update(ok=True, scanned_at=utcnow(), scan_status="COMPLETE",
+                             candidates=results[:100], error="", feed=feed)
         except Exception as exc:
             with LOCK:
-                STATE.update(ok=False, scanned_at=utcnow(), error=str(exc)[:500])
+                STATE.update(ok=False, scanned_at=utcnow(), scan_status="FAILED", error=str(exc)[:500])
         time.sleep(interval)
 
 
