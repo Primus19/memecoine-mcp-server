@@ -202,6 +202,14 @@ class ForexEngine(StrategyEngine):
             failures.append("multi-horizon agreement below 60%")
         alignment, _, side = self.alignment(snapshot)
         score = self.score(snapshot)
+        trend = float(snapshot.get("trend_strength") or 0)
+        one = float(snapshot.get("change_1h_pct") or 0)
+        if side and trend and ((side == "BUY") != (trend > 0)):
+            failures.append("proposed direction contradicts trend strength")
+        if side and one and ((side == "BUY") != (one > 0)) and abs(one) > .05:
+            failures.append("proposed direction contradicted by material 1h reversal")
+        if alignment == "MULTI_HORIZON" and float(snapshot.get("horizon_agreement") or 0) < .70:
+            failures.append("multi-horizon direction requires at least 70% agreement")
         if alignment == "CONTRADICTORY":
             failures.append("timeframes contradict trend thesis")
         if score < self.policy.minimum_score:
