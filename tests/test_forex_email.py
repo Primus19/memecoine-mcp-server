@@ -212,6 +212,23 @@ class ForexEmailTests(unittest.TestCase):
         self.assertIn("Position impact", body)
         self.assertIn("+$0.2500", body)
 
+    def test_bryne_report_has_strategy_name_and_highlighted_new_columns(self):
+        action = {**self.action(),
+                  "strategy_name": "Bryne and Lot-Bill Strategy",
+                  "email_action": "PAPER CLOSED", "side": "BUY",
+                  "signal_time": "2026-08-27T21:25:00Z", "entry_price": 1.16554,
+                  "stop_price": 1.164, "target_price": 1.16708,
+                  "maximum_loss_usd": 0.10, "realized_pnl_usd": -0.0771,
+                  "exit_reason": "Paper exit: MAX_HOLD."}
+        subject = ForexReportEmailer.subject(action)
+        body = ForexReportEmailer._trade_html(action)
+        self.assertIn("[TRADE] Bryne and Lot-Bill Strategy | NEW PAPER CLOSED", subject)
+        for label in ("BRYNE AND LOT-BILL STRATEGY", "NEW ACTION", ">New<", "Signal UTC",
+                      "Reason for entry", "Exit reason", "CLOSED"):
+            self.assertIn(label, body)
+        self.assertIn("-$0.0771", body)
+        self.assertNotIn("OPEN — profit/loss not final", body)
+
     def test_confirmed_take_profit_fill_becomes_detailed_close_action(self):
         transactions = [{
             "id": "22", "type": "ORDER_FILL", "time": "2026-08-25T13:42:00Z",
