@@ -55,6 +55,8 @@ def _entry_reason(payload: dict) -> str:
     strongest = sorted(((str(k), float(v)) for k, v in components.items()
                         if isinstance(v, (int, float))), key=lambda item: item[1], reverse=True)[:2]
     leaders = ", ".join(f"{name} {value:.1f}" for name, value in strongest)
+    if not payload:
+        return "Historical record: entry reason was not stored"
     parts = [f"Score {number(payload.get('score'))}"]
     if payload.get("market_regime") or payload.get("regime"):
         parts.append(f"regime {payload.get('market_regime') or payload.get('regime')}")
@@ -82,13 +84,15 @@ def render_meme_report(report: dict) -> str:
     alert_event = alert.get("event") or {}
     alert_payload = alert_event.get("payload") or {}
     alert_kind = str(alert.get("kind") or "")
+    alert_ticket_id = str(alert_event.get("ticket_id") or "")
     trade_pnl = alert_payload.get("realized_pnl_usdc")
     if alert_kind:
         result = ("PROFIT" if float(trade_pnl or 0) > 0 else
                   "LOSS" if float(trade_pnl or 0) < 0 else
                   "OPEN — RESULT NOT FINAL")
-        alert_html = (f'<tr><td style="padding:20px 26px;background:#eff6ff;border-bottom:1px solid #bfdbfe">'
-                      f'<div style="font-size:12px;color:#1d4ed8;font-weight:700">WHY YOU RECEIVED THIS EMAIL</div>'
+        alert_html = (f'<tr><td style="padding:20px 26px;background:#fef3c7;border:3px solid #f59e0b">'
+                      f'<div style="display:inline-block;background:#dc2626;color:#fff;padding:6px 11px;border-radius:999px;font-size:13px;font-weight:900">NEW ACTION</div>'
+                      f'<div style="font-size:12px;color:#92400e;font-weight:700;margin-top:10px">THIS ACTION TRIGGERED THE REPORT</div>'
                       f'<div style="font-size:24px;font-weight:800;margin-top:5px">{esc(alert_kind.replace("_"," "))}</div>'
                       f'<div style="margin-top:8px"><b>This trade:</b> {money(trade_pnl) if trade_pnl is not None else "Not closed yet"} &nbsp; '
                       f'<b>Result:</b> {result} &nbsp; <b>Total realized account P&amp;L:</b> {money(report.get("realized_pnl_usdc"))}</div>'
@@ -109,11 +113,14 @@ def render_meme_report(report: dict) -> str:
     rec_rows = []
     for item in recommendations[:10]:
         payload = item.get("payload") or {}
+        is_new = bool(alert_ticket_id and str(item.get("ticket_id") or payload.get("ticket_id") or "") == alert_ticket_id)
+        row_style = "background:#fef3c7;border:3px solid #f59e0b" if is_new else ""
+        new_badge = '<span style="display:inline-block;background:#dc2626;color:#fff;padding:3px 7px;border-radius:999px;font-size:11px;font-weight:900;margin-right:5px">NEW</span>' if is_new else ""
         rec_rows.append(
-            '<tr>'
+            f'<tr style="{row_style}">'
             f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{esc(item.get("created_at") or payload.get("created_at"))}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{esc(item.get("product_id") or payload.get("product_id"))}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{esc(item.get("status"))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{new_badge}{esc(item.get("status"))}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right">{esc(payload.get("score"))}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{esc(_entry_reason(payload))}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{esc(item.get("exit_reason") or "Open / not recorded")}</td>'
