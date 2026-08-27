@@ -12,7 +12,7 @@
       "currency": "USD",
       "event": "U.S. International Trade in Goods and Services, July 2026",
       "impact": "HIGH",
-      "minutes_until": 11471,
+      "minutes_until": 10235,
       "source_url": "https://www.bea.gov/news/schedule",
       "time": "2026-09-03T12:30:00+00:00"
     },
@@ -22,7 +22,7 @@
       "currency": "USD",
       "event": "Employment Situation",
       "impact": "HIGH",
-      "minutes_until": 12911,
+      "minutes_until": 11675,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-09-04T12:30:00+00:00"
     },
@@ -32,7 +32,7 @@
       "currency": "EUR",
       "event": "ECB monetary policy decision and press conference",
       "impact": "HIGH",
-      "minutes_until": 21536,
+      "minutes_until": 20300,
       "source_url": "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html",
       "time": "2026-09-10T12:15:00+00:00"
     },
@@ -42,7 +42,7 @@
       "currency": "USD",
       "event": "Producer Price Index",
       "impact": "HIGH",
-      "minutes_until": 21551,
+      "minutes_until": 20315,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-09-10T12:30:00+00:00"
     },
@@ -52,7 +52,7 @@
       "currency": "USD",
       "event": "Consumer Price Index",
       "impact": "HIGH",
-      "minutes_until": 22991,
+      "minutes_until": 21755,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-09-11T12:30:00+00:00"
     },
@@ -62,7 +62,7 @@
       "currency": "USD",
       "event": "FOMC monetary policy decision",
       "impact": "HIGH",
-      "minutes_until": 30521,
+      "minutes_until": 29285,
       "source_url": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
       "time": "2026-09-16T18:00:00+00:00"
     },
@@ -72,7 +72,7 @@
       "currency": "JPY",
       "event": "Bank of Japan monetary policy decision window",
       "impact": "HIGH",
-      "minutes_until": 31061,
+      "minutes_until": 29825,
       "source_url": "https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm",
       "time": "2026-09-17T03:00:00+00:00"
     },
@@ -82,14 +82,14 @@
       "currency": "GBP",
       "event": "Bank of England MPC decision",
       "impact": "HIGH",
-      "minutes_until": 31541,
+      "minutes_until": 30305,
       "source_url": "https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates",
       "time": "2026-09-17T11:00:00+00:00"
     }
   ],
-  "observed_at": "2026-08-26T13:18:51.496299+00:00",
+  "observed_at": "2026-08-27T09:54:31.227191+00:00",
   "provider": "official_composite",
-  "snapshot_generated_at": "2026-08-26T13:18:53.552740+00:00",
+  "snapshot_generated_at": "2026-08-27T09:54:33.475325+00:00",
   "source_url": "https://fred.stlouisfed.org/releases/calendar",
   "sources": [
     {
@@ -97,21 +97,21 @@
       "event_count": 2,
       "name": "fred_employment",
       "ok": true,
-      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=50&ve=2026-10-10&view=month&vs=2026-08-25"
+      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=50&ve=2026-10-11&view=month&vs=2026-08-26"
     },
     {
       "currency": "USD",
       "event_count": 1,
       "name": "fred_cpi",
       "ok": true,
-      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=10&ve=2026-10-10&view=month&vs=2026-08-25"
+      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=10&ve=2026-10-11&view=month&vs=2026-08-26"
     },
     {
       "currency": "USD",
       "event_count": 1,
       "name": "fred_ppi",
       "ok": true,
-      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=46&ve=2026-10-10&view=month&vs=2026-08-25"
+      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=46&ve=2026-10-11&view=month&vs=2026-08-26"
     },
     {
       "currency": "USD",
