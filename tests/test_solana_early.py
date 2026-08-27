@@ -1,9 +1,11 @@
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from app.solana_early import (EarlyPolicy, Ledger, contract_safety_failures,
-                              goplus_safety, safety_failures, score_candidate)
+                              goplus_safety, public_onchain_candidates,
+                              safety_failures, score_candidate)
 
 
 def candidate(**changes):
@@ -136,6 +138,24 @@ class SolanaEarlyTests(unittest.TestCase):
         result = goplus_safety("mint1")
         self.assertTrue(result["mint_authority_active"])
         self.assertTrue(result["freeze_authority_active"])
+
+    @patch("app.solana_early.jupiter_sell_check", return_value=(True, 10.0))
+    @patch("app.solana_early.goplus_safety", return_value={
+        "mint_authority_active": False, "freeze_authority_active": False,
+        "transfer_hook_active": False, "non_transferable": False,
+        "top10_holder_fraction": .1, "creator_fraction": .01,
+        "creator_selling": False, "safety_evidence_status": "VERIFIED",
+    })
+    @patch("app.solana_early.json_request")
+    def test_public_discovery_needs_no_key_or_per_pool_info(self, request, _safety, _sell):
+        request.return_value = {"data": [], "included": []}
+        with patch.dict(os.environ, {"SOLANA_EARLY_MARKET_PAGES": "1"}, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "no candidate pools"):
+                public_onchain_candidates(self.ledger)
+        url, headers = request.call_args.args
+        self.assertIn("api.geckoterminal.com/api/v2/networks/solana/new_pools", url)
+        self.assertNotIn("x-cg-demo-api-key", headers)
+        self.assertNotIn("/info", url)
 
 
 if __name__ == "__main__":
