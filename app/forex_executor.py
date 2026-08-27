@@ -637,7 +637,10 @@ def five_streak_email_actions(outcomes: list[dict], closes: list[dict], intents:
         if item.get("strategy") != FIVE_STREAK_STRATEGY:
             continue
         intent = by_id.get(str(item.get("intent_id") or ""), {})
-        exit_reason = f"Paper exit: {item.get('reason')}; the position closed at {item.get('fill_price')}."
+        close_price = item.get("fill_price")
+        price_detail = (f" at {close_price}" if close_price not in (None, "")
+                        else "; the historical close price was not retained")
+        exit_reason = f"Paper exit: {item.get('reason')}{price_detail}."
         actions.append({
             "action_id": f"five-streak:close:{item.get('intent_id')}:{item.get('reason')}",
             "email_action": "PAPER CLOSED", "action": "Bryne and Lot-Bill paper position closed",
