@@ -24,9 +24,17 @@ class LifecycleTests(unittest.TestCase):
         result=supervision_levels(self.ticket,entry=100,mark=110,high_water=120)
         self.assertEqual("TRAILING_STOP",result["exit_reason"])
 
-    def test_falling_regime_is_immediate_exit(self):
-        result=supervision_levels(self.ticket,entry=100,mark=105,high_water=110,regime="FALLING")
-        self.assertEqual("FALLING_REGIME",result["exit_reason"])
+    def test_single_falling_regime_observation_does_not_exit(self):
+        result=supervision_levels(self.ticket,entry=100,mark=108,high_water=110,regime="FALLING")
+        self.assertEqual("",result["exit_reason"])
+
+    def test_confirmed_falling_regime_exits_only_deteriorating_loser(self):
+        result=supervision_levels(self.ticket,entry=100,mark=97,high_water=101,regime="FALLING",falling_observations=3)
+        self.assertEqual("FALLING_REGIME_CONFIRMED",result["exit_reason"])
+
+    def test_confirmed_falling_regime_does_not_override_healthy_profit(self):
+        result=supervision_levels(self.ticket,entry=100,mark=105,high_water=106,regime="FALLING",falling_observations=3)
+        self.assertEqual("",result["exit_reason"])
 
     def test_fee_aware_break_even_protects_after_costs_clear(self):
         result=supervision_levels(self.ticket,entry=100,mark=100,high_water=104)
