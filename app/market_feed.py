@@ -18,7 +18,7 @@ STATE = {"ok": False, "scanned_at": "", "snapshots": [], "error": "not scanned"}
 SPREAD_HISTORY: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=240))
 CORE_FOREX_SYMBOLS = (
     "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD",
-    "USD_CHF", "NZD_USD", "EUR_JPY", "GBP_JPY", "EUR_GBP",
+    "USD_CHF", "NZD_USD", "EUR_JPY", "GBP_JPY", "EUR_GBP", "XAU_USD", "XAG_USD",
 )
 
 
@@ -58,11 +58,12 @@ def calendar_evidence(symbol: str) -> dict:
 
 
 def forex_snapshot(adapter: OandaAdapter, symbol: str) -> dict:
+    m5 = [c for c in adapter.candles(symbol, "M5", 15) if c.get("complete")]
     h1 = [c for c in adapter.candles(symbol, "H1", 120) if c.get("complete")]
     h4 = [c for c in adapter.candles(symbol, "H4", 90) if c.get("complete")]
     d1 = [c for c in adapter.candles(symbol, "D", 35) if c.get("complete")]
     quote = adapter.price(symbol); bids = quote.get("bids", []); asks = quote.get("asks", [])
-    if len(h1) < 100 or len(h4) < 30 or len(d1) < 20 or not bids or not asks: raise ValueError("insufficient broker market data")
+    if len(m5) < 6 or len(h1) < 100 or len(h4) < 30 or len(d1) < 20 or not bids or not asks: raise ValueError("insufficient broker market data")
     closes = [float(c["mid"]["c"]) for c in h1]
     h4_closes = [float(c["mid"]["c"]) for c in h4]
     d1_closes = [float(c["mid"]["c"]) for c in d1]
@@ -90,7 +91,11 @@ def forex_snapshot(adapter: OandaAdapter, symbol: str) -> dict:
     financing = instrument.get("financing") or {}
     # Event distance is fail-closed unless an independently normalized calendar service attests it.
     calendar = calendar_evidence(symbol); event_minutes = calendar["minutes"]
-    return {"asset_class": "FOREX", "symbol": symbol, "price": mid,
+    five_streak_candles = [{"time": str(c.get("time") or ""),
+                            "open": float(c["mid"]["o"]), "high": float(c["mid"]["h"]),
+                            "low": float(c["mid"]["l"]), "close": float(c["mid"]["c"])} for c in m5[-12:]]
+    return {"asset_class": "FOREX", "symbol": symbol, "price": mid, "bid": bid, "ask": ask,
+            "five_streak_candles": five_streak_candles,
             "spread_bps": spread_bps, "median_spread_bps": median_spread,
             "bid_liquidity": bid_liquidity, "ask_liquidity": ask_liquidity,
             "quote_age_seconds": quote_age, "tradable": quote.get("status") == "tradeable",
