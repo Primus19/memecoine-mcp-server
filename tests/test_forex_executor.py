@@ -331,6 +331,9 @@ class ForexExecutorTests(unittest.TestCase):
         intents=[{"id":"five-1","quantity":100,"entry_reason":outcomes[0]["entry_reason"]}]
         actions=five_streak_email_actions(outcomes,[],intents,{"nav":50,"unrealized_pl":0})
         self.assertEqual("PAPER BUY",actions[0]["email_action"])
+        self.assertEqual("Bryne and Lot-Bill Strategy",actions[0]["strategy_name"])
+        self.assertEqual("PAPER_OPEN",actions[0]["status"])
+        self.assertTrue(actions[0]["action_id"].startswith("five-streak:v2:open:"))
         self.assertIn("Five consecutive bullish",actions[0]["entry_reason"])
         self.assertIn("paper-only",actions[0]["warnings"][0].lower())
 
