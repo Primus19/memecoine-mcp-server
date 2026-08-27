@@ -620,9 +620,14 @@ def five_streak_email_actions(outcomes: list[dict], closes: list[dict], intents:
         reason = str(item.get("entry_reason") or intent.get("entry_reason") or
                      "Five qualifying closed M5 candles triggered the paper entry.")
         actions.append({
-            "action_id": f"five-streak:open:{item.get('intent_id')}",
+            "action_id": f"five-streak:v2:open:{item.get('intent_id')}",
+            "strategy_name": FIVE_STREAK_DISPLAY_NAME,
             "email_action": f"PAPER {side}", "action": "New Bryne and Lot-Bill paper position opened",
             "pair": item.get("symbol"), "execution_time": item.get("signal_time"),
+            "signal_time": item.get("signal_time") or intent.get("signal_time"), "side": side,
+            "status": "PAPER_OPEN", "entry_price": item.get("entry") or intent.get("entry_price"),
+            "stop_price": intent.get("stop_price"), "target_price": intent.get("target_price"),
+            "maximum_loss_usd": intent.get("maximum_loss_usd"),
             "filled_quantity": intent.get("quantity"), "execution_price": item.get("entry"),
             "realized_pnl_usd": 0, "resulting_unrealized_pnl_usd": summary.get("unrealized_pl"),
             "nav": summary.get("nav"), "margin_used": summary.get("margin_used"),
@@ -642,9 +647,14 @@ def five_streak_email_actions(outcomes: list[dict], closes: list[dict], intents:
                         else "; the historical close price was not retained")
         exit_reason = f"Paper exit: {item.get('reason')}{price_detail}."
         actions.append({
-            "action_id": f"five-streak:close:{item.get('intent_id')}:{item.get('reason')}",
+            "action_id": f"five-streak:v2:close:{item.get('intent_id')}:{item.get('reason')}",
+            "strategy_name": FIVE_STREAK_DISPLAY_NAME,
             "email_action": "PAPER CLOSED", "action": "Bryne and Lot-Bill paper position closed",
             "pair": item.get("symbol"), "execution_time": item.get("closed_at") or utcnow(),
+            "signal_time": intent.get("signal_time"), "side": intent.get("side"),
+            "status": "PAPER_CLOSED", "entry_price": intent.get("entry_price"),
+            "stop_price": intent.get("stop_price"), "target_price": intent.get("target_price"),
+            "maximum_loss_usd": intent.get("maximum_loss_usd"), "close_reason": item.get("reason"),
             "filled_quantity": intent.get("quantity"), "execution_price": item.get("fill_price"),
             "realized_pnl_usd": item.get("realized_pnl_usd"),
             "resulting_unrealized_pnl_usd": summary.get("unrealized_pl"), "nav": summary.get("nav"),
