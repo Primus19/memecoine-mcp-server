@@ -106,6 +106,20 @@ class StoreTests(unittest.TestCase):
         row=self.store.recent_recommendations()[0]
         self.assertEqual("broker rejected attached order",row["rejection_reason"])
 
+    def test_report_row_includes_payload_exit_reason_and_excursions(self):
+        payload={"ticket_id":"t-report","recommendation_hash":"h-report","model_version":"3.1","created_at":"x","expires_at":"x","product_id":"LINK-USDC","score":88}
+        self.store.issue_recommendation(payload)
+        self.store.add_position({"ticket_id":"t-report","product_id":"LINK-USDC","notional_usdc":5,"limit_price":11.5},"o-report")
+        self.store.update_position_excursions("t-report",.4)
+        self.store.update_position_excursions("t-report",-.2)
+        self.store.set_setting("exit_reason:t-report","TRAILING_STOP")
+        self.store.record_closed_trade("t-report",.1,2)
+        row=self.store.recent_recommendations()[0]
+        self.assertEqual(88,row["payload"]["score"])
+        self.assertEqual("TRAILING_STOP",row["exit_reason"])
+        self.assertAlmostEqual(.4,row["max_favorable_pnl"])
+        self.assertAlmostEqual(-.2,row["max_adverse_pnl"])
+
     def test_closed_trade_review_retains_mfe_and_mae(self):
         payload={"ticket_id":"t-excursion","recommendation_hash":"h-excursion","model_version":"3.1",
                  "created_at":"x","expires_at":"x","product_id":"TURBO-USDC","score":85}
