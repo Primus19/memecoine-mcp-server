@@ -220,6 +220,22 @@ class Ledger:
                             (realized_pnl_usd, utcnow(), trade_id))
         return cursor.rowcount == 1
 
+    def import_closed_broker_intent(self, outcome: dict) -> bool:
+        """Backfill one tagged OANDA trade that closed before this ledger saw it."""
+        with self.db:
+            cursor = self.db.execute("""INSERT OR IGNORE INTO intents(
+                id,created_at,expires_at,symbol,side,entry_price,quantity,stop_price,target_price,
+                maximum_loss_usd,mode,status,broker_order_id,broker_trade_id,realized_pnl_usd,
+                score,model_version,closed_at,strategy,close_reason)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (outcome["proposal_id"], outcome["created_at"], outcome["created_at"],
+                 outcome["symbol"], outcome["side"], outcome["entry_price"], outcome["quantity"],
+                 outcome["stop_price"], outcome["target_price"], outcome["maximum_loss_usd"],
+                 outcome["mode"], "BROKER_CLOSED", outcome["broker_order_id"],
+                 outcome["broker_trade_id"], outcome["realized_pnl_usd"], None,
+                 FOREX_MODEL_VERSION, outcome["closed_at"], "FOREX_CONTROL", "BROKER_HISTORY"))
+        return cursor.rowcount == 1
+
     def realized_pnl(self) -> float:
         row = self.db.execute("SELECT COALESCE(SUM(realized_pnl_usd),0) FROM intents WHERE realized_pnl_usd IS NOT NULL").fetchone()
         return float(row[0])
@@ -301,6 +317,49 @@ def closed_trade_pnl(transactions: list[dict]) -> dict[str, float]:
                    - abs(float(leg.get("guaranteedExecutionFee") or 0)))
             values[trade_id] = values.get(trade_id, 0.0) + net
     return values
+
+
+def historical_managed_trade_outcomes(transactions: list[dict], mode: str) -> list[dict]:
+    """Recover closed trades created by this service from OANDA history.
+
+    Only orders carrying our client-extension tag are eligible. This excludes
+    manual or unrelated account activity while repairing model/report samples
+    after restarts or earlier ledger gaps.
+    """
+    orders = {str(item.get("id") or ""): item for item in transactions
+              if str(item.get("type") or "").upper() == "MARKET_ORDER"
+              and (item.get("clientExtensions") or {}).get("tag") == "primus-forex-v1"
+              and (item.get("clientExtensions") or {}).get("id")}
+    opened: dict[str, dict] = {}
+    closed_at: dict[str, str] = {}
+    for item in transactions:
+        if str(item.get("type") or "").upper() != "ORDER_FILL":
+            continue
+        order = orders.get(str(item.get("orderID") or ""))
+        leg = item.get("tradeOpened") or {}
+        trade_id = str(leg.get("tradeID") or "")
+        if order and trade_id:
+            units = float(leg.get("units") or item.get("units") or order.get("units") or 0)
+            entry = float(item.get("price") or order.get("priceBound") or 0)
+            stop = float((order.get("stopLossOnFill") or {}).get("price") or 0)
+            target = float((order.get("takeProfitOnFill") or {}).get("price") or 0)
+            if units and entry > 0 and stop > 0 and target > 0:
+                opened[trade_id] = {
+                    "proposal_id": str((order.get("clientExtensions") or {})["id"]),
+                    "created_at": str(item.get("time") or order.get("time") or utcnow()),
+                    "symbol": str(item.get("instrument") or order.get("instrument") or ""),
+                    "side": "BUY" if units > 0 else "SELL", "entry_price": entry,
+                    "quantity": abs(units), "stop_price": stop, "target_price": target,
+                    "maximum_loss_usd": abs(entry - stop) * abs(units),
+                    "mode": mode, "broker_order_id": str(item.get("orderID") or ""),
+                    "broker_trade_id": trade_id,
+                }
+        for closed_leg in list(item.get("tradesClosed") or []) + ([item["tradeReduced"]] if item.get("tradeReduced") else []):
+            closed_at[str(closed_leg.get("tradeID") or "")] = str(item.get("time") or utcnow())
+    pnl = closed_trade_pnl(transactions)
+    return [{**value, "realized_pnl_usd": pnl[trade_id],
+             "closed_at": closed_at.get(trade_id, utcnow())}
+            for trade_id, value in opened.items() if trade_id in pnl]
 
 
 def transaction_managed_intent_id(trade_id: str, transactions: list[dict]) -> str:
@@ -614,6 +673,20 @@ class Executor:
         if len(trades) > self.max_positions():
             raise BrokerError("broker position count exceeds two-position safety ceiling")
         if live_armed(self.adapter) or practice_armed(self.adapter):
+            history_version = "tagged-closed-v1"
+            if self.ledger.setting("historical_reconciliation_version") != history_version:
+                history = self.adapter.transactions_since("1").get("transactions", [])
+                imported = []
+                mode = "LIVE" if live_armed(self.adapter) else "PRACTICE"
+                for outcome in historical_managed_trade_outcomes(history, mode):
+                    if self.ledger.import_closed_broker_intent(outcome):
+                        imported.append({"intent_id": outcome["proposal_id"],
+                                         "trade_id": outcome["broker_trade_id"],
+                                         "symbol": outcome["symbol"],
+                                         "realized_pnl_usd": outcome["realized_pnl_usd"]})
+                self.ledger.set_setting("historical_reconciliation_version", history_version)
+                self.ledger.event("BROKER_HISTORY_RECONCILED", {"imported": imported,
+                                  "tagged_closed_trade_count": len(imported)})
             broker_positions = self.ledger.broker_positions()
             expected = {str(item.get("broker_trade_id") or "") for item in broker_positions if item.get("broker_trade_id")}
             actual = {str(item.get("id") or "") for item in trades}

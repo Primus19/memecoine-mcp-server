@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from app.multi_asset import AssetPolicy, ForexEngine, MultiAssetEngine, MultiAssetRejected, PaperLedger
+from app.asset_worker import supervise
 
 
 class MultiAssetTests(unittest.TestCase):
@@ -120,6 +121,20 @@ class MultiAssetTests(unittest.TestCase):
         self.assertEqual("PAPER_CLOSE", close["type"])
         self.assertEqual([], self.ledger.positions())
         self.assertEqual(3, len(self.ledger.records()))
+
+    def test_worker_supervises_the_same_ledger_that_opens_positions(self):
+        snapshot = {**self.base("FOREX", "EUR_USD"), "change_1h_pct": .2,
+                    "change_24h_pct": .5, "trend_strength": 1,
+                    "liquidity_score": 1, "session_liquid": True,
+                    "economic_event_within_minutes": 120}
+        with patch.dict(os.environ, {"FOREX_ENGINE_ENABLED": "true"}):
+            MultiAssetEngine(self.ledger, self.policy).process(snapshot)
+        closes = supervise(self.ledger, [{"symbol":"EUR_USD", "price":1.3}])
+        self.assertEqual("TARGET", closes[0]["reason"])
+        self.assertEqual([], self.ledger.positions())
+        report = self.ledger.report()
+        self.assertEqual(1, report["closed"])
+        self.assertGreater(report["realized_pnl_usd"], 0)
 
 
 if __name__ == "__main__":

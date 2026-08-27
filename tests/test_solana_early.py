@@ -8,7 +8,8 @@ from unittest.mock import MagicMock, patch
 
 from app.solana_early import (EarlyPolicy, Ledger, PumpfunEvPolicy, contract_safety_failures,
                               goplus_safety, json_request, public_onchain_candidates,
-                              safety_failures, score_candidate, score_pumpfun_ev_candidate)
+                              safety_failures, score_candidate, score_pumpfun_ev_candidate,
+                              strategy_diagnostics)
 
 
 def candidate(**changes):
@@ -204,6 +205,26 @@ class SolanaEarlyTests(unittest.TestCase):
                                             self.policy, PumpfunEvPolicy())
         self.assertFalse(result["paper_qualified"])
         self.assertIn("sell simulation failed", result["paper_failures"])
+
+    def test_pumpfun_ev_can_collect_early_paper_data_despite_holder_concentration(self):
+        result = score_pumpfun_ev_candidate(
+            candidate(top10_holder_fraction=.90, creator_fraction=.80),
+            self.ledger, self.policy, PumpfunEvPolicy())
+        self.assertTrue(result["paper_qualified"])
+        self.assertNotIn("top-10 concentration too high", result["paper_failures"])
+        self.assertNotIn("creator concentration too high", result["paper_failures"])
+
+    def test_strategy_diagnostics_counts_rejection_reasons(self):
+        rows = [
+            {"strategy":"SOLANA_PUMPFUN_EV_EXPERIMENT", "paper_qualified":False,
+             "paper_failures":["market cap missing", "insufficient recent trades"]},
+            {"strategy":"SOLANA_PUMPFUN_EV_EXPERIMENT", "paper_qualified":False,
+             "paper_failures":["market cap missing"]},
+            {"strategy":"SOLANA_EARLY_CONTROL", "paper_qualified":True, "paper_failures":[]},
+        ]
+        report = strategy_diagnostics(rows)
+        self.assertEqual(2, report["SOLANA_PUMPFUN_EV_EXPERIMENT"]["evaluated"])
+        self.assertEqual(2, report["SOLANA_PUMPFUN_EV_EXPERIMENT"]["top_rejections"][0]["count"])
 
 
 if __name__ == "__main__":
