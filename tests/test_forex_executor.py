@@ -10,7 +10,7 @@ from unittest.mock import patch
 from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServer,
                                 BrokerError, Executor, broker_client_id, closed_trade_pnl, live_armed, practice_armed, safe_quantity,
                                 FIVE_STREAK_STRATEGY,
-                                five_streak_signals, recoverable_managed_trade,
+                                five_streak_email_actions, five_streak_signals, recoverable_managed_trade,
                                 historical_managed_trade_outcomes,
                                 transaction_managed_intent_id, validated_snapshots)
 
@@ -323,6 +323,16 @@ class ForexExecutorTests(unittest.TestCase):
         executor.engine = type("Engine", (), {"policy": type("Policy", (), {"minimum_score": 101.0})()})()
         with self.assertRaisesRegex(BrokerError, "between 0 and 100"):
             executor.scan()
+
+    def test_bryne_paper_fill_becomes_new_email_action_with_reason(self):
+        outcomes=[{"status":"PAPER_FILL","intent_id":"five-1","symbol":"EUR_USD",
+                   "side":"BUY","signal_time":"2026-08-27T21:25:00Z","entry":1.16554,
+                   "entry_reason":"Five consecutive bullish M5 candles triggered a BUY."}]
+        intents=[{"id":"five-1","quantity":100,"entry_reason":outcomes[0]["entry_reason"]}]
+        actions=five_streak_email_actions(outcomes,[],intents,{"nav":50,"unrealized_pl":0})
+        self.assertEqual("PAPER BUY",actions[0]["email_action"])
+        self.assertIn("Five consecutive bullish",actions[0]["entry_reason"])
+        self.assertIn("paper-only",actions[0]["warnings"][0].lower())
 
 
 if __name__ == "__main__": unittest.main()

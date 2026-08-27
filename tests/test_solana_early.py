@@ -214,6 +214,19 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertNotIn("top-10 concentration too high", result["paper_failures"])
         self.assertNotIn("creator concentration too high", result["paper_failures"])
 
+    def test_pumpfun_ev_requires_positive_cost_stressed_expectancy(self):
+        result = score_pumpfun_ev_candidate(
+            candidate(market_cap_usd=14000, trades_5m=5, buys_5m=3, sells_5m=2),
+            self.ledger, self.policy, PumpfunEvPolicy(minimum_ev_rank=0),
+        )
+        self.assertFalse(result["paper_qualified"])
+        self.assertTrue(any("cost-stressed expectancy" in x for x in result["paper_failures"]))
+
+    def test_pumpfun_ev_records_plain_language_entry_reason(self):
+        result = score_pumpfun_ev_candidate(candidate(), self.ledger, self.policy, PumpfunEvPolicy())
+        self.assertIn("Pump.fun EV v2 entry", result["entry_reason"])
+        self.assertIn("cost-stressed expectancy", result["entry_reason"])
+
     def test_strategy_diagnostics_counts_rejection_reasons(self):
         rows = [
             {"strategy":"SOLANA_PUMPFUN_EV_EXPERIMENT", "paper_qualified":False,

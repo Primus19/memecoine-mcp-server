@@ -45,3 +45,9 @@ def test_strategy_action_reporting_is_separate_and_trade_triggered():
     assert '"/report"' in SOURCE
     assert 'if(!hasTradeEvent||emailBlockers().length)return false' in SOURCE
     assert 'mode:"TRADE_EVENTS_ONLY"' in SOURCE
+    assert "NEW ACTION" in SOURCE
+    assert "REASON FOR ENTRY / ACTION" in SOURCE
+    assert "Reason for entry / action" in SOURCE
+    assert "DIVINE_V2" in SOURCE
+    assert "TRAILING_PROFIT" in SOURCE
+    assert "Divine V2 forward sample" in SOURCE
