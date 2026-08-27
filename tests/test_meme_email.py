@@ -91,6 +91,16 @@ class MemeEmailTests(unittest.TestCase):
         self.assertIn("bad &lt;script&gt;alert(1)&lt;/script&gt;", body)
         self.assertNotIn("bad <script>", body)
 
+    def test_triggering_trade_is_marked_new_and_reason_is_visible(self):
+        body=render_meme_report({"mode":"LIVE_ARMED","paused":False,
+            "portfolio":{"open_position":None,"controls":{}},
+            "_meme_alert":{"kind":"ENTRY_FILLED","event":{"ticket_id":"t-new","payload":{}}},
+            "recommendations":[{"ticket_id":"t-new","product_id":"LINK-USDC","status":"FILLED",
+                "payload":{"ticket_id":"t-new","score":88,"regime":"RISING","component_scores":{"momentum":14}}}]})
+        self.assertIn("NEW ACTION",body)
+        self.assertIn(">NEW</span>",body)
+        self.assertIn("Score 88.00; regime RISING; strongest evidence: momentum 14.0",body)
+
     def test_forex_gmail_configuration_is_reused_when_meme_values_are_absent(self):
         forex_env = {
             "FOREX_EMAIL_REPORT_ENABLED": "true",
