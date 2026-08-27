@@ -225,11 +225,11 @@ class Ledger:
         return [dict(row) for row in self.db.execute(
             "SELECT seq,recorded_at,type,record_hash FROM events ORDER BY seq DESC LIMIT ?", (limit,)).fetchall()]
 
-    def close_broker_intent(self, trade_id: str, realized_pnl_usd: float | None) -> bool:
+    def close_broker_intent(self, trade_id: str, realized_pnl_usd: float | None, close_reason: str = "BROKER_CLOSE") -> bool:
         with self.db:
-            cursor = self.db.execute("""UPDATE intents SET status='BROKER_CLOSED', realized_pnl_usd=?, closed_at=?
+            cursor = self.db.execute("""UPDATE intents SET status='BROKER_CLOSED', realized_pnl_usd=?, closed_at=?,close_reason=?
                               WHERE broker_trade_id=? AND status='OPEN'""",
-                            (realized_pnl_usd, utcnow(), trade_id))
+                            (realized_pnl_usd, utcnow(), close_reason, trade_id))
         return cursor.rowcount == 1
 
     def import_closed_broker_intent(self, outcome: dict) -> bool:
@@ -311,9 +311,9 @@ class Ledger:
         return review
 
 
-def closed_trade_pnl(transactions: list[dict]) -> dict[str, float]:
+def closed_trade_details(transactions: list[dict]) -> dict[str, dict]:
     """Return OANDA trade IDs closed/reduced by recent fill transactions."""
-    values: dict[str, float] = {}
+    values: dict[str, dict] = {}
     for transaction in transactions:
         if str(transaction.get("type", "")).upper() != "ORDER_FILL":
             continue
@@ -327,8 +327,15 @@ def closed_trade_pnl(transactions: list[dict]) -> dict[str, float]:
             net = (float(leg.get("realizedPL") or 0) + float(leg.get("financing") or 0)
                    + float(leg.get("dividendAdjustment") or 0)
                    - abs(float(leg.get("guaranteedExecutionFee") or 0)))
-            values[trade_id] = values.get(trade_id, 0.0) + net
+            detail = values.get(trade_id, {"pnl": 0.0, "reason": ""})
+            detail["pnl"] += net
+            detail["reason"] = str(transaction.get("reason") or transaction.get("type") or "BROKER_CLOSE")
+            values[trade_id] = detail
     return values
+
+
+def closed_trade_pnl(transactions: list[dict]) -> dict[str, float]:
+    return {trade_id: float(detail["pnl"]) for trade_id, detail in closed_trade_details(transactions).items()}
 
 
 def historical_managed_trade_outcomes(transactions: list[dict], mode: str) -> list[dict]:
@@ -724,7 +731,8 @@ class Executor:
             broker_positions = self.ledger.broker_positions()
             if unexpected: raise BrokerError("unexpected broker trade detected; entries paused")
             self.ledger.update_excursions(trades)
-            pnl_by_trade = closed_trade_pnl(transactions)
+            close_details = closed_trade_details(transactions)
+            pnl_by_trade = {trade_id: float(detail["pnl"]) for trade_id,detail in close_details.items()}
             for position in broker_positions:
                 trade_id = str(position.get("broker_trade_id") or "")
                 if trade_id and trade_id not in actual:
@@ -733,9 +741,10 @@ class Executor:
                         closed = self.adapter.trade(trade_id).get("trade", {})
                         pnl = (float(closed.get("realizedPL") or 0) + float(closed.get("financing") or 0)
                                + float(closed.get("dividendAdjustment") or 0))
-                    if self.ledger.close_broker_intent(trade_id, pnl):
+                    close_reason=str((close_details.get(trade_id) or {}).get("reason") or "BROKER_HISTORY_LOOKUP")
+                    if self.ledger.close_broker_intent(trade_id, pnl, close_reason):
                         self.ledger.event("BROKER_TRADE_CLOSED", {"intent_id": position["id"],
-                                          "trade_id": trade_id, "realized_pnl_usd": pnl})
+                                          "trade_id": trade_id, "realized_pnl_usd": pnl,"close_reason":close_reason})
             for trade in trades:
                 if not trade.get("stopLossOrder") or not trade.get("takeProfitOrder"):
                     trade_id = str(trade.get("id") or "")
