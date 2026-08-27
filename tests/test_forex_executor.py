@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServer,
                                 BrokerError, Executor, closed_trade_pnl, live_armed, practice_armed, safe_quantity,
-                                recoverable_managed_trade, transaction_managed_intent_id, validated_snapshots)
+                                five_streak_signals, recoverable_managed_trade,
+                                transaction_managed_intent_id, validated_snapshots)
 
 
 class Adapter:
@@ -28,6 +29,27 @@ class Adapter:
 
 
 class ForexExecutorTests(unittest.TestCase):
+    def test_five_streak_uses_progress_closed_m5_and_fires_each_extended_candle(self):
+        candles = []
+        for index, close in enumerate((100.0, 100.4, 100.8, 101.2, 101.6, 102.0, 102.4)):
+            opened = close - .3 if index else 99.8
+            candles.append({"time": f"t{index}", "open": opened, "high": close + .1,
+                            "low": opened - .1, "close": close})
+        signals = five_streak_signals({"symbol":"USD_JPY", "bid":102.35, "ask":102.45,
+                                       "five_streak_candles":candles})
+        self.assertEqual(1, len(signals))
+        self.assertEqual("t6", signals[0]["signal_time"])
+        self.assertTrue(all(item["side"] == "BUY" for item in signals))
+        self.assertAlmostEqual(signals[0]["reference_price"] - signals[0]["stop_price"],
+                               signals[0]["target_price"] - signals[0]["reference_price"])
+
+    def test_five_streak_neutral_candle_resets_progress(self):
+        candles = [{"time":"t0","open":100,"high":101,"low":99,"close":100.4},
+                   {"time":"t1","open":100.4,"high":101,"low":100,"close":100.8},
+                   {"time":"t2","open":100.8,"high":101,"low":100,"close":100.8}]
+        self.assertEqual([], five_streak_signals({"symbol":"USD_JPY", "bid":100.7, "ask":100.9,
+                                                  "five_streak_candles":candles}))
+
     def test_only_tagged_and_protected_trade_can_be_recovered_after_deploy(self):
         trade = {"id":"5", "instrument":"AUD_USD", "currentUnits":"-69", "price":"0.71429",
                  "openTime":"2026-08-24T17:57:54Z",
