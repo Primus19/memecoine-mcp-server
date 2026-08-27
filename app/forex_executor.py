@@ -555,6 +555,7 @@ def confirmed_trade_actions(transactions: list[dict], summary: dict, open_trades
                 "filled_quantity": abs(units),
                 "execution_price": opened.get("price") or tx.get("price") or intent.get("entry_price"),
                 "realized_pnl_usd": float(tx.get("pl") or 0),
+                "entry_reason": intent.get("entry_reason") or action["signal_trigger"],
                 "trigger": (
                     f"A broker-confirmed {side} fill opened a new {action['pair'].replace('_', '/')} "
                     f"position. The order passed the strategy score, liquidity, spread, session, "
@@ -593,6 +594,8 @@ def confirmed_trade_actions(transactions: list[dict], summary: dict, open_trades
                 "filled_quantity": units,
                 "execution_price": item.get("price") or tx.get("price"),
                 "realized_pnl_usd": realized,
+                "entry_reason": intent.get("entry_reason") or "Historical broker trade: the original entry rationale was not stored.",
+                "exit_reason": trigger,
                 "trigger": trigger,
                 "position_impact": (
                     f"Exposure decreased by {units:g} units. Realized result from this fill was "
