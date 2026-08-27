@@ -10,8 +10,10 @@ from app.market_feed import calendar_evidence, configured_symbols, scan_symbols
 class MarketFeedCalendarTests(unittest.TestCase):
     def test_legacy_symbol_override_retains_expanded_liquid_core(self):
         symbols = configured_symbols("EUR_USD,GBP_USD,USD_JPY")
-        self.assertEqual(10, len(symbols))
+        self.assertEqual(12, len(symbols))
         self.assertIn("USD_CHF", symbols)
+        self.assertIn("XAU_USD", symbols)
+        self.assertIn("XAG_USD", symbols)
         self.assertIn("EUR_GBP", symbols)
 
     def test_scan_fails_closed_when_every_symbol_is_rejected(self):
