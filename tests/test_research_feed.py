@@ -194,6 +194,15 @@ class ResearchFeedTests(unittest.TestCase):
         self.assertEqual(2, request.call_count)
         sleep.assert_called_once()
 
+    def test_account_key_is_disabled_by_default_and_polling_is_bounded(self):
+        with patch.dict(os.environ, {
+            "COINGECKO_API_KEY": "exhausted", "COINGECKO_USE_ACCOUNT_KEY": "false",
+            "RESEARCH_SCAN_INTERVAL_SECONDS": "30",
+        }, clear=False):
+            feed = self.make_feed()
+        self.assertEqual("", feed.cg_key)
+        self.assertEqual(300, feed.interval)
+
     def test_market_discovery_is_not_limited_to_meme_category(self):
         feed = self.make_feed()
         with patch.object(feed, "fetch", return_value=[]) as fetch:
