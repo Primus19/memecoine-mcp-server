@@ -21,7 +21,8 @@ class ForexReportTests(unittest.TestCase):
                 "maximum_notional_usd":50,"maximum_margin_used_usd":5,"currency_overlap_guard":True},
         })
         self.assertIn("Production Forex Dashboard", body)
-        self.assertIn("Five-Streak challenger", body)
+        self.assertIn("Five-Streak paper experiment", body)
+        self.assertIn("Bryne and Lot-Bill Strategy", body)
         self.assertIn("Signal UTC", body)
         self.assertIn("Market and calendar", body)
         self.assertIn("Auditable positions and intents", body)

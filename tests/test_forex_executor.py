@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServer,
                                 BrokerError, Executor, broker_client_id, closed_trade_pnl, live_armed, practice_armed, safe_quantity,
+                                FIVE_STREAK_STRATEGY,
                                 five_streak_signals, recoverable_managed_trade,
                                 historical_managed_trade_outcomes,
                                 transaction_managed_intent_id, validated_snapshots)
@@ -62,6 +63,24 @@ class ForexExecutorTests(unittest.TestCase):
             rows = ledger.strategy_intents("FOREX_FIVE_STREAK_EXPERIMENT")
             self.assertEqual("2026-08-27T14:00:00Z", rows[0]["signal_time"])
             self.assertEqual("USD_JPY", rows[0]["symbol"])
+
+    def test_five_streak_max_hold_closes_and_records_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(directory + "/forex.sqlite3")
+            proposal = {"proposal_id":"five-old","expires_at":"2020-01-01T00:00:00Z",
+                        "signal_time":"2020-01-01T00:00:00Z", "symbol":"EUR_USD",
+                        "reference_price":1.1000,"side":"BUY","quantity":1,
+                        "stop_price":1.0990,"target_price":1.1010,"maximum_loss_usd":.125,
+                        "strategy":FIVE_STREAK_STRATEGY}
+            ledger.add_intent(proposal, "PAPER_ONLY", "PAPER_OPEN")
+            with ledger.db:
+                ledger.db.execute("UPDATE intents SET created_at=? WHERE id=?",
+                                  ("2020-01-01T00:00:00+00:00", "five-old"))
+            executor = object.__new__(Executor)
+            executor.ledger = ledger
+            closes = executor.supervise_paper([{"symbol":"EUR_USD","price":1.1005}])
+            self.assertEqual("MAX_HOLD", closes[0]["reason"])
+            self.assertGreater(closes[0]["realized_pnl_usd"], 0)
 
     def test_only_tagged_and_protected_trade_can_be_recovered_after_deploy(self):
         trade = {"id":"5", "instrument":"AUD_USD", "currentUnits":"-69", "price":"0.71429",

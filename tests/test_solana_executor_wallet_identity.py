@@ -39,6 +39,7 @@ def test_discovery_failure_does_not_skip_wallet_supervision():
 def test_strategy_action_reporting_is_separate_and_trade_triggered():
     assert 'strategyStats("SOLANA_EARLY_CONTROL")' in SOURCE
     assert 'strategyStats("SOLANA_PUMPFUN_EV_EXPERIMENT")' in SOURCE
+    assert 'Divine Strategy (Pump.fun EV)' in SOURCE
     assert 'strategyPerformance:strategyPerformance()' in SOURCE
     assert '"/report.json"' in SOURCE
     assert '"/report"' in SOURCE
