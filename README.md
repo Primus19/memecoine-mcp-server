@@ -27,6 +27,13 @@ SOLANA_WATCH_WALLETS=<comma-separated-public-addresses>
 SOLANA_EARLY_LEDGER_PATH=/app/data/solana_early.sqlite3
 SOLANA_EARLY_SCAN_INTERVAL_SECONDS=20
 SOLANA_EARLY_MIN_SCORE=78
+SOLANA_PAPER_MIN_SCORE=25
+SOLANA_PAPER_MIN_LIQUIDITY_USD=2500
+SOLANA_PAPER_MAX_AGE_MINUTES=1440
+SOLANA_PAPER_MIN_BUYERS_5M=3
+SOLANA_PAPER_MAX_PRICE_IMPACT_BPS=500
+SOLANA_EARLY_MARKET_PAGES=3
+SOLANA_EARLY_MAX_CANDIDATES=60
 SOLANA_EARLY_MAX_PROBE_USD=3
 SOLANA_EARLY_LIVE_ENABLED=false
 ```
@@ -51,6 +58,8 @@ HELIUS_API_KEY=<secret>
 SOLANA_WALLET_PRIVATE_KEY=<base58-secret-stored-only-in-Railway>
 SOLANA_EXPECTED_WALLET_ADDRESS=<exact-public-mainnet-address>
 SOLANA_MIN_PAPER_OBSERVATIONS=50
+SOLANA_PAPER_MAX_HOLD_MINUTES=60
+SOLANA_PAPER_COST_STRESS_BPS=100
 SOLANA_MAX_ENTRY_USD=3
 SOLANA_MAX_TOTAL_EXPOSURE_USD=6
 SOLANA_MAX_POSITIONS=2
@@ -61,6 +70,13 @@ SOLANA_LIVE_ACK=
 After forward validation, arm with `SOLANA_LIVE_ENABLED=true` and the exact
 acknowledgement `I_ACCEPT_THE_25_USD_SOLANA_EARLY_RISK`. Never paste the wallet
 secret into chat, source control, logs, or the discovery service.
+
+Paper exploration deliberately has a broader, separately labeled eligibility
+tier so rejected live candidates can generate hypothetical outcomes without
+spending funds. Token-control checks, a real Jupiter sell route and the paper
+sell-impact ceiling remain mandatory. Paper observations never bypass the live
+candidate gates. Live readiness additionally requires positive cost-stressed
+paper expectancy after the minimum sample and soak period.
 
 ## One report-to-execution chain
 
