@@ -123,8 +123,10 @@ class SolanaEarlyTests(unittest.TestCase):
         result = goplus_safety("mint1")
         self.assertFalse(result["mint_authority_active"])
         self.assertFalse(result["freeze_authority_active"])
+        self.assertFalse(result["transfer_hook_active"])
         self.assertAlmostEqual(.10, result["top10_holder_fraction"])
         self.assertAlmostEqual(.05, result["creator_fraction"])
+        self.assertEqual("VERIFIED", result["safety_evidence_status"])
 
     @patch("app.solana_early.json_request")
     def test_goplus_missing_authority_flags_fail_closed(self, request):
