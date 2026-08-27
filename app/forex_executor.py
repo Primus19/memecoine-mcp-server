@@ -131,6 +131,7 @@ class Ledger:
             columns = {str(row[1]) for row in self.db.execute("PRAGMA table_info(intents)")}
             for name, kind in (("score", "REAL"), ("model_version", "TEXT"), ("closed_at", "TEXT"),
                                ("strategy", "TEXT"), ("signal_time", "TEXT"), ("close_reason", "TEXT"),
+                               ("entry_reason", "TEXT"),
                                ("max_favorable_pnl_usd", "REAL DEFAULT 0"),
                                ("max_adverse_pnl_usd", "REAL DEFAULT 0")):
                 if name not in columns:
@@ -177,11 +178,12 @@ class Ledger:
     def add_intent(self, proposal: dict, mode: str, status: str) -> None:
         with self.db:
             self.db.execute("""INSERT INTO intents(id,created_at,expires_at,symbol,side,entry_price,quantity,stop_price,target_price,
-              maximum_loss_usd,mode,status,score,model_version,strategy,signal_time) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              maximum_loss_usd,mode,status,score,model_version,strategy,signal_time,entry_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (proposal["proposal_id"], utcnow(), proposal["expires_at"], proposal["symbol"], proposal["side"], proposal["reference_price"],
                proposal["quantity"], proposal["stop_price"], proposal["target_price"], proposal["maximum_loss_usd"], mode, status,
                proposal.get("score"), proposal.get("model_version", FOREX_MODEL_VERSION),
-               proposal.get("strategy", "FOREX_CONTROL"), proposal.get("signal_time")))
+               proposal.get("strategy", "FOREX_CONTROL"), proposal.get("signal_time"),
+               proposal.get("entry_reason")))
 
     def strategy_stats(self, strategy: str) -> dict:
         rows = [dict(row) for row in self.db.execute(
@@ -196,7 +198,7 @@ class Ledger:
     def strategy_intents(self, strategy: str, limit: int = 50) -> list[dict]:
         return [dict(row) for row in self.db.execute(
             "SELECT created_at,signal_time,closed_at,symbol,side,status,entry_price,stop_price,target_price,"
-            "maximum_loss_usd,realized_pnl_usd,close_reason FROM intents WHERE strategy=? "
+            "maximum_loss_usd,realized_pnl_usd,close_reason,entry_reason FROM intents WHERE strategy=? "
             "ORDER BY created_at DESC LIMIT ?", (strategy, limit)).fetchall()]
 
     def update_intent(self, intent_id: str, status: str, order_id: str = "", trade_id: str = "") -> None:
@@ -770,6 +772,13 @@ class Executor:
     def process(self, snapshot: dict) -> dict:
         proposal = vars(self.engine.evaluate(snapshot))
         proposal["model_version"] = FOREX_MODEL_VERSION
+        alignment, _, _ = self.engine.alignment(snapshot)
+        proposal["entry_reason"] = (
+            f"{alignment.replace('_', ' ').title()} {proposal['side']} signal; "
+            f"score {float(proposal['score']):.2f} met minimum {self.engine.policy.minimum_score:.2f}; "
+            f"horizon agreement {float(proposal.get('horizon_agreement') or 0) * 100:.1f}%; "
+            f"estimated net value {float(proposal.get('expected_net_bps') or 0):.2f} bps."
+        )
         calendar_ok = snapshot.get("calendar_verified") is True and str(snapshot.get("economic_event_source", "")).startswith("https://")
         mode = "LIVE" if live_armed(self.adapter) else "PRACTICE" if practice_armed(self.adapter) else "PAPER_ONLY"
         if mode in {"LIVE", "PRACTICE"} and not calendar_ok:
@@ -907,6 +916,11 @@ class Executor:
                                      "signal_time": proposal["signal_time"]})
                     continue
                 proposal["maximum_loss_usd"] = per_trade_risk
+                proposal["entry_reason"] = (
+                    f"Five consecutive {'bullish' if proposal['side'] == 'BUY' else 'bearish'} "
+                    f"closed M5 candles triggered a {proposal['side']} at {proposal['signal_time']}; "
+                    "stop uses the five-candle anchor and target is 1:1 reward-to-risk."
+                )
                 self.ledger.add_intent(proposal, "PAPER_ONLY", "PAPER_OPEN")
                 self.ledger.event("FIVE_STREAK_PAPER_FILL", proposal)
                 outcomes.append({"symbol": proposal["symbol"], "side": proposal["side"],
