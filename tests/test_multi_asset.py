@@ -68,6 +68,24 @@ class MultiAssetTests(unittest.TestCase):
         with self.assertRaisesRegex(MultiAssetRejected, "contradict"):
             engine.evaluate(snapshot)
 
+    def test_forex_rejects_aggregate_side_that_conflicts_with_live_trend(self):
+        snapshot = {**self.base("FOREX", "AUD_USD"), "change_1h_pct": -.01,
+                    "change_24h_pct": -.20, "trend_strength": .30,
+                    "horizon_direction": -1, "horizon_agreement": .85,
+                    "liquidity_score": 1, "session_liquid": True,
+                    "economic_event_within_minutes": 120}
+        with self.assertRaisesRegex(MultiAssetRejected, "trend strength"):
+            ForexEngine(AssetPolicy(minimum_score=75, max_risk_usd=.5)).evaluate(snapshot)
+
+    def test_forex_rejects_material_one_hour_reversal_against_signal(self):
+        snapshot = {**self.base("FOREX", "AUD_USD"), "change_1h_pct": .08,
+                    "change_24h_pct": -.20, "trend_strength": -.30,
+                    "horizon_direction": -1, "horizon_agreement": .85,
+                    "liquidity_score": 1, "session_liquid": True,
+                    "economic_event_within_minutes": 120}
+        with self.assertRaisesRegex(MultiAssetRejected, "1h reversal"):
+            ForexEngine(AssetPolicy(minimum_score=75, max_risk_usd=.5)).evaluate(snapshot)
+
     def test_option_engine_rejects_undefined_risk_structure(self):
         snapshot = {**self.base("OPTION", "SPY"), "structure": "SHORT_CALL",
                     "days_to_expiry": 30, "open_interest": 1000,

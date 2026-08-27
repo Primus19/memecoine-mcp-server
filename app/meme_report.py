@@ -50,6 +50,19 @@ def _row(label: str, value: object, label2: str = "", value2: object = "") -> st
     return f"<tr>{cells}</tr>"
 
 
+def _entry_reason(payload: dict) -> str:
+    components = payload.get("component_scores") or {}
+    strongest = sorted(((str(k), float(v)) for k, v in components.items()
+                        if isinstance(v, (int, float))), key=lambda item: item[1], reverse=True)[:2]
+    leaders = ", ".join(f"{name} {value:.1f}" for name, value in strongest)
+    parts = [f"Score {number(payload.get('score'))}"]
+    if payload.get("market_regime") or payload.get("regime"):
+        parts.append(f"regime {payload.get('market_regime') or payload.get('regime')}")
+    if leaders:
+        parts.append(f"strongest evidence: {leaders}")
+    return "; ".join(parts)
+
+
 def render_meme_report(report: dict) -> str:
     portfolio = report.get("portfolio") or {}
     position = portfolio.get("open_position")
@@ -102,9 +115,13 @@ def render_meme_report(report: dict) -> str:
             f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{esc(item.get("product_id") or payload.get("product_id"))}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{esc(item.get("status"))}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right">{esc(payload.get("score"))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{esc(_entry_reason(payload))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb">{esc(item.get("exit_reason") or "Open / not recorded")}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right">{money(item.get("max_favorable_pnl"))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right">{money(item.get("max_adverse_pnl"))}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right">{money(item.get("realized_pnl")) if item.get("realized_pnl") is not None else "N/A"}</td>'
             '</tr>')
-    recommendations_html = "".join(rec_rows) or '<tr><td colspan="5" style="padding:12px;color:#64748b">No recent recommendations.</td></tr>'
+    recommendations_html = "".join(rec_rows) or '<tr><td colspan="9" style="padding:12px;color:#64748b">No recent recommendations.</td></tr>'
 
     event_rows = []
     for event in events[:20]:
@@ -148,7 +165,7 @@ def render_meme_report(report: dict) -> str:
 {alert_html}
 <tr><td {section}>Capital and risk controls</td></tr><tr><td style="padding:6px 26px 18px"><table role="presentation" {table}>{capital_rows}</table></td></tr>
 <tr><td {section}>Position and protection</td></tr><tr><td style="padding:6px 26px 18px"><table role="presentation" {table}>{position_rows}</table></td></tr>
-<tr><td {section}>Recent decisions and completed trades</td></tr><tr><td style="padding:6px 26px 18px;overflow-x:auto"><table role="presentation" {table}><tr style="background:#f8fafc"><th style="padding:8px;text-align:left">Created</th><th style="padding:8px;text-align:left">Product</th><th style="padding:8px;text-align:left">Status</th><th style="padding:8px;text-align:right">Score</th><th style="padding:8px;text-align:right">P&L</th></tr>{recommendations_html}</table></td></tr>
+<tr><td {section}>Recent decisions and completed trades</td></tr><tr><td style="padding:6px 26px 18px;overflow-x:auto"><table role="presentation" {table}><tr style="background:#f8fafc"><th style="padding:8px;text-align:left">Created</th><th style="padding:8px;text-align:left">Product</th><th style="padding:8px;text-align:left">Status</th><th style="padding:8px;text-align:right">Score</th><th style="padding:8px;text-align:left">Main entry reason</th><th style="padding:8px;text-align:left">Exit reason</th><th style="padding:8px;text-align:right">MFE</th><th style="padding:8px;text-align:right">MAE</th><th style="padding:8px;text-align:right">P&L</th></tr>{recommendations_html}</table></td></tr>
 <tr><td {section}>Guarded model learning</td></tr><tr><td style="padding:6px 26px 18px"><table role="presentation" {table}>{learning_rows}</table><div style="margin-top:10px;padding:11px;background:#f8fafc;color:#475569;font-size:12px;line-height:18px">Model changes remain locked until the documented sample-size, confidence, cost-stress, and prospective challenger gates pass.</div></td></tr>
 <tr><td {section}>Recent audit events and errors</td></tr><tr><td style="padding:6px 26px 22px;overflow-x:auto"><table role="presentation" {table}><tr style="background:#f8fafc"><th style="padding:8px;text-align:left">Time</th><th style="padding:8px;text-align:left">Event</th><th style="padding:8px;text-align:left">Detail</th></tr>{events_html}</table></td></tr>
 <tr><td style="padding:14px 26px;background:#f8fafc;border-top:1px solid #e5e7eb;color:#64748b;font-size:11px;line-height:17px">Service {esc(deployment.get('service_name'))} | Commit {esc(deployment.get('git_commit_sha'))} | Report generated directly by Railway. This report does not authorize, issue, modify, or close trades.</td></tr>

@@ -21,6 +21,7 @@ class Store:
         self.db.execute("CREATE TABLE IF NOT EXISTS reviews (review_key TEXT PRIMARY KEY,at TEXT NOT NULL,trigger TEXT NOT NULL,payload TEXT NOT NULL)")
         columns={str(r[1]) for r in self.db.execute("PRAGMA table_info(recommendations)")}
         if "rejection_reason" not in columns:self.db.execute("ALTER TABLE recommendations ADD COLUMN rejection_reason TEXT")
+        if "exit_reason" not in columns:self.db.execute("ALTER TABLE recommendations ADD COLUMN exit_reason TEXT")
         position_columns={str(r[1]) for r in self.db.execute("PRAGMA table_info(positions)")}
         for name in ("max_favorable_pnl", "max_adverse_pnl"):
             if name not in position_columns:self.db.execute(f"ALTER TABLE positions ADD COLUMN {name} REAL DEFAULT 0")
@@ -80,12 +81,18 @@ class Store:
         if not row:return None
         result=dict(row); result["payload"]=json.loads(result["payload"]); return result
     def recent_recommendations(self,limit=20):
-        return [dict(r) for r in self.db.execute("SELECT ticket_id,recommendation_hash,model_version,created_at,expires_at,product_id,status,rejection_reason,net_return,realized_pnl,closed_at FROM recommendations ORDER BY created_at DESC LIMIT ?",(limit,)).fetchall()]
+        rows=[dict(r) for r in self.db.execute("""SELECT r.ticket_id,r.recommendation_hash,r.model_version,r.created_at,r.expires_at,
+            r.product_id,r.payload,r.status,r.rejection_reason,r.exit_reason,r.net_return,r.realized_pnl,r.closed_at,
+            p.entry_price,p.max_favorable_pnl,p.max_adverse_pnl FROM recommendations r
+            LEFT JOIN positions p ON p.ticket_id=r.ticket_id ORDER BY r.created_at DESC LIMIT ?""",(limit,)).fetchall()]
+        for row in rows:
+            row["payload"]=json.loads(row["payload"])
+        return rows
     def latest_closed_for_product(self,product_id):
         row=self.db.execute("SELECT closed_at,payload FROM recommendations WHERE product_id=? AND status='CLOSED' AND closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1",(product_id,)).fetchone()
         return {"closed_at":row[0],"payload":json.loads(row[1])} if row else None
     def mark_recommendation(self,ticket_id,status,**values):
-        allowed={"order_id","rejection_reason","net_return","realized_pnl","closed_at"}; u={"status":status,**{k:v for k,v in values.items() if k in allowed}}
+        allowed={"order_id","rejection_reason","exit_reason","net_return","realized_pnl","closed_at"}; u={"status":status,**{k:v for k,v in values.items() if k in allowed}}
         self.db.execute("UPDATE recommendations SET "+",".join(f"{k}=?" for k in u)+" WHERE ticket_id=?",(*u.values(),ticket_id)); self.db.commit()
     def add_position(self,ticket,order_id):
         now=utcnow(); self.db.execute("INSERT INTO positions(ticket_id,product_id,order_id,status,entry_notional,entry_price,opened_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(ticket["ticket_id"],ticket["product_id"],order_id,"SUBMITTED",ticket["notional_usdc"],ticket["limit_price"],now,now)); self.db.commit()
@@ -100,7 +107,8 @@ class Store:
             (pnl,pnl,utcnow(),ticket_id));self.db.commit()
     def record_closed_trade(self,ticket_id,pnl,return_pct):
         self.add_realized_pnl(pnl); losses=int(self.setting("consecutive_losses","0") or 0); losses=losses+1 if pnl<0 else 0; self.set_setting("consecutive_losses",losses)
-        self.update_position(ticket_id,"CLOSED",pnl); self.mark_recommendation(ticket_id,"CLOSED",net_return=return_pct,realized_pnl=pnl,closed_at=utcnow()); self.set_setting("settlement_grace_until",(datetime.now(timezone.utc)+timedelta(seconds=60)).isoformat()); self.event("POSITION_CLOSED",{"realized_pnl_usdc":pnl,"net_return_pct":return_pct,"consecutive_losses":losses},ticket_id)
+        exit_reason=self.setting("exit_reason:"+ticket_id,"BROKER_OR_EXTERNAL_CLOSE")
+        self.update_position(ticket_id,"CLOSED",pnl); self.mark_recommendation(ticket_id,"CLOSED",net_return=return_pct,realized_pnl=pnl,closed_at=utcnow(),exit_reason=exit_reason); self.set_setting("settlement_grace_until",(datetime.now(timezone.utc)+timedelta(seconds=60)).isoformat()); self.event("POSITION_CLOSED",{"realized_pnl_usdc":pnl,"net_return_pct":return_pct,"consecutive_losses":losses,"exit_reason":exit_reason},ticket_id)
         controls=self.update_equity_controls(self.reconciled_equity(),source="REALIZED_CAPITAL"); return {"pnl":pnl,"return_pct":return_pct,"controls":controls}
     def update_equity_controls(self,equity,source="RECONCILED_EQUITY"):
         today=str(datetime.now(timezone.utc).date())

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def supervision_levels(ticket: dict, *, entry: float, mark: float, high_water: float, regime: str = "",
-                       momentum_1h_pct: float | None = None) -> dict:
+                       momentum_1h_pct: float | None = None, falling_observations: int = 0) -> dict:
     high = max(entry, mark, high_water)
     fee_bps = 2 * float((ticket.get("opportunity_policy") or {}).get("estimated_fee_bps_per_side", 120))
     execution_bps = float(ticket.get("spread_bps") or 0) + 2 * float(ticket.get("slippage_bps") or 0)
@@ -17,8 +17,15 @@ def supervision_levels(ticket: dict, *, entry: float, mark: float, high_water: f
     candidate_stop = high * (1 - trail_pct / 100) if trail_active else entry if break_even_active else hard_stop
     effective_stop = max(hard_stop, candidate_stop)
     deteriorating = momentum_1h_pct is not None and momentum_1h_pct <= -1.0 and mark < high * .98
-    reason = "FALLING_REGIME" if regime.upper() == "FALLING" else ("POSITION_MOMENTUM_REVERSAL" if deteriorating else "TRAILING_STOP" if mark <= effective_stop and (trail_active or break_even_active) else "HARD_STOP_FALLBACK" if mark <= hard_stop else "")
-    return {"high_water_price": high, "break_even_active":break_even_active,"break_even_activation_pct":break_even_activation_pct,"trail_active": trail_active,"trail_pct":trail_pct, "effective_stop_price": effective_stop, "position_deteriorating":deteriorating,"exit_reason": reason}
+    falling_confirmed = regime.upper() == "FALLING" and falling_observations >= 3
+    falling_deteriorating = falling_confirmed and mark <= entry and mark < high * .98
+    # Position-level stops take precedence. A broad market label alone must not
+    # liquidate a healthy position on one noisy observation.
+    reason = ("HARD_STOP_FALLBACK" if mark <= hard_stop else
+              "TRAILING_STOP" if mark <= effective_stop and (trail_active or break_even_active) else
+              "POSITION_MOMENTUM_REVERSAL" if deteriorating else
+              "FALLING_REGIME_CONFIRMED" if falling_deteriorating else "")
+    return {"high_water_price": high, "break_even_active":break_even_active,"break_even_activation_pct":break_even_activation_pct,"trail_active": trail_active,"trail_pct":trail_pct, "effective_stop_price": effective_stop, "position_deteriorating":deteriorating,"falling_observations":falling_observations,"falling_regime_confirmed":falling_confirmed,"exit_reason": reason}
 
 
 def profit_protection_challenger(ticket: dict, *, entry: float, mark: float, high_water: float) -> dict:

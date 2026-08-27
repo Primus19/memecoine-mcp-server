@@ -154,7 +154,11 @@ def supervise(regime="",momentum_1h_pct=None):
         store.update_position(position["ticket_id"],"FILLED")
     record=store.recommendation(position["ticket_id"]);ticket=record["payload"]
     mark=float(position["mark_price"]);fills=position.get("fills") or {};entry=float(fills.get("buy_cost_usdc") or 0)/float(fills.get("buy_qty") or 1) if float(fills.get("buy_qty") or 0)>0 else float(position["entry_price"]);ticket_id=position["ticket_id"]
-    high_key="high_water:"+ticket_id;levels=supervision_levels(ticket,entry=entry,mark=mark,high_water=float(store.setting(high_key,str(entry)) or entry),regime=str(regime),momentum_1h_pct=momentum_1h_pct);high=levels["high_water_price"];trail_active=levels["trail_active"];trail_stop=levels["effective_stop_price"];store.set_setting(high_key,high)
+    high_key="high_water:"+ticket_id
+    falling_key="falling_observations:"+ticket_id
+    falling_observations=(int(store.setting(falling_key,"0") or 0)+1) if str(regime).upper()=="FALLING" else 0
+    store.set_setting(falling_key,min(falling_observations,100))
+    levels=supervision_levels(ticket,entry=entry,mark=mark,high_water=float(store.setting(high_key,str(entry)) or entry),regime=str(regime),momentum_1h_pct=momentum_1h_pct,falling_observations=falling_observations);high=levels["high_water_price"];trail_active=levels["trail_active"];trail_stop=levels["effective_stop_price"];store.set_setting(high_key,high)
     challenger=profit_protection_challenger(ticket,entry=entry,mark=mark,high_water=high)
     target_1=float(ticket.get("target_1_price") or 0);milestone_key="target_1_seen:"+ticket_id
     if target_1 and mark>=target_1 and store.setting(milestone_key)!="1":
@@ -166,7 +170,7 @@ def supervise(regime="",momentum_1h_pct=None):
     if size<=0:return {"status":"EXIT_WAITING_FOR_CANCEL","reason":reason,"cancel":cancel,"state":reconcile()}
     sale=ex.market_sell(position["product_id"],size,"managed-exit-"+str(uuid.uuid4()));exit_id=order_id(sale)
     if not exit_id:raise RuntimeError("Coinbase did not return an exit order id")
-    store.set_setting("exit_order:"+ticket_id,exit_id);store.update_position(ticket_id,"EXIT_SUBMITTED");store.event("MANAGED_EXIT_SUBMITTED",{"reason":reason,"base_size":size,"effective_stop_price":trail_stop,"profit_protection_challenger":challenger,"cancel":str(cancel),"sale":str(sale),"exit_order_id":exit_id},ticket_id)
+    store.set_setting("exit_order:"+ticket_id,exit_id);store.set_setting("exit_reason:"+ticket_id,reason);store.update_position(ticket_id,"EXIT_SUBMITTED");store.event("MANAGED_EXIT_SUBMITTED",{"reason":reason,"base_size":size,"effective_stop_price":trail_stop,"falling_observations":falling_observations,"profit_protection_challenger":challenger,"cancel":str(cancel),"sale":str(sale),"exit_order_id":exit_id},ticket_id)
     return {"status":"EXIT_SUBMITTED","reason":reason,"base_size":size,"exit_order_id":exit_id,"profit_protection_challenger":challenger,"state":reconcile()}
 
 def issue(candidate):
