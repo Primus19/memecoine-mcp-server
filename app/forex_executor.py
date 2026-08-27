@@ -197,7 +197,7 @@ class Ledger:
 
     def strategy_intents(self, strategy: str, limit: int = 50) -> list[dict]:
         return [dict(row) for row in self.db.execute(
-            "SELECT created_at,signal_time,closed_at,symbol,side,status,entry_price,stop_price,target_price,"
+            "SELECT id,created_at,signal_time,closed_at,symbol,side,status,entry_price,stop_price,target_price,"
             "maximum_loss_usd,realized_pnl_usd,close_reason,entry_reason FROM intents WHERE strategy=? "
             "ORDER BY created_at DESC LIMIT ?", (strategy, limit)).fetchall()]
 
@@ -1070,6 +1070,21 @@ class Executor:
             report["risk_configuration"], snapshots, report["intents"], outcomes)
         trade_actions.extend(five_streak_email_actions(
             five_streak_outcomes, closes, report["intents"], reconciliation["summary"]))
+        # Versioned handoff: include the latest closed paper result on every
+        # scan. The emailer's persisted action IDs make this a one-time,
+        # restart-safe backfill and prevent repeated historical reports.
+        latest_five_closed = next((item for item in report["five_streak"]["trades"]
+                                   if item.get("status") == "PAPER_CLOSED"), None)
+        if latest_five_closed:
+            trade_actions.extend(five_streak_email_actions([], [{
+                "intent_id": latest_five_closed.get("id"),
+                "symbol": latest_five_closed.get("symbol"),
+                "fill_price": None,
+                "reason": latest_five_closed.get("close_reason"),
+                "realized_pnl_usd": latest_five_closed.get("realized_pnl_usd"),
+                "strategy": FIVE_STREAK_STRATEGY,
+                "closed_at": latest_five_closed.get("closed_at"),
+            }], report["intents"], reconciliation["summary"]))
         delivery = self.emailer.status()
         delivery_payload = dict(report)
         delivery_payload["_trade_actions"] = trade_actions
