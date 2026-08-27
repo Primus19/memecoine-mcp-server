@@ -1,11 +1,13 @@
 import os
 import tempfile
+import io
 import unittest
+import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.solana_early import (EarlyPolicy, Ledger, PumpfunEvPolicy, contract_safety_failures,
-                              goplus_safety, public_onchain_candidates,
+                              goplus_safety, json_request, public_onchain_candidates,
                               safety_failures, score_candidate, score_pumpfun_ev_candidate)
 
 
@@ -27,6 +29,16 @@ def candidate(**changes):
 
 
 class SolanaEarlyTests(unittest.TestCase):
+    def test_public_http_throttle_honors_bounded_retry(self):
+        error = urllib.error.HTTPError("https://example.test", 429, "limited", {"Retry-After":"0"}, io.BytesIO())
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"ok":true}'
+        with patch("app.solana_early.urllib.request.urlopen", side_effect=[error, response]) as request, \
+             patch("app.solana_early.time.sleep") as sleep:
+            self.assertEqual({"ok": True}, json_request("https://example.test"))
+        self.assertEqual(2, request.call_count)
+        sleep.assert_called_once_with(2.0)
+
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         self.ledger = Ledger(self.tmp.name)

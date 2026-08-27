@@ -36,6 +36,11 @@ def utcnow() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def broker_client_id(intent_id: str) -> str:
+    """Return the exact restart-safe ID written into OANDA extensions."""
+    return str(intent_id).replace("-", "")[:32]
+
+
 def validated_snapshots(payload: dict, now: datetime | None = None) -> list[dict]:
     snapshots = payload.get("snapshots", [])
     if not isinstance(snapshots, list) or not snapshots:
@@ -141,14 +146,14 @@ class Ledger:
             self.db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
     def open_count(self) -> int:
-        return int(self.db.execute("SELECT COUNT(*) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTED','OPEN') AND COALESCE(strategy,'')!=?", (FIVE_STREAK_STRATEGY,)).fetchone()[0])
+        return int(self.db.execute("SELECT COUNT(*) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'')!=?", (FIVE_STREAK_STRATEGY,)).fetchone()[0])
 
     def open_risk(self) -> float:
-        row = self.db.execute("SELECT COALESCE(SUM(maximum_loss_usd),0) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTED','OPEN') AND COALESCE(strategy,'')!=?", (FIVE_STREAK_STRATEGY,)).fetchone()
+        row = self.db.execute("SELECT COALESCE(SUM(maximum_loss_usd),0) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'')!=?", (FIVE_STREAK_STRATEGY,)).fetchone()
         return float(row[0] or 0)
 
     def open_symbols(self) -> list[str]:
-        return [str(row[0]) for row in self.db.execute("SELECT symbol FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTED','OPEN') AND COALESCE(strategy,'')!=?", (FIVE_STREAK_STRATEGY,)).fetchall()]
+        return [str(row[0]) for row in self.db.execute("SELECT symbol FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'')!=?", (FIVE_STREAK_STRATEGY,)).fetchall()]
 
     def has_intent(self, intent_id: str) -> bool:
         return self.db.execute("SELECT 1 FROM intents WHERE id=?", (intent_id,)).fetchone() is not None
@@ -193,7 +198,13 @@ class Ledger:
         return [dict(row) for row in self.db.execute("SELECT * FROM intents WHERE status='PAPER_OPEN'").fetchall()]
 
     def broker_positions(self) -> list[dict]:
-        return [dict(row) for row in self.db.execute("SELECT * FROM intents WHERE status IN ('SUBMITTED','OPEN')").fetchall()]
+        return [dict(row) for row in self.db.execute("SELECT * FROM intents WHERE status IN ('SUBMITTING','SUBMITTED','OPEN')").fetchall()]
+
+    def intent_for_broker_client_id(self, client_id: str) -> dict | None:
+        for row in self.broker_positions():
+            if broker_client_id(str(row["id"])) == str(client_id):
+                return row
+        return None
 
     def recent_intents(self, limit: int = 25) -> list[dict]:
         return [dict(row) for row in self.db.execute("SELECT * FROM intents ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()]
@@ -613,11 +624,16 @@ class Executor:
                     continue
                 limits = self.risk_limits(float(summary["nav"]))
                 recovered = recoverable_managed_trade(trade, max(0.10, limits["risk_per_trade_usd"]), transactions)
-                if not recovered or self.ledger.has_intent(recovered["proposal_id"]):
+                if not recovered:
                     continue
-                self.ledger.add_intent(recovered, "LIVE" if live_armed(self.adapter) else "PRACTICE", "OPEN")
-                self.ledger.update_intent(recovered["proposal_id"], "OPEN", trade_id=trade_id)
-                self.ledger.event("BROKER_TRADE_RECOVERED", {"intent_id": recovered["proposal_id"],
+                existing=self.ledger.intent_for_broker_client_id(recovered["proposal_id"])
+                intent_id=str(existing["id"]) if existing else recovered["proposal_id"]
+                if not existing:
+                    if self.ledger.has_intent(intent_id):
+                        continue
+                    self.ledger.add_intent(recovered, "LIVE" if live_armed(self.adapter) else "PRACTICE", "OPEN")
+                self.ledger.update_intent(intent_id, "OPEN", trade_id=trade_id)
+                self.ledger.event("BROKER_TRADE_RECOVERED", {"intent_id": intent_id,
                                   "trade_id": trade_id, "symbol": recovered["symbol"]})
                 unexpected.remove(trade_id)
             broker_positions = self.ledger.broker_positions()
@@ -715,7 +731,7 @@ class Executor:
         if preflight["open_trade_count"] >= limits["maximum_open_positions"]:
             raise MultiAssetRejected("broker position limit reached")
         self.ledger.add_intent(proposal, mode, "SUBMITTING")
-        response = self.adapter.create_order(proposal, client_order_id=intent_id.replace("-", "")[:32])
+        response = self.adapter.create_order(proposal, client_order_id=broker_client_id(intent_id))
         rejected = response.get("orderRejectTransaction")
         if rejected:
             self.ledger.update_intent(intent_id, "REJECTED")

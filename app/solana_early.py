@@ -363,8 +363,21 @@ def score_pumpfun_ev_candidate(candidate: dict[str, Any], ledger: Ledger,
 def json_request(url: str, headers: dict[str, str] | None = None, timeout: float | None = None) -> Any:
     values = {"Accept": "application/json", "User-Agent": "primus-solana-early/1.1", **(headers or {})}
     effective_timeout = timeout or max(5.0, min(30.0, float(os.getenv("SOLANA_EARLY_HTTP_TIMEOUT_SECONDS", "12"))))
-    with urllib.request.urlopen(urllib.request.Request(url, headers=values), timeout=effective_timeout) as response:
-        return json.loads(response.read().decode())
+    attempts = max(1, min(4, int(os.getenv("SOLANA_EARLY_HTTP_ATTEMPTS", "3"))))
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=values), timeout=effective_timeout) as response:
+                return json.loads(response.read().decode())
+        except urllib.error.HTTPError as exc:
+            retryable = exc.code == 429 or 500 <= exc.code < 600
+            if not retryable or attempt + 1 >= attempts:
+                raise
+            try:
+                retry_after = float(exc.headers.get("Retry-After", "0") or 0)
+            except (TypeError, ValueError):
+                retry_after = 0
+            time.sleep(min(15.0, max(retry_after, 2.0 * (attempt + 1))))
+    raise RuntimeError("HTTP retry loop ended without a response")
 
 
 def _number(value: Any, default: float = 0.0) -> float:

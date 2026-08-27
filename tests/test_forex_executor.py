@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServer,
-                                BrokerError, Executor, closed_trade_pnl, live_armed, practice_armed, safe_quantity,
+                                BrokerError, Executor, broker_client_id, closed_trade_pnl, live_armed, practice_armed, safe_quantity,
                                 five_streak_signals, recoverable_managed_trade,
                                 transaction_managed_intent_id, validated_snapshots)
 
@@ -205,8 +205,21 @@ class ForexExecutorTests(unittest.TestCase):
             proposal = {"proposal_id":"p1","expires_at":"2999-01-01T00:00:00Z","symbol":"EUR_USD","reference_price":1.1,
                         "side":"BUY","quantity":10,"stop_price":1.0,"target_price":1.2,"maximum_loss_usd":0.5}
             ledger.add_intent(proposal, "LIVE", "SUBMITTING")
+            self.assertEqual(1, ledger.open_count())
+            self.assertEqual(.5, ledger.open_risk())
             ledger.update_intent("p1", "CANCELLED")
             self.assertEqual(0, ledger.open_count())
+
+    def test_oanda_client_id_maps_back_to_submitting_uuid_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(directory + "/forex.sqlite3")
+            intent_id = "12345678-1234-1234-1234-123456789abc"
+            proposal = {"proposal_id":intent_id,"expires_at":"2999-01-01T00:00:00Z","symbol":"EUR_USD","reference_price":1.1,
+                        "side":"BUY","quantity":10,"stop_price":1.0,"target_price":1.2,"maximum_loss_usd":0.5}
+            ledger.add_intent(proposal, "LIVE", "SUBMITTING")
+            client_id=broker_client_id(intent_id)
+            self.assertEqual("12345678123412341234123456789abc", client_id)
+            self.assertEqual(intent_id, ledger.intent_for_broker_client_id(client_id)["id"])
 
     def test_open_risk_and_currency_symbols_support_guarded_second_trade(self):
         with tempfile.TemporaryDirectory() as directory:
