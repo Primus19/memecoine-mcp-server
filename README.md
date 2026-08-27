@@ -13,19 +13,18 @@ least 20 timestamped closed outcomes with positive mean return and a minimum
 55% win rate; one lucky trade never creates a "smart wallet" label.
 
 The discovery service never holds a private key or submits swaps. It obtains
-new pools and aggregate flow/holder evidence from CoinGecko Onchain, fails
+new pools and aggregate flow evidence from the keyless GeckoTerminal public API, fails
 closed on GoPlus token-control evidence, verifies that a small exit is routable
 through Jupiter Swap V2, and accepts authenticated Helius wallet events at
 `POST /webhooks/helius`. Deploy with a persistent volume and:
 
 ```text
 SOLANA_EARLY_ENABLED=true
-COINGECKO_API_KEY=<secret>
 JUPITER_API_KEY=<secret>
 HELIUS_WEBHOOK_AUTH=<random-secret>
 SOLANA_WATCH_WALLETS=<comma-separated-public-addresses>
 SOLANA_EARLY_LEDGER_PATH=/app/data/solana_early.sqlite3
-SOLANA_EARLY_SCAN_INTERVAL_SECONDS=20
+SOLANA_EARLY_SCAN_INTERVAL_SECONDS=60
 SOLANA_EARLY_MIN_SCORE=78
 SOLANA_PAPER_MIN_SCORE=25
 SOLANA_PAPER_MIN_LIQUIDITY_USD=2500
@@ -37,6 +36,11 @@ SOLANA_EARLY_MAX_CANDIDATES=60
 SOLANA_EARLY_MAX_PROBE_USD=3
 SOLANA_EARLY_LIVE_ENABLED=false
 ```
+
+The broader Coinbase research and evidence workers also use CoinGecko's
+keyless public market endpoint at bounded intervals. An account key is ignored
+unless `COINGECKO_USE_ACCOUNT_KEY=true` is deliberately configured; no paid or
+Demo CoinGecko plan is required for the default deployment.
 
 Use `railway.solana-early.json` as the Railway config path. `/health` proves
 process and scan health, while `/status` and `/candidates` expose sanitized
