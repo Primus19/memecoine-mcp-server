@@ -155,6 +155,18 @@ class EvidenceWorkerTests(unittest.TestCase):
         policy = OpportunityPolicy()
         self.assertEqual("EMERGING", policy.tier(15_000_000, 2_000_000))
 
+    def test_account_key_is_disabled_and_evidence_polling_is_bounded(self):
+        variables = {
+            "EXECUTOR_BASE_URL":"https://executor.example", "REST_API_TOKEN":"x",
+            "RESEARCH_FEED_URL":"https://research.example", "SIGNAL_FEED_BEARER_TOKEN":"y",
+            "COINGECKO_API_KEY":"exhausted", "COINGECKO_USE_ACCOUNT_KEY":"false",
+            "EVIDENCE_SCAN_INTERVAL_SECONDS":"60",
+        }
+        with patch.dict(os.environ, variables, clear=False):
+            adapter = EvidenceAdapter()
+        self.assertEqual("", adapter.cg_key)
+        self.assertEqual(900, adapter.interval)
+
 
 if __name__ == "__main__":
     unittest.main()

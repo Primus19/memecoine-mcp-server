@@ -60,12 +60,15 @@ class ResearchFeed:
         self.executor_url = os.environ["EXECUTOR_BASE_URL"].rstrip("/")
         self.executor_token = os.environ["REST_API_TOKEN"]
         self.cg_base = os.getenv("COINGECKO_BASE_URL", "https://api.coingecko.com/api/v3").rstrip("/")
-        self.cg_key = os.getenv("COINGECKO_API_KEY", "")
+        # Account credits are opt-in. By default /coins/markets is requested
+        # keylessly, so an exhausted Demo key cannot interrupt research.
+        self.cg_key = (os.getenv("COINGECKO_API_KEY", "")
+                       if os.getenv("COINGECKO_USE_ACCOUNT_KEY", "false").lower() == "true" else "")
         # Scan the broad crypto market instead of CoinGecko's meme-only category.
         # Four pages covers the leading 1,000 assets; operators can extend this
         # without changing code when Coinbase adds deeper USDC markets.
         self.pages = max(4, min(10, int(os.getenv("RESEARCH_MARKET_PAGES", "4"))))
-        self.interval = max(15, min(300, int(os.getenv("RESEARCH_SCAN_INTERVAL_SECONDS", "30"))))
+        self.interval = max(300, min(1800, int(os.getenv("RESEARCH_SCAN_INTERVAL_SECONDS", "300"))))
         self.http_max_retries = max(1, min(5, int(os.getenv("RESEARCH_HTTP_MAX_RETRIES", "3"))))
         self.http_retry_backoff = max(.25, min(10.0, float(os.getenv("RESEARCH_HTTP_RETRY_BACKOFF_SECONDS", "1"))))
         self.request_spacing = max(0.0, min(10.0, float(os.getenv("RESEARCH_REQUEST_SPACING_SECONDS", "1"))))
