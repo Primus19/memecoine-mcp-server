@@ -44,6 +44,13 @@ class OpenSellClient:
         self.cancelled=list(order_ids)
         return {"results":[]}
 
+class FillClient:
+    def get_fills(self,**kwargs):
+        return {"fills":[
+            {"order_id":"wanted","side":"BUY","price":"1","size":"2","commission":".01","trade_time":"2026-08-27T00:01:00Z"},
+            {"order_id":"other","side":"BUY","price":"1","size":"99","commission":".50","trade_time":"2026-08-27T00:02:00Z"},
+        ]}
+
 class ExchangeTests(unittest.TestCase):
     def test_dynamic_products_paginate_and_filter(self):
         ex=Exchange.__new__(Exchange);ex.client=ProductClient();products=ex.eligible_products()
@@ -111,3 +118,9 @@ class ExchangeTests(unittest.TestCase):
         product={"base_increment":"0.01","base_min_size":.01}
         with self.assertRaisesRegex(CoinbaseOrderRejected,"INVALID_ORDER_CONFIGURATION"):
             ex.submit_buy(ticket,product)
+
+    def test_fills_are_scoped_to_the_tracked_order(self):
+        ex=Exchange.__new__(Exchange);ex.client=FillClient()
+        fills=ex.fills("AAA-USDC","2026-08-27T00:00:00+00:00","wanted")
+        self.assertEqual(1,len(fills))
+        self.assertEqual("wanted",fills[0]["order_id"])

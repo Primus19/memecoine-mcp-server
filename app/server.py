@@ -41,6 +41,19 @@ def summarize_fills(fills):
     buy_cost=sum(f["size"]*f["price"] for f in buys)+sum(f["commission"] for f in buys);sell_value=sum(f["size"]*f["price"] for f in sells)-sum(f["commission"] for f in sells)
     return {"buy_qty":buy_qty,"sell_qty":sell_qty,"net_qty":max(0,buy_qty-sell_qty),"buy_cost_usdc":buy_cost,"sell_value_usdc":sell_value,"fees_usdc":fees,"fill_count":len(fills)}
 
+def cancellation_accepted(response):
+    """Return true only when Coinbase positively acknowledges cancellation."""
+    results=response.get("results") or response.get("cancel_orders") or []
+    if isinstance(results,dict):results=[results]
+    return any(bool(r.get("success")) for r in results if isinstance(r,dict))
+
+def stale_unfilled(position):
+    try:
+        opened=datetime.fromisoformat(str(position["opened_at"]).replace("Z","+00:00"))
+        return (datetime.now(timezone.utc)-opened).total_seconds()>ENTRY_TIMEOUT_SECONDS
+    except (KeyError,TypeError,ValueError):
+        return False
+
 def run_preflight():
     pf=exchange().preflight();baseline=store.initialize_baseline(pf["usdc_total"]);flow=store.sync_external_flow(pf["usdc_total"])
     result={**pf,"pilot_baseline_usdc":baseline,"permitted_capital_usdc":store.permitted_capital(),"allocation_fraction":ALLOCATION_FRACTION,"capital_flow":flow};store.event("PREFLIGHT_OK",result);return result
@@ -49,8 +62,13 @@ def reconcile():
     position=store.open_position(); ex=exchange();pf=ex.preflight()
     if not position:
         flow=store.sync_external_flow(pf["usdc_total"]);controls=store.update_equity_controls(store.reconciled_equity(),source="PERMITTED_CAPITAL");return {"open_position":None,"usdc_total":pf["usdc_total"],"capital_flow":flow,"controls":controls}
-    fills=ex.fills(position["product_id"],position["opened_at"]);summary=summarize_fills(fills);product=ex.product(position["product_id"]);mark_value=summary["net_qty"]*product["price"]
+    fills=ex.fills(position["product_id"],position["opened_at"],position.get("order_id") or "");summary=summarize_fills(fills);product=ex.product(position["product_id"]);mark_value=summary["net_qty"]*product["price"]
     order=ex.get_order(position["order_id"]) if position.get("order_id") else {};order_status=str(order.get("status","")).upper()
+    if summary["buy_qty"]<=0 and position.get("order_id") and stale_unfilled(position) and order_status not in {"CANCELLED","FAILED","EXPIRED"}:
+        cancel=ex.cancel_order(position["order_id"])
+        store.event("STALE_ENTRY_CANCEL_REQUESTED",{"order_id":position["order_id"],"order_status":order_status,"response":str(cancel)},position["ticket_id"])
+        if cancellation_accepted(cancel):
+            order_status="CANCELLED"
     if summary["buy_qty"]<=0 and order_status in {"CANCELLED","FAILED","EXPIRED"}:
         store.update_position(position["ticket_id"],order_status);store.mark_recommendation(position["ticket_id"],order_status)
         store.event("ENTRY_"+order_status,{"order_id":position.get("order_id")},position["ticket_id"])
