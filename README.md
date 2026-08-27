@@ -49,6 +49,7 @@ SOLANA_DISCOVERY_URL=https://<discovery-service>.up.railway.app
 JUPITER_API_KEY=<secret>
 HELIUS_API_KEY=<secret>
 SOLANA_WALLET_PRIVATE_KEY=<base58-secret-stored-only-in-Railway>
+SOLANA_EXPECTED_WALLET_ADDRESS=<exact-public-mainnet-address>
 SOLANA_MIN_PAPER_OBSERVATIONS=50
 SOLANA_MAX_ENTRY_USD=3
 SOLANA_MAX_TOTAL_EXPOSURE_USD=6
