@@ -210,19 +210,22 @@ class Exchange:
         order_ids = [str(field(order, "order_id", "")) for order in field(response, "orders", []) if field(order, "order_id", "")]
         return {"order_ids": order_ids, "response": as_dict(self.client.cancel_orders(order_ids=order_ids)) if order_ids else {}}
 
-    def fills(self, product_id: str, opened_at: str) -> list[dict]:
+    def fills(self, product_id: str, opened_at: str, order_id: str = "") -> list[dict]:
         response = self.client.get_fills(product_ids=[product_id], limit=100)
         cutoff = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
         result = []
         for raw in field(response, "fills", []):
             data = as_dict(raw)
+            fill_order_id = str(data.get("order_id", ""))
+            if order_id and fill_order_id != str(order_id):
+                continue
             stamp = str(data.get("trade_time") or data.get("trade_time_utc") or "")
             try:
                 if datetime.fromisoformat(stamp.replace("Z", "+00:00")) < cutoff:
                     continue
             except ValueError:
                 continue
-            result.append({"order_id": str(data.get("order_id", "")), "side": str(data.get("side", "")).upper(), "price": float(data.get("price") or 0), "size": float(data.get("size") or 0), "commission": float(data.get("commission") or 0), "trade_time": stamp})
+            result.append({"order_id": fill_order_id, "side": str(data.get("side", "")).upper(), "price": float(data.get("price") or 0), "size": float(data.get("size") or 0), "commission": float(data.get("commission") or 0), "trade_time": stamp})
         return result
 
     def cancel_order(self, order_id: str) -> dict:
