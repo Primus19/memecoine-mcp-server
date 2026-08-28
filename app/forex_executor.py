@@ -508,6 +508,7 @@ def normalize_open_trade(trade: dict, snapshot: dict | None = None) -> dict:
         "current_spread_bps": snapshot.get("spread_bps"),
         "unrealized_pnl_usd": float(trade.get("unrealizedPL") or 0),
         "financing_usd": float(trade.get("financing") or 0),
+        "broker_initial_margin_usd": float(trade.get("initialMarginRequired") or 0) or None,
         "stop_order_id": str(stop.get("id") or ""),
         "stop_price": float(stop.get("price") or 0) or None,
         "target_order_id": str(target.get("id") or ""),
@@ -806,6 +807,7 @@ def five_streak_email_actions(outcomes: list[dict], closes: list[dict], intents:
             "status": "PAPER_OPEN", "entry_price": item.get("entry") or intent.get("entry_price"),
             "stop_price": intent.get("stop_price"), "target_price": intent.get("target_price"),
             "maximum_loss_usd": intent.get("maximum_loss_usd"),
+            "paper_allocation_usd": intent.get("maximum_loss_usd"),
             "filled_quantity": intent.get("quantity"), "execution_price": item.get("entry"),
             "realized_pnl_usd": 0, "resulting_unrealized_pnl_usd": summary.get("unrealized_pl"),
             "nav": summary.get("nav"), "margin_used": summary.get("margin_used"),
@@ -833,6 +835,7 @@ def five_streak_email_actions(outcomes: list[dict], closes: list[dict], intents:
             "status": "PAPER_CLOSED", "entry_price": intent.get("entry_price"),
             "stop_price": intent.get("stop_price"), "target_price": intent.get("target_price"),
             "maximum_loss_usd": intent.get("maximum_loss_usd"), "close_reason": item.get("reason"),
+            "paper_allocation_usd": intent.get("maximum_loss_usd"),
             "filled_quantity": intent.get("quantity"), "execution_price": item.get("fill_price"),
             "realized_pnl_usd": item.get("realized_pnl_usd"),
             "resulting_unrealized_pnl_usd": summary.get("unrealized_pl"), "nav": summary.get("nav"),
@@ -1242,6 +1245,36 @@ class Executor:
         broker_open_trades = [normalize_open_trade(item, next((snapshot for snapshot in snapshots
             if snapshot.get("symbol") == item.get("instrument")), {}))
             for item in reconciliation["open_trades"]]
+        intent_by_trade = {str(item.get("broker_trade_id") or ""): item
+                           for item in self.ledger.intents() if item.get("broker_trade_id")}
+        raw_notionals = []
+        for raw, normalized in zip(reconciliation["open_trades"], broker_open_trades):
+            symbol = str(raw.get("instrument") or "")
+            units = abs(float(raw.get("currentUnits") or raw.get("initialUnits") or 0))
+            notional = 0.0
+            try:
+                quote = self.adapter.price(symbol)
+                bids, asks = quote.get("bids", []), quote.get("asks", [])
+                mid = (float(bids[0]["price"]) + float(asks[0]["price"])) / 2
+                factor = float(quote.get("quoteHomeConversionFactors", {}).get("negativeUnits") or 0)
+                notional = units * mid * factor
+            except Exception:
+                pass
+            raw_notionals.append(notional)
+            intent = intent_by_trade.get(str(normalized.get("trade_id") or ""), {})
+            normalized["notional_exposure_usd"] = notional or None
+            normalized["maximum_planned_loss_usd"] = intent.get("maximum_loss_usd")
+        total_notional = sum(raw_notionals)
+        total_margin = float(reconciliation["summary"].get("margin_used") or 0)
+        for normalized, notional in zip(broker_open_trades, raw_notionals):
+            margin = normalized.get("broker_initial_margin_usd")
+            if margin is None and total_notional > 0:
+                margin = total_margin * notional / total_notional
+            pnl = float(normalized.get("unrealized_pnl_usd") or 0)
+            risk_amount = float(normalized.get("maximum_planned_loss_usd") or 0)
+            normalized["estimated_margin_allocation_usd"] = margin
+            normalized["return_on_notional_pct"] = (pnl / notional * 100) if notional else None
+            normalized["return_on_planned_risk_pct"] = (pnl / risk_amount * 100) if risk_amount else None
         live_profit_shadows = []
         for trade in broker_open_trades:
             key = "live_profit_shadow_peak_r:" + str(trade.get("trade_id") or "")

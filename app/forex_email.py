@@ -136,6 +136,8 @@ class ForexReportEmailer:
         kind = esc(action.get("email_action")).upper()
         closed = kind.endswith("CLOSED")
         pnl = float(action.get("realized_pnl_usd") or 0)
+        allocation = float(action.get("paper_allocation_usd") or action.get("maximum_loss_usd") or 0)
+        risk_multiple = pnl / allocation if allocation else 0.0
         pnl_color = "#15803d" if pnl > 0 else "#dc2626" if pnl < 0 else "#475569"
         side = esc(action.get("side"))
         reason = esc(action.get("entry_reason") or action.get("trigger"))
@@ -151,13 +153,13 @@ class ForexReportEmailer:
 <b style="font-size:16px;color:#92400e">REASON FOR ENTRY / ACTION</b><div style="margin-top:7px;line-height:1.6;font-size:15px">{reason}</div></div>
 <h3 style="margin:22px 0 8px;color:#581c87">Latest strategy action</h3>
 <div style="overflow-x:auto"><table width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #ddd6fe;font-size:12px">
-<tr style="background:#581c87;color:#fff"><th>New</th><th>Signal UTC</th><th>Pair</th><th>Side</th><th>Status</th><th>Entry</th><th>Stop</th><th>Target</th><th>Risk</th><th>Reason for entry</th><th>Exit reason</th><th>P&amp;L</th></tr>
+<tr style="background:#581c87;color:#fff"><th>New</th><th>Signal UTC</th><th>Pair</th><th>Side</th><th>Status</th><th>Entry</th><th>Stop</th><th>Target</th><th>Paper amount put / max risk</th><th>Return on risk</th><th>P&amp;L at $10 risk</th><th>Reason for entry</th><th>Exit reason</th><th>P&amp;L</th></tr>
 <tr style="background:#fff7cc"><td><span style="display:inline-block;background:#ef4444;color:#fff;padding:4px 7px;border-radius:999px;font-weight:900">NEW</span></td>
 <td>{esc(action.get('signal_time'))}</td><td><b>{pair}</b></td><td>{side}</td><td><b>{'CLOSED' if closed else 'OPEN'}</b></td>
 <td>{esc(action.get('entry_price') or action.get('execution_price'))}</td><td>{esc(action.get('stop_price'))}</td><td>{esc(action.get('target_price'))}</td>
-<td>{cls._money(action.get('maximum_loss_usd'))}</td><td>{reason}</td><td>{exit_reason}</td><td style="color:{pnl_color};font-weight:800">{cls._money(action.get('realized_pnl_usd'))}</td></tr></table></div>
+<td>{cls._money(allocation)}</td><td>{risk_multiple:+.2f}R</td><td>{cls._money(risk_multiple * 10)}</td><td>{reason}</td><td>{exit_reason}</td><td style="color:{pnl_color};font-weight:800">{cls._money(action.get('realized_pnl_usd'))}</td></tr></table></div>
 <div style="margin-top:18px;padding:14px;background:#f5f3ff;border-left:5px solid #7e22ce;border-radius:8px"><b>What triggered this report</b><div style="margin-top:6px;line-height:1.5">{esc(action.get('trigger'))}</div></div>
-<div style="margin-top:18px;padding:12px;background:#faf5ff;color:#6b21a8;border-radius:8px"><b>Mode:</b> PAPER ONLY — no broker funds or live margin were used.</div>
+<div style="margin-top:18px;padding:12px;background:#faf5ff;color:#6b21a8;border-radius:8px"><b>Mode:</b> PAPER ONLY — the displayed amount is the simulated maximum risk allocation; no broker funds or live margin were used. Scaled P&amp;L assumes identical execution quality and costs, which can worsen at larger size.</div>
 <div style="margin-top:20px;padding-top:14px;border-top:1px solid #ddd6fe;color:#64748b;font-size:12px">Bryne and Lot-Bill Strategy action report. The highlighted NEW row is the action that generated this email.</div>
 </td></tr></table></td></tr></table></body></html>"""
 
