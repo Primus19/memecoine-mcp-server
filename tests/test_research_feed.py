@@ -120,16 +120,15 @@ class ResearchFeedTests(unittest.TestCase):
         self.assertIsNone(candidate)
         self.assertIn("identity not attested", failures)
 
-    def test_clean_established_asset_does_not_require_positive_news(self):
+    def test_mixed_regime_requires_verified_catalyst(self):
         feed = self.make_feed()
         at = datetime.now(timezone.utc)
         candidate, failures = feed.build_candidate(
             self.market(), {"product_id": "TEST-USDC", "price": .1},
             self.evidence(news_score=0, social_score=0), {"classification": "MIXED"}, at,
         )
-        self.assertEqual([], failures)
-        self.assertEqual("MIXED", candidate["regime"])
-        self.assertEqual(78, sum(candidate["component_scores"].values()))
+        self.assertIsNone(candidate)
+        self.assertIn("mixed regime requires a verified catalyst/news score of at least 4", failures)
 
     def test_news_veto_still_rejects(self):
         feed = self.make_feed()

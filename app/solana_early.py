@@ -206,6 +206,8 @@ def smart_wallet_score(wallets: list[str], ledger: Ledger) -> tuple[float, list[
 
 def safety_failures(candidate: dict[str, Any], policy: EarlyPolicy) -> list[str]:
     failures: list[str] = []
+    if candidate.get("safety_evidence_status") != "VERIFIED":
+        failures.append("verified safety evidence missing")
     required_false = ("mint_authority_active", "freeze_authority_active", "transfer_hook_active",
                       "non_transferable", "creator_selling")
     for field in required_false:
@@ -215,9 +217,9 @@ def safety_failures(candidate: dict[str, Any], policy: EarlyPolicy) -> list[str]
             failures.append(field)
     if candidate.get("sell_simulation_ok") is not True:
         failures.append("sell simulation failed")
-    if float(candidate.get("top10_holder_fraction", 1)) > policy.maximum_top10_holder_fraction:
+    if _number(candidate.get("top10_holder_fraction"), 1) > policy.maximum_top10_holder_fraction:
         failures.append("top-10 concentration too high")
-    if float(candidate.get("creator_fraction", 1)) > policy.maximum_creator_fraction:
+    if _number(candidate.get("creator_fraction"), 1) > policy.maximum_creator_fraction:
         failures.append("creator concentration too high")
     return failures
 
@@ -225,6 +227,8 @@ def safety_failures(candidate: dict[str, Any], policy: EarlyPolicy) -> list[str]
 def contract_safety_failures(candidate: dict[str, Any]) -> list[str]:
     """Non-negotiable controls shared by paper exploration and live selection."""
     failures: list[str] = []
+    if candidate.get("safety_evidence_status") != "VERIFIED":
+        failures.append("verified safety evidence missing")
     for field in ("mint_authority_active", "freeze_authority_active", "transfer_hook_active",
                   "non_transferable", "creator_selling"):
         if field not in candidate:
@@ -517,13 +521,19 @@ def goplus_safety(mint: str) -> dict[str, Any]:
             time.sleep(.5 * (attempt + 1))
     if payload is None:
         raise RuntimeError(f"GoPlus safety unavailable after retries: {last_error}")
+    if int(_number(payload.get("code"), 0)) != 1:
+        raise RuntimeError(f"GoPlus safety provider error: code={payload.get('code')} message={payload.get('message')}")
     values = payload.get("result") or {}
     facts = values.get(mint) or values.get(mint.lower()) or (next(iter(values.values())) if len(values) == 1 else {})
+    if not isinstance(facts, dict) or not facts:
+        raise RuntimeError("GoPlus safety response contained no token facts")
     holders = facts.get("holders") or []
     creators = facts.get("creators") or facts.get("creator") or []
+    if isinstance(creators, dict):
+        creators = [creators]
     def active(field: str) -> bool:
         if field not in facts:
-            return True
+            raise RuntimeError(f"GoPlus safety fact missing: {field}")
         value = facts.get(field)
         if isinstance(value, dict):
             value = value.get("status")
@@ -540,9 +550,9 @@ def goplus_safety(mint: str) -> dict[str, Any]:
         "mint_authority_active": active("mintable"),
         "freeze_authority_active": active("freezable"),
         "transfer_hook_active": active("transfer_hook"),
-        "non_transferable": str(facts.get("non_transferable", "1")).lower() not in {"0", "false"},
-        "top10_holder_fraction": fraction(holders[:10]) if holders else 1.0,
-        "creator_fraction": fraction(creators) if creators else 1.0,
+        "non_transferable": active("non_transferable"),
+        "top10_holder_fraction": fraction(holders[:10]) if holders else None,
+        "creator_fraction": fraction(creators) if creators else None,
         "creator_selling": any(str(item.get("sell_all", "0")).lower() not in {"0", "false"}
                                for item in creators if isinstance(item, dict)),
         "safety_evidence_status": "VERIFIED",
@@ -620,10 +630,10 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
             # Missing safety evidence must reject only this token, not stop the
             # complete discovery cycle.
             safety = {
-                "mint_authority_active": True, "freeze_authority_active": True,
-                "transfer_hook_active": True, "non_transferable": True,
-                "top10_holder_fraction": 1.0, "creator_fraction": 1.0,
-                "creator_selling": True,
+                "mint_authority_active": None, "freeze_authority_active": None,
+                "transfer_hook_active": None, "non_transferable": None,
+                "top10_holder_fraction": None, "creator_fraction": None,
+                "creator_selling": None,
                 "safety_evidence_status": "UNAVAILABLE",
                 "safety_evidence_error": str(exc)[:180],
             }

@@ -179,9 +179,13 @@ class ResearchFeed:
         if tier == "INELIGIBLE": failures.append("market cap or volume below all policy tiers")
         if not self.policy.min_turnover <= turnover <= self.policy.max_turnover: failures.append("turnover outside policy range")
         if one <= 0: failures.append("1h momentum not positive")
+        chase_cap = 2.0 if tier == "EMERGING" else 3.0
+        if one > chase_cap: failures.append(f"1h momentum above {chase_cap:g}% anti-chase cap")
         if day <= 0 or day > self.policy.max_momentum_24h_pct: failures.append("24h momentum outside policy range")
         if dilution < .70: failures.append("severe dilution")
         if not self.policy.news_allowed(evidence.get("news_score", 0), news_veto=evidence.get("news_veto") is True): failures.append("news policy gate failed")
+        if regime["classification"] == "MIXED" and float(evidence.get("news_score") or 0) < 4:
+            failures.append("mixed regime requires a verified catalyst/news score of at least 4")
         components = {
             "regime": 15 if regime["classification"] == "RISING" else (8 if regime["classification"] == "MIXED" else 0),
             "liquidity": 20 if volume >= 25_000_000 else 18,
