@@ -242,10 +242,10 @@ def contract_safety_failures(candidate: dict[str, Any]) -> list[str]:
 
 def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPolicy) -> dict[str, Any]:
     failures = safety_failures(candidate, policy)
-    age = float(candidate.get("token_age_minutes", 9999))
-    liquidity = float(candidate.get("liquidity_usd", 0))
+    age = _number(candidate.get("token_age_minutes"), 9999)
+    liquidity = _number(candidate.get("liquidity_usd"), 0)
     buyers = int(candidate.get("unique_buyers_5m", 0))
-    impact = float(candidate.get("sell_price_impact_bps", 9999))
+    impact = _number(candidate.get("sell_price_impact_bps"), 9999)
     if not 2 <= age <= policy.maximum_token_age_minutes:
         failures.append("token age outside discovery window")
     if liquidity < policy.minimum_liquidity_usd:
@@ -256,16 +256,16 @@ def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPoli
         failures.append("sell price impact above maximum")
 
     buyer_accel = ratio(buyers, int(candidate.get("unique_buyers_previous_5m", 0)))
-    volume_accel = ratio(float(candidate.get("buy_volume_5m_usd", 0)),
-                         float(candidate.get("buy_volume_previous_5m_usd", 0)))
-    total = float(candidate.get("buy_volume_5m_usd", 0)) + float(candidate.get("sell_volume_5m_usd", 0))
+    volume_accel = ratio(_number(candidate.get("buy_volume_5m_usd")),
+                         _number(candidate.get("buy_volume_previous_5m_usd")))
+    total = _number(candidate.get("buy_volume_5m_usd")) + _number(candidate.get("sell_volume_5m_usd"))
     pressure = (_number(candidate.get("transaction_buy_pressure"))
                 if "transaction_buy_pressure" in candidate else
-                ((float(candidate.get("buy_volume_5m_usd", 0)) -
-                  float(candidate.get("sell_volume_5m_usd", 0))) / total) if total else -1.0)
+                ((_number(candidate.get("buy_volume_5m_usd")) -
+                  _number(candidate.get("sell_volume_5m_usd"))) / total) if total else -1.0)
     wallet_points, qualified_wallets = smart_wallet_score(candidate.get("buyer_wallets") or [], ledger)
-    top10 = float(candidate.get("top10_holder_fraction", 1))
-    creator = float(candidate.get("creator_fraction", 1))
+    top10 = _number(candidate.get("top10_holder_fraction"), 1)
+    creator = _number(candidate.get("creator_fraction"), 1)
 
     components = {
         "safety": 25.0 if not safety_failures(candidate, policy) else 0.0,
@@ -274,8 +274,8 @@ def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPoli
         "buy_pressure": clamp((pressure - .05) * 20, 0, 12),
         "distribution": clamp((.55 - top10) * 20 + (.12 - creator) * 25, 0, 10),
         "smart_wallets": wallet_points,
-        "social_velocity": clamp(float(candidate.get("social_velocity_ratio", 0)) * 2, 0, 8),
-        "creator_history": clamp(float(candidate.get("creator_history_score", 0)), 0, 5),
+        "social_velocity": clamp(_number(candidate.get("social_velocity_ratio")) * 2, 0, 8),
+        "creator_history": clamp(_number(candidate.get("creator_history_score")), 0, 5),
     }
     score = round(sum(components.values()), 2)
     if buyer_accel < 1.20:
@@ -295,9 +295,9 @@ def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPoli
         paper_failures.append("paper unique buyers below minimum")
     if impact > policy.paper_maximum_price_impact_bps:
         paper_failures.append("paper sell price impact above maximum")
-    if float(candidate.get("top10_holder_fraction", 1)) > policy.paper_maximum_top10_holder_fraction:
+    if _number(candidate.get("top10_holder_fraction"), 1) > policy.paper_maximum_top10_holder_fraction:
         paper_failures.append("paper top-10 concentration too high")
-    if float(candidate.get("creator_fraction", 1)) > policy.paper_maximum_creator_fraction:
+    if _number(candidate.get("creator_fraction"), 1) > policy.paper_maximum_creator_fraction:
         paper_failures.append("paper creator concentration too high")
     if buyer_accel < 1.20:
         paper_failures.append("paper buyers are not accelerating")
