@@ -84,6 +84,36 @@ def five_streak_profit_floor_r(maximum_favorable_r: float) -> float:
     return 0.0
 
 
+def live_profit_protection_shadow(trade: dict, maximum_favorable_r: float) -> dict:
+    """Evaluate the Bryne ratchet against a live trade without changing orders.
+
+    This is deliberately observation-only. A paper result is not sufficient
+    authority to move an OANDA stop, but collecting the same R-normalized
+    measurements makes a prospective promotion decision possible.
+    """
+    entry = float(trade.get("entry_price") or 0)
+    stop = float(trade.get("stop_price") or 0)
+    current = float(trade.get("current_price") or 0)
+    side = str(trade.get("side") or "")
+    risk_distance = abs(entry - stop)
+    if not entry or not current or risk_distance <= 0 or side not in {"BUY", "SELL"}:
+        return {"trade_id": str(trade.get("trade_id") or ""), "eligible": False,
+                "shadow_only": True, "reason": "missing executable entry, stop, or current price"}
+    direction = 1 if side == "BUY" else -1
+    current_r = (current - entry) * direction / risk_distance
+    peak_r = max(float(maximum_favorable_r or 0), current_r)
+    floor_r = five_streak_profit_floor_r(peak_r)
+    return {
+        "trade_id": str(trade.get("trade_id") or ""), "instrument": trade.get("instrument"),
+        "side": side, "eligible": True, "shadow_only": True,
+        "source_strategy": FIVE_STREAK_FILTERED_STRATEGY,
+        "challenger": "BRYNE_RATCHET_TRANSFER_V1", "current_r": round(current_r, 6),
+        "maximum_favorable_r": round(peak_r, 6), "protected_floor_r": floor_r,
+        "would_exit_now": floor_r > 0 and current_r <= floor_r,
+        "adoption_gate": "30-50 independent closed shadow observations with positive cost-stressed expectancy",
+    }
+
+
 def signal_close_time(value: str | None) -> datetime | None:
     """OANDA M5 candle times identify candle open, not signal availability."""
     if not value:
@@ -1208,6 +1238,17 @@ class Executor:
                                  **diagnostics,
                                  "status": "REJECTED", "reason": str(exc)[:300]})
         self.ledger.event("SCAN", {"outcomes": outcomes, "paper_closes": closes})
+        broker_open_trades = [normalize_open_trade(item, next((snapshot for snapshot in snapshots
+            if snapshot.get("symbol") == item.get("instrument")), {}))
+            for item in reconciliation["open_trades"]]
+        live_profit_shadows = []
+        for trade in broker_open_trades:
+            key = "live_profit_shadow_peak_r:" + str(trade.get("trade_id") or "")
+            prior_peak = float(self.ledger.setting(key, "0") or 0)
+            shadow = live_profit_protection_shadow(trade, prior_peak)
+            if shadow.get("eligible"):
+                self.ledger.set_setting(key, str(shadow["maximum_favorable_r"]))
+            live_profit_shadows.append(shadow)
         report = {"generated_at": utcnow(), "deployment": deployment_info(), "mode": "LIVE_ARMED" if live_armed(self.adapter) else
                   "PRACTICE_ARMED" if practice_armed(self.adapter) else "PAPER_ONLY",
                   "executor_ready": True, "last_scan": utcnow(), "last_error": "",
@@ -1215,9 +1256,16 @@ class Executor:
                   "open_trade_count": len(reconciliation["open_trades"]),
                   "pending_order_count": len(reconciliation["pending_orders"]),
                   "transaction_count_since_prior_scan": len(reconciliation["transactions"]),
-                  "broker_open_trades": [normalize_open_trade(item, next((snapshot for snapshot in snapshots
-                      if snapshot.get("symbol") == item.get("instrument")), {}))
-                      for item in reconciliation["open_trades"]],
+                  "broker_open_trades": broker_open_trades,
+                  "cross_strategy_learning": {
+                      "name": "Bryne profit-protection transfer",
+                      "mode": "SHADOW_ONLY", "version": "BRYNE_RATCHET_TRANSFER_V1",
+                      "source": "Bryne and Lot-Bill Filtered V3 paper strategy",
+                      "live_forex_observations": live_profit_shadows,
+                      "live_execution_changed": False,
+                      "reason": "Measure profit capture prospectively before changing live OANDA orders",
+                      "adoption_gate": "30-50 independent closed shadow observations with positive cost-stressed expectancy",
+                  },
                   "snapshots": snapshots, "outcomes": outcomes, "paper_closes": closes,
                   "trade_checkpoints": self.ledger.trade_checkpoints(),
                   "five_streak": {"name": FIVE_STREAK_DISPLAY_NAME, "mode": "PAPER_ONLY",
