@@ -10,7 +10,8 @@ from unittest.mock import patch
 from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServer,
                                 BrokerError, Executor, broker_client_id, closed_trade_pnl, live_armed, practice_armed, safe_quantity,
                                 FIVE_STREAK_STRATEGY,
-                                five_streak_email_actions, five_streak_signals, recoverable_managed_trade,
+                                five_streak_email_actions, five_streak_profit_floor_r,
+                                five_streak_signals, recoverable_managed_trade,
                                 historical_managed_trade_outcomes,
                                 transaction_managed_intent_id, validated_snapshots)
 
@@ -31,6 +32,13 @@ class Adapter:
 
 
 class ForexExecutorTests(unittest.TestCase):
+    def test_five_streak_profit_floor_ratchets_without_moving_backward(self):
+        self.assertEqual(0, five_streak_profit_floor_r(.49))
+        self.assertEqual(.20, five_streak_profit_floor_r(.50))
+        self.assertEqual(.50, five_streak_profit_floor_r(.75))
+        self.assertEqual(.75, five_streak_profit_floor_r(1.0))
+        self.assertEqual(.75, five_streak_profit_floor_r(1.49))
+
     def test_five_streak_v3_fires_first_completion_with_filters(self):
         candles = []
         last_open = datetime.now(timezone.utc) - timedelta(minutes=5, seconds=10)
