@@ -1246,7 +1246,7 @@ class Executor:
             if snapshot.get("symbol") == item.get("instrument")), {}))
             for item in reconciliation["open_trades"]]
         intent_by_trade = {str(item.get("broker_trade_id") or ""): item
-                           for item in self.ledger.intents() if item.get("broker_trade_id")}
+                           for item in self.ledger.broker_positions() if item.get("broker_trade_id")}
         raw_notionals = []
         for raw, normalized in zip(reconciliation["open_trades"], broker_open_trades):
             symbol = str(raw.get("instrument") or "")
@@ -1354,6 +1354,17 @@ class Executor:
                   },
                   "capital_baseline_nav": float(os.getenv("FOREX_LIVE_BASELINE_USD", "0") or 0),
                   "daily_baseline_nav": float(self.ledger.setting("daily_baseline_nav", str(reconciliation["summary"]["nav"])))}
+        report["recentActions"] = [{
+            "action": ("PAPER CLOSED" if item.get("status") == "PAPER_CLOSED" else
+                       f"PAPER {item.get('side')}" if str(item.get("status") or "").startswith("PAPER_") else
+                       "LIVE CLOSED" if item.get("status") == "BROKER_CLOSED" else
+                       f"LIVE {item.get('side')}"),
+            "at": item.get("closed_at") or item.get("created_at"),
+            "symbol": item.get("symbol"),
+            "strategy": item.get("strategy"),
+            "reason": item.get("close_reason") or item.get("entry_reason") or "Trade ledger action",
+            "realizedPnlUsd": item.get("realized_pnl_usd"),
+        } for item in report["intents"]]
         trade_actions = confirmed_trade_actions(
             reconciliation["transactions"], reconciliation["summary"],
             reconciliation["open_trades"], reconciliation["pending_orders"],
