@@ -31,25 +31,29 @@ class Adapter:
 
 
 class ForexExecutorTests(unittest.TestCase):
-    def test_five_streak_uses_progress_closed_m5_and_fires_each_extended_candle(self):
+    def test_five_streak_v3_fires_first_completion_with_filters(self):
         candles = []
-        for index, close in enumerate((100.0, 100.4, 100.8, 101.2, 101.6, 102.0, 102.4)):
+        for index, close in enumerate((100.0, 100.4, 100.8, 101.2, 101.6, 102.0)):
             opened = close - .3 if index else 99.8
             candles.append({"time": f"t{index}", "open": opened, "high": close + .1,
                             "low": opened - .1, "close": close})
-        signals = five_streak_signals({"symbol":"USD_JPY", "bid":102.35, "ask":102.45,
+        signals = five_streak_signals({"symbol":"USD_JPY", "bid":102.0, "ask":102.01, "price":102.005,
+                                       "session_liquid":True,"horizon_agreement":.8,
+                                       "trend_strength":.2,"change_1h_pct":.2,
                                        "five_streak_candles":candles})
         self.assertEqual(1, len(signals))
-        self.assertEqual("t6", signals[0]["signal_time"])
+        self.assertEqual("t5", signals[0]["signal_time"])
         self.assertTrue(all(item["side"] == "BUY" for item in signals))
-        self.assertAlmostEqual(signals[0]["reference_price"] - signals[0]["stop_price"],
+        self.assertAlmostEqual(1.5 * (signals[0]["reference_price"] - signals[0]["stop_price"]),
                                signals[0]["target_price"] - signals[0]["reference_price"])
 
     def test_five_streak_neutral_candle_resets_progress(self):
         candles = [{"time":"t0","open":100,"high":101,"low":99,"close":100.4},
                    {"time":"t1","open":100.4,"high":101,"low":100,"close":100.8},
                    {"time":"t2","open":100.8,"high":101,"low":100,"close":100.8}]
-        self.assertEqual([], five_streak_signals({"symbol":"USD_JPY", "bid":100.7, "ask":100.9,
+        self.assertEqual([], five_streak_signals({"symbol":"USD_JPY", "bid":100.7, "ask":100.71,"price":100.705,
+                                                  "session_liquid":True,"horizon_agreement":.8,
+                                                  "trend_strength":.2,"change_1h_pct":.2,
                                                   "five_streak_candles":candles}))
 
     def test_five_streak_report_history_is_strategy_scoped(self):
@@ -64,7 +68,7 @@ class ForexExecutorTests(unittest.TestCase):
             self.assertEqual("2026-08-27T14:00:00Z", rows[0]["signal_time"])
             self.assertEqual("USD_JPY", rows[0]["symbol"])
 
-    def test_five_streak_max_hold_closes_and_records_result(self):
+    def test_five_streak_uses_executable_exit_and_no_time_exit(self):
         with tempfile.TemporaryDirectory() as directory:
             ledger = Ledger(directory + "/forex.sqlite3")
             proposal = {"proposal_id":"five-old","expires_at":"2020-01-01T00:00:00Z",
@@ -78,9 +82,11 @@ class ForexExecutorTests(unittest.TestCase):
                                   ("2020-01-01T00:00:00+00:00", "five-old"))
             executor = object.__new__(Executor)
             executor.ledger = ledger
-            closes = executor.supervise_paper([{"symbol":"EUR_USD","price":1.1005}])
-            self.assertEqual("MAX_HOLD", closes[0]["reason"])
-            self.assertGreater(closes[0]["realized_pnl_usd"], 0)
+            closes = executor.supervise_paper([{"symbol":"EUR_USD","bid":1.1005,"ask":1.1007,"price":1.1006}])
+            self.assertEqual([], closes)
+            closes = executor.supervise_paper([{"symbol":"EUR_USD","bid":1.0989,"ask":1.0991,"price":1.0990}])
+            self.assertEqual("STOP", closes[0]["reason"])
+            self.assertEqual(1.0989, closes[0]["fill_price"])
 
     def test_only_tagged_and_protected_trade_can_be_recovered_after_deploy(self):
         trade = {"id":"5", "instrument":"AUD_USD", "currentUnits":"-69", "price":"0.71429",
@@ -333,7 +339,7 @@ class ForexExecutorTests(unittest.TestCase):
         self.assertEqual("PAPER BUY",actions[0]["email_action"])
         self.assertEqual("Bryne and Lot-Bill Strategy",actions[0]["strategy_name"])
         self.assertEqual("PAPER_OPEN",actions[0]["status"])
-        self.assertTrue(actions[0]["action_id"].startswith("five-streak:v2:open:"))
+        self.assertTrue(actions[0]["action_id"].startswith("five-streak:v3:open:"))
         self.assertIn("Five consecutive bullish",actions[0]["entry_reason"])
         self.assertIn("paper-only",actions[0]["warnings"][0].lower())
 
