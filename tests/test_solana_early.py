@@ -58,6 +58,18 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertIn("mint_authority_active", safety_failures(value, self.policy))
         self.assertFalse(score_candidate(value, self.ledger, self.policy)["qualified"])
 
+    def test_unavailable_safety_numbers_fail_closed_without_crashing_scan(self):
+        value = candidate(
+            safety_evidence_status="UNAVAILABLE", mint_authority_active=None,
+            freeze_authority_active=None, transfer_hook_active=None,
+            non_transferable=None, creator_selling=None,
+            top10_holder_fraction=None, creator_fraction=None,
+        )
+        result = score_candidate(value, self.ledger, self.policy)
+        self.assertFalse(result["qualified"])
+        self.assertIn("verified safety evidence missing", result["failures"])
+        self.assertIn("top-10 concentration too high", result["failures"])
+
     def test_sell_simulation_is_mandatory(self):
         result = score_candidate(candidate(sell_simulation_ok=False), self.ledger, self.policy)
         self.assertFalse(result["qualified"])
