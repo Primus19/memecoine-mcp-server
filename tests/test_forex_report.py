@@ -19,6 +19,10 @@ class ForexReportTests(unittest.TestCase):
             "events": [],
             "model_review": {"model_version":"FOREX_TREND_1.1", "sample_size":0,
                              "status":"MODEL LOCKED - COLLECTING EVIDENCE"},
+            "five_streak": {"name":"Bryne and Lot-Bill Strategy", "version":"Filtered V4 Ratchet",
+                "enabled":True, "promotion_checkpoint": {
+                    "profitable_closes_observed":1, "required_additional_profitable_closes":2,
+                    "eligible_for_live_review":False}},
             "risk_configuration": {"minimum_score":80,"maximum_open_positions":1,
                 "maximum_risk_per_trade_usd":.5,"maximum_combined_risk_usd":.5,
                 "current_open_risk_usd":0,"daily_loss_limit_usd":2.5,
@@ -29,7 +33,9 @@ class ForexReportTests(unittest.TestCase):
                 "protected_floor_r": .5, "would_exit_now": True}]},
         })
         self.assertIn("Production Forex Dashboard", body)
-        self.assertIn("Five-Streak paper experiment", body)
+        self.assertIn("Filtered V4 Ratchet", body)
+        self.assertIn("1 / 2 profitable closes", body)
+        self.assertIn("Historical V2/V3 trades are excluded", body)
         self.assertIn("Bryne and Lot-Bill Strategy", body)
         self.assertIn("Signal UTC", body)
         self.assertIn("Market and calendar", body)
