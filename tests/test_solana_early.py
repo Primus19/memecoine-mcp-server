@@ -133,7 +133,7 @@ class SolanaEarlyTests(unittest.TestCase):
 
     @patch("app.solana_early.json_request")
     def test_goplus_primitive_zero_flags_are_inactive(self, request):
-        request.return_value = {"result": {"mint1": {
+        request.return_value = {"code": 1, "result": {"mint1": {
             "mintable": "0", "freezable": False, "transfer_hook": "",
             "non_transferable": "0",
             "holders": [{"percent": "2.5"}, {"percent": "7.5"}],
@@ -149,12 +149,16 @@ class SolanaEarlyTests(unittest.TestCase):
 
     @patch("app.solana_early.json_request")
     def test_goplus_missing_authority_flags_fail_closed(self, request):
-        request.return_value = {"result": {"mint1": {
+        request.return_value = {"code": 1, "result": {"mint1": {
             "holders": [{"percent": ".1"}], "creators": [{"percent": ".01"}],
         }}}
-        result = goplus_safety("mint1")
-        self.assertTrue(result["mint_authority_active"])
-        self.assertTrue(result["freeze_authority_active"])
+        with self.assertRaisesRegex(RuntimeError, "fact missing"):
+            goplus_safety("mint1")
+
+    @patch("app.solana_early.json_request", return_value={"code": 5000, "message": "system error", "result": None})
+    def test_goplus_provider_error_is_not_mislabeled_verified(self, _request):
+        with self.assertRaisesRegex(RuntimeError, "provider error"):
+            goplus_safety("mint1")
 
     @patch("app.solana_early.jupiter_sell_check", return_value=(True, 10.0))
     @patch("app.solana_early.goplus_safety", return_value={
