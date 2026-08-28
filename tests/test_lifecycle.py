@@ -4,6 +4,12 @@ from app.lifecycle import profit_protection_challenger,supervision_levels
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_half_r_favorable_move_activates_risk_ratchet(self):
+        result = supervision_levels(self.ticket, entry=100, mark=100, high_water=104)
+        self.assertTrue(result["risk_ratchet_active"])
+        self.assertAlmostEqual(-.1, result["risk_ratchet_floor_r"])
+        self.assertGreater(result["effective_stop_price"], self.ticket["stop_price"])
+
     def setUp(self):
         self.ticket={"stop_price":92,"trail_activation_pct":5,"trail_pct":4,
                      "spread_bps":20,"slippage_bps":20,
