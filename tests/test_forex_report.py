@@ -23,6 +23,10 @@ class ForexReportTests(unittest.TestCase):
                 "maximum_risk_per_trade_usd":.5,"maximum_combined_risk_usd":.5,
                 "current_open_risk_usd":0,"daily_loss_limit_usd":2.5,
                 "maximum_notional_usd":50,"maximum_margin_used_usd":5,"currency_overlap_guard":True},
+            "cross_strategy_learning": {"live_forex_observations": [{
+                "eligible": True, "trade_id": "10", "instrument": "EUR_JPY",
+                "current_r": .3, "maximum_favorable_r": .8,
+                "protected_floor_r": .5, "would_exit_now": True}]},
         })
         self.assertIn("Production Forex Dashboard", body)
         self.assertIn("Five-Streak paper experiment", body)
@@ -40,6 +44,9 @@ class ForexReportTests(unittest.TestCase):
         self.assertIn("Multi Horizon Buy signal; score 82 met minimum 80.", body)
         self.assertIn("PURPLE • Bryne and Lot-Bill Strategy", body)
         self.assertIn("BLUE • Live Control Strategy", body)
+        self.assertIn("Cross-strategy learning", body)
+        self.assertIn("WOULD EXIT", body)
+        self.assertIn("SHADOW ONLY", body)
         self.assertNotIn("<script", body.lower())
 
 
