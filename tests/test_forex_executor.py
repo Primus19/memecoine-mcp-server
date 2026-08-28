@@ -11,7 +11,7 @@ from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServe
                                 BrokerError, Executor, broker_client_id, closed_trade_pnl, live_armed, practice_armed, safe_quantity,
                                 FIVE_STREAK_STRATEGY,
                                 five_streak_email_actions, five_streak_profit_floor_r,
-                                five_streak_signals, recoverable_managed_trade,
+                                five_streak_signals, live_profit_protection_shadow, recoverable_managed_trade,
                                 historical_managed_trade_outcomes,
                                 transaction_managed_intent_id, validated_snapshots)
 
@@ -38,6 +38,20 @@ class ForexExecutorTests(unittest.TestCase):
         self.assertEqual(.50, five_streak_profit_floor_r(.75))
         self.assertEqual(.75, five_streak_profit_floor_r(1.0))
         self.assertEqual(.75, five_streak_profit_floor_r(1.49))
+
+    def test_bryne_ratchet_transfer_is_shadow_only(self):
+        trade = {"trade_id":"10", "instrument":"EUR_JPY", "side":"BUY",
+                 "entry_price":185.748, "stop_price":185.284, "current_price":185.9}
+        result = live_profit_protection_shadow(trade, .8)
+        self.assertTrue(result["shadow_only"])
+        self.assertEqual("BRYNE_RATCHET_TRANSFER_V1", result["challenger"])
+        self.assertEqual(.5, result["protected_floor_r"])
+        self.assertTrue(result["would_exit_now"])
+
+    def test_bryne_ratchet_transfer_never_uses_incomplete_trade(self):
+        result = live_profit_protection_shadow({"trade_id":"x"}, 1.0)
+        self.assertFalse(result["eligible"])
+        self.assertTrue(result["shadow_only"])
 
     def test_five_streak_v3_fires_first_completion_with_filters(self):
         candles = []
