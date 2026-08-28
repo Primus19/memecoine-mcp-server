@@ -73,6 +73,17 @@ def five_streak_position_pnl(position: dict, price: float) -> float:
             * float(position["maximum_loss_usd"]))
 
 
+def five_streak_profit_floor_r(maximum_favorable_r: float) -> float:
+    """Paper-only ratchet; the protected floor can only move upward."""
+    if maximum_favorable_r >= 1.0:
+        return .75
+    if maximum_favorable_r >= .75:
+        return .50
+    if maximum_favorable_r >= .50:
+        return .20
+    return 0.0
+
+
 def signal_close_time(value: str | None) -> datetime | None:
     """OANDA M5 candle times identify candle open, not signal availability."""
     if not value:
@@ -178,7 +189,8 @@ def five_streak_signals(snapshot: dict) -> list[dict]:
                                      (1 if side == "BUY" else -1) * 10_000, 4),
         "experiment": {"fixed_stop_distance": risk, "atr_14": atr,
                        "volatility_stop_1_5atr": 1.5 * atr if atr > 0 else None,
-                       "profit_protection_activation_r": .5, "profit_floor_r": .1},
+                       "profit_protection_ladder": {"0.50R": "0.20R", "0.75R": "0.50R",
+                                                    "1.00R": "0.75R"}},
         "entry_reason": (f"Filtered V3: first five-candle {side} streak; agreement={agreement:.2f}, "
                          f"trend={trend:.4f}, 1h={one:.4f}%, spread={spread_bps:.2f}bps; target=1.5R."),
     })
@@ -1079,8 +1091,11 @@ class Executor:
             if price <= 0: continue
             opened = datetime.fromisoformat(str(position["created_at"]).replace("Z", "+00:00"))
             elapsed = max(0, (datetime.now(UTC) - opened.astimezone(UTC)).total_seconds() / 60)
+            checkpoint_tolerance = max(2.0, float(os.getenv("FOREX_CHECKPOINT_TOLERANCE_MINUTES", "2")))
             for checkpoint in (0, 15, 30, 60, 120, 240):
-                if elapsed >= checkpoint:
+                # Never label one late observation as several historical
+                # checkpoints. Exact history must come from timestamped candles.
+                if checkpoint <= elapsed < checkpoint + checkpoint_tolerance:
                     self.ledger.record_checkpoint(position, checkpoint, snapshot, price)
             if position.get("status") != "PAPER_OPEN":
                 continue
@@ -1096,11 +1111,13 @@ class Executor:
                     current_pnl, utcnow(), position["id"]))
             reason = "STOP" if (side == "BUY" and price <= stop) or (side == "SELL" and price >= stop) else \
                      "TARGET" if (side == "BUY" and price >= target) or (side == "SELL" and price <= target) else ""
+            maximum_loss = float(position["maximum_loss_usd"])
+            maximum_favorable = max(current_pnl, float(position.get("max_favorable_pnl_usd") or 0))
+            floor_r = five_streak_profit_floor_r(maximum_favorable / maximum_loss) if maximum_loss > 0 else 0
             if (not reason and position.get("strategy") == FIVE_STREAK_FILTERED_STRATEGY
                     and os.getenv("FOREX_FIVE_STREAK_V3_PROFIT_PROTECTION", "true").lower() == "true"
-                    and max(current_pnl, float(position.get("max_favorable_pnl_usd") or 0)) >= .5 * float(position["maximum_loss_usd"])
-                    and current_pnl <= .1 * float(position["maximum_loss_usd"])):
-                reason = "PROFIT_PROTECTION_SHADOW"
+                    and floor_r > 0 and current_pnl <= floor_r * maximum_loss):
+                reason = f"PROFIT_PROTECTION_{floor_r:.2f}R"
             if reason:
                 direction = 1 if side == "BUY" else -1
                 if position.get("strategy") in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY}:
