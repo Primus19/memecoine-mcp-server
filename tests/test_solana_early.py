@@ -68,7 +68,9 @@ class SolanaEarlyTests(unittest.TestCase):
         result = score_candidate(value, self.ledger, self.policy)
         self.assertFalse(result["qualified"])
         self.assertIn("verified safety evidence missing", result["failures"])
-        self.assertIn("top-10 concentration too high", result["failures"])
+        self.assertIn("top-10 concentration unavailable", result["failures"])
+        self.assertIsNone(result["top10_holder_fraction"])
+        self.assertEqual("UNAVAILABLE", result["concentration_evidence_status"])
 
     def test_sell_simulation_is_mandatory(self):
         result = score_candidate(candidate(sell_simulation_ok=False), self.ledger, self.policy)

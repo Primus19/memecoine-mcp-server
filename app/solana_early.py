@@ -192,6 +192,17 @@ class Ledger:
                                    (mint, cutoff)).fetchall()
         return [str(row[0]) for row in rows]
 
+    def wallet_evidence(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self.db.execute("""SELECT wallet,mint,side,quantity,observed_at,signature,payload
+            FROM wallet_events ORDER BY observed_at DESC LIMIT ?""", (limit,)).fetchall()
+        evidence = []
+        for row in rows:
+            item = dict(row); payload = json.loads(item.pop("payload") or "{}")
+            item["quote_usdc"] = payload.get("quote_usdc")
+            item["wallet_stats"] = self.wallet_stats(str(item["wallet"]))
+            evidence.append(item)
+        return evidence
+
 
 def smart_wallet_score(wallets: list[str], ledger: Ledger) -> tuple[float, list[dict[str, Any]]]:
     qualified: list[dict[str, Any]] = []
@@ -217,9 +228,13 @@ def safety_failures(candidate: dict[str, Any], policy: EarlyPolicy) -> list[str]
             failures.append(field)
     if candidate.get("sell_simulation_ok") is not True:
         failures.append("sell simulation failed")
-    if _number(candidate.get("top10_holder_fraction"), 1) > policy.maximum_top10_holder_fraction:
+    if candidate.get("top10_holder_fraction") is None:
+        failures.append("top-10 concentration unavailable")
+    elif _number(candidate.get("top10_holder_fraction")) > policy.maximum_top10_holder_fraction:
         failures.append("top-10 concentration too high")
-    if _number(candidate.get("creator_fraction"), 1) > policy.maximum_creator_fraction:
+    if candidate.get("creator_fraction") is None:
+        failures.append("creator concentration unavailable")
+    elif _number(candidate.get("creator_fraction")) > policy.maximum_creator_fraction:
         failures.append("creator concentration too high")
     return failures
 
@@ -264,15 +279,17 @@ def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPoli
                 ((_number(candidate.get("buy_volume_5m_usd")) -
                   _number(candidate.get("sell_volume_5m_usd"))) / total) if total else -1.0)
     wallet_points, qualified_wallets = smart_wallet_score(candidate.get("buyer_wallets") or [], ledger)
-    top10 = _number(candidate.get("top10_holder_fraction"), 1)
-    creator = _number(candidate.get("creator_fraction"), 1)
+    top10_raw, creator_raw = candidate.get("top10_holder_fraction"), candidate.get("creator_fraction")
+    top10 = _number(top10_raw) if top10_raw is not None else None
+    creator = _number(creator_raw) if creator_raw is not None else None
 
     components = {
         "safety": 25.0 if not safety_failures(candidate, policy) else 0.0,
         "liquidity": clamp(math.log10(max(liquidity, 1) / policy.minimum_liquidity_usd + 1) * 12, 0, 15),
         "buyer_acceleration": clamp((buyer_accel - 1) * 12, 0, 15),
         "buy_pressure": clamp((pressure - .05) * 20, 0, 12),
-        "distribution": clamp((.55 - top10) * 20 + (.12 - creator) * 25, 0, 10),
+        "distribution": (clamp((.55 - top10) * 20 + (.12 - creator) * 25, 0, 10)
+                         if top10 is not None and creator is not None else 0.0),
         "smart_wallets": wallet_points,
         "social_velocity": clamp(_number(candidate.get("social_velocity_ratio")) * 2, 0, 8),
         "creator_history": clamp(_number(candidate.get("creator_history_score")), 0, 5),
@@ -295,9 +312,13 @@ def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPoli
         paper_failures.append("paper unique buyers below minimum")
     if impact > policy.paper_maximum_price_impact_bps:
         paper_failures.append("paper sell price impact above maximum")
-    if _number(candidate.get("top10_holder_fraction"), 1) > policy.paper_maximum_top10_holder_fraction:
+    if top10 is None:
+        paper_failures.append("paper top-10 concentration unavailable")
+    elif top10 > policy.paper_maximum_top10_holder_fraction:
         paper_failures.append("paper top-10 concentration too high")
-    if _number(candidate.get("creator_fraction"), 1) > policy.paper_maximum_creator_fraction:
+    if creator is None:
+        paper_failures.append("paper creator concentration unavailable")
+    elif creator > policy.paper_maximum_creator_fraction:
         paper_failures.append("paper creator concentration too high")
     if buyer_accel < 1.20:
         paper_failures.append("paper buyers are not accelerating")
@@ -320,7 +341,13 @@ def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPoli
         "token_age_minutes": round(age, 4), "liquidity_usd": round(liquidity, 2),
         "unique_buyers_5m": buyers, "trades_5m": int(_number(candidate.get("trades_5m"))),
         "sell_price_impact_bps": round(impact, 2),
-        "top10_holder_fraction": round(top10, 6), "creator_fraction": round(creator, 6),
+        "top10_holder_fraction": round(top10, 6) if top10 is not None else None,
+        "creator_fraction": round(creator, 6) if creator is not None else None,
+        "concentration_evidence_status": ("VERIFIED" if top10 is not None and creator is not None
+                                          else "UNAVAILABLE"),
+        "pool_address": str(candidate.get("pool") or candidate.get("pool_address") or ""),
+        "source_observed_at": str(candidate.get("observed_at") or ""),
+        "source_url": str(candidate.get("source_url") or ""),
         "price_change_5m_pct": round(price_change_5m, 4),
         "price_change_15m_pct": round(_number(candidate.get("price_change_15m_pct")), 4),
         "safety_evidence_status": str(candidate.get("safety_evidence_status") or "MISSING"),
@@ -368,9 +395,13 @@ def score_pumpfun_ev_candidate(candidate: dict[str, Any], ledger: Ledger,
         failures.append("sell price impact above maximum")
     if candidate.get("safety_evidence_status") != "VERIFIED":
         failures.append("verified safety evidence missing")
-    if _number(candidate.get("top10_holder_fraction"), 1) > policy.maximum_top10_holder_fraction:
+    if candidate.get("top10_holder_fraction") is None:
+        failures.append("pumpfun top-10 concentration unavailable")
+    elif _number(candidate.get("top10_holder_fraction")) > policy.maximum_top10_holder_fraction:
         failures.append("pumpfun top-10 concentration too high")
-    if _number(candidate.get("creator_fraction"), 1) > policy.maximum_creator_fraction:
+    if candidate.get("creator_fraction") is None:
+        failures.append("pumpfun creator concentration unavailable")
+    elif _number(candidate.get("creator_fraction")) > policy.maximum_creator_fraction:
         failures.append("pumpfun creator concentration too high")
     if control["score"] < policy.minimum_control_score:
         failures.append(f"control evidence score {control['score']:.2f} below {policy.minimum_control_score:.2f}")
@@ -647,6 +678,7 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
             sell_ok, sell_impact = False, 9999.0
         return {
             "mint": mint, "pool": pool, "symbol": str(base_token.get("symbol") or ""),
+            "source_url": f"{base}/networks/solana/pools/{pool}",
             "price_usd": _number(attributes.get("base_token_price_usd")),
             "decimals": int(base_token.get("decimals") or 0),
             "observed_at": utcnow(), "token_age_minutes": age,
@@ -805,7 +837,11 @@ def main() -> None:
             with LOCK:
                 STATE.update(ok=True, scanned_at=utcnow(), scan_status="COMPLETE",
                              candidates=results[:100], error="", feed=feed,
-                             strategy_diagnostics=diagnostics)
+                             strategy_diagnostics=diagnostics,
+                             watched_wallets=[value.strip() for value in
+                                 os.getenv("SOLANA_WATCH_WALLETS", "").split(",") if value.strip()],
+                             wallet_evidence=ledger.wallet_evidence(),
+                             wallet_events=len(ledger.wallet_evidence()))
         except Exception as exc:
             with LOCK:
                 STATE.update(ok=False, scanned_at=utcnow(), scan_status="FAILED", error=str(exc)[:500])

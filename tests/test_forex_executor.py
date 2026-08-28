@@ -4,7 +4,7 @@ import threading
 import urllib.request
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServer,
@@ -33,16 +33,18 @@ class Adapter:
 class ForexExecutorTests(unittest.TestCase):
     def test_five_streak_v3_fires_first_completion_with_filters(self):
         candles = []
+        last_open = datetime.now(timezone.utc) - timedelta(minutes=5, seconds=10)
         for index, close in enumerate((100.0, 100.4, 100.8, 101.2, 101.6, 102.0)):
             opened = close - .3 if index else 99.8
-            candles.append({"time": f"t{index}", "open": opened, "high": close + .1,
+            candles.append({"time": (last_open - timedelta(minutes=5 * (5-index))).isoformat(), "open": opened, "high": close + .1,
                             "low": opened - .1, "close": close})
         signals = five_streak_signals({"symbol":"USD_JPY", "bid":102.0, "ask":102.01, "price":102.005,
                                        "session_liquid":True,"horizon_agreement":.8,
                                        "trend_strength":.2,"change_1h_pct":.2,
                                        "five_streak_candles":candles})
         self.assertEqual(1, len(signals))
-        self.assertEqual("t5", signals[0]["signal_time"])
+        self.assertEqual(last_open.isoformat(), signals[0]["signal_time"])
+        self.assertLess(signals[0]["evaluation_latency_seconds"], 30)
         self.assertTrue(all(item["side"] == "BUY" for item in signals))
         self.assertAlmostEqual(1.5 * (signals[0]["reference_price"] - signals[0]["stop_price"]),
                                signals[0]["target_price"] - signals[0]["reference_price"])

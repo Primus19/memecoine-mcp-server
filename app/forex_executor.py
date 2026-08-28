@@ -8,7 +8,7 @@ import threading
 import time
 import urllib.request
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .broker_adapters import BrokerError, OandaAdapter
@@ -73,6 +73,17 @@ def five_streak_position_pnl(position: dict, price: float) -> float:
             * float(position["maximum_loss_usd"]))
 
 
+def signal_close_time(value: str | None) -> datetime | None:
+    """OANDA M5 candle times identify candle open, not signal availability."""
+    if not value:
+        return None
+    try:
+        opened = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return opened.astimezone(UTC) + timedelta(minutes=5)
+    except ValueError:
+        return None
+
+
 def five_streak_baseline_signals(snapshot: dict) -> list[dict]:
     """Reproduce the attached v2 specification for comparison only."""
     candles = list(snapshot.get("five_streak_candles") or [])
@@ -127,6 +138,11 @@ def five_streak_signals(snapshot: dict) -> list[dict]:
     if not baseline:
         return []
     proposal = baseline[-1]
+    closed_at = signal_close_time(proposal.get("signal_time"))
+    evaluation_latency = ((datetime.now(UTC) - closed_at).total_seconds()
+                          if closed_at else float("inf"))
+    if evaluation_latency < -5 or evaluation_latency > 300:
+        raise MultiAssetRejected("Five-Streak v3 signal is stale by more than one completed M5 candle")
     # Extended streak entries created serially correlated losses in the first
     # sample. V3 acts only on the first candle that completes a five-run.
     streak = 0
@@ -144,11 +160,25 @@ def five_streak_signals(snapshot: dict) -> list[dict]:
     if spread_bps > float(os.getenv("FOREX_FIVE_STREAK_V3_MAX_SPREAD_BPS", "3")):
         raise MultiAssetRejected("Five-Streak v3 executable spread too wide")
     risk = abs(proposal["reference_price"] - proposal["stop_price"])
+    signal_close = float(proposal.get("signal_close") or proposal["reference_price"])
+    adverse_drift_r = ((proposal["reference_price"] - signal_close) / risk
+                       if side == "BUY" else (signal_close - proposal["reference_price"]) / risk)
+    if adverse_drift_r > float(os.getenv("FOREX_FIVE_STREAK_V3_MAX_ENTRY_DRIFT_R", ".20")):
+        raise MultiAssetRejected("Five-Streak v3 executable entry chased more than 0.20R beyond signal close")
+    atr = float(snapshot.get("atr_14") or 0)
     proposal.update({
         "proposal_id": hashlib.sha256(proposal["proposal_id"].encode()).hexdigest(),
         "target_price": proposal["reference_price"] + (1.5 * risk if side == "BUY" else -1.5 * risk),
         "strategy": FIVE_STREAK_FILTERED_STRATEGY,
         "model_version": "five-streak-filtered-v3-paper",
+        "signal_closed_at": closed_at.isoformat() if closed_at else None,
+        "evaluation_latency_seconds": round(evaluation_latency, 3),
+        "entry_spread_bps": round(spread_bps, 4),
+        "entry_slippage_bps": round((proposal["reference_price"] - signal_close) / signal_close *
+                                     (1 if side == "BUY" else -1) * 10_000, 4),
+        "experiment": {"fixed_stop_distance": risk, "atr_14": atr,
+                       "volatility_stop_1_5atr": 1.5 * atr if atr > 0 else None,
+                       "profit_protection_activation_r": .5, "profit_floor_r": .1},
         "entry_reason": (f"Filtered V3: first five-candle {side} streak; agreement={agreement:.2f}, "
                          f"trend={trend:.4f}, 1h={one:.4f}%, spread={spread_bps:.2f}bps; target=1.5R."),
     })
@@ -174,12 +204,25 @@ class Ledger:
               realized_pnl_usd REAL, score REAL, model_version TEXT, closed_at TEXT,
               max_favorable_pnl_usd REAL DEFAULT 0, max_adverse_pnl_usd REAL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS trade_checkpoints(
+              intent_id TEXT NOT NULL, checkpoint_minutes INTEGER NOT NULL,
+              observed_at TEXT NOT NULL, executable_price REAL NOT NULL,
+              pnl_usd REAL NOT NULL, source_observed_at TEXT,
+              source_url TEXT, status TEXT NOT NULL,
+              PRIMARY KEY(intent_id,checkpoint_minutes));
             """)
             columns = {str(row[1]) for row in self.db.execute("PRAGMA table_info(intents)")}
             for name, kind in (("score", "REAL"), ("model_version", "TEXT"), ("closed_at", "TEXT"),
                                ("strategy", "TEXT"), ("signal_time", "TEXT"), ("close_reason", "TEXT"),
                                ("close_price", "REAL"),
                                ("entry_reason", "TEXT"),
+                               ("signal_closed_at", "TEXT"),
+                               ("evaluation_latency_seconds", "REAL"),
+                               ("entry_spread_bps", "REAL"),
+                               ("entry_slippage_bps", "REAL"),
+                               ("experiment_json", "TEXT"),
+                               ("max_favorable_at", "TEXT"),
+                               ("max_adverse_at", "TEXT"),
                                ("max_favorable_pnl_usd", "REAL DEFAULT 0"),
                                ("max_adverse_pnl_usd", "REAL DEFAULT 0")):
                 if name not in columns:
@@ -226,12 +269,30 @@ class Ledger:
     def add_intent(self, proposal: dict, mode: str, status: str) -> None:
         with self.db:
             self.db.execute("""INSERT INTO intents(id,created_at,expires_at,symbol,side,entry_price,quantity,stop_price,target_price,
-              maximum_loss_usd,mode,status,score,model_version,strategy,signal_time,entry_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              maximum_loss_usd,mode,status,score,model_version,strategy,signal_time,entry_reason,
+              signal_closed_at,evaluation_latency_seconds,entry_spread_bps,entry_slippage_bps,experiment_json)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (proposal["proposal_id"], utcnow(), proposal["expires_at"], proposal["symbol"], proposal["side"], proposal["reference_price"],
                proposal["quantity"], proposal["stop_price"], proposal["target_price"], proposal["maximum_loss_usd"], mode, status,
                proposal.get("score"), proposal.get("model_version", FOREX_MODEL_VERSION),
                proposal.get("strategy", "FOREX_CONTROL"), proposal.get("signal_time"),
-               proposal.get("entry_reason")))
+               proposal.get("entry_reason"), proposal.get("signal_closed_at"),
+               proposal.get("evaluation_latency_seconds"), proposal.get("entry_spread_bps"),
+               proposal.get("entry_slippage_bps"), json.dumps(proposal.get("experiment") or {})))
+
+    def record_checkpoint(self, intent: dict, checkpoint: int, snapshot: dict, price: float) -> bool:
+        pnl = five_streak_position_pnl(intent, price)
+        source_urls = snapshot.get("source_urls") or []
+        with self.db:
+            cursor = self.db.execute("""INSERT OR IGNORE INTO trade_checkpoints
+                VALUES(?,?,?,?,?,?,?,?)""", (intent["id"], checkpoint, utcnow(), price, pnl,
+                snapshot.get("observed_at"), source_urls[0] if source_urls else None,
+                intent.get("status") or "UNKNOWN"))
+        return cursor.rowcount == 1
+
+    def trade_checkpoints(self, limit: int = 250) -> list[dict]:
+        return [dict(row) for row in self.db.execute(
+            "SELECT * FROM trade_checkpoints ORDER BY observed_at DESC LIMIT ?", (limit,)).fetchall()]
 
     def strategy_stats(self, strategy: str) -> dict:
         rows = [dict(row) for row in self.db.execute(
@@ -384,6 +445,32 @@ def closed_trade_details(transactions: list[dict]) -> dict[str, dict]:
 
 def closed_trade_pnl(transactions: list[dict]) -> dict[str, float]:
     return {trade_id: float(detail["pnl"]) for trade_id, detail in closed_trade_details(transactions).items()}
+
+
+def normalize_open_trade(trade: dict, snapshot: dict | None = None) -> dict:
+    """Expose the broker facts needed to independently audit every live position."""
+    units = float(trade.get("currentUnits") or trade.get("initialUnits") or 0)
+    stop = trade.get("stopLossOrder") or {}
+    target = trade.get("takeProfitOrder") or {}
+    snapshot = snapshot or {}
+    executable = snapshot.get("bid") if units > 0 else snapshot.get("ask") if units < 0 else None
+    return {
+        "trade_id": str(trade.get("id") or ""),
+        "instrument": str(trade.get("instrument") or ""),
+        "side": "BUY" if units > 0 else "SELL" if units < 0 else "UNKNOWN",
+        "units": abs(units), "entry_price": float(trade.get("price") or 0),
+        "open_time": trade.get("openTime"),
+        "current_price": float(executable or trade.get("averageClosePrice") or 0) or None,
+        "current_price_observed_at": snapshot.get("observed_at"),
+        "current_spread_bps": snapshot.get("spread_bps"),
+        "unrealized_pnl_usd": float(trade.get("unrealizedPL") or 0),
+        "financing_usd": float(trade.get("financing") or 0),
+        "stop_order_id": str(stop.get("id") or ""),
+        "stop_price": float(stop.get("price") or 0) or None,
+        "target_order_id": str(target.get("id") or ""),
+        "target_price": float(target.get("price") or 0) or None,
+        "client_tag": str((trade.get("clientExtensions") or {}).get("tag") or ""),
+    }
 
 
 def historical_managed_trade_outcomes(transactions: list[dict], mode: str) -> list[dict]:
@@ -980,21 +1067,40 @@ class Executor:
     def supervise_paper(self, snapshots: list[dict]) -> list[dict]:
         marks = {str(item.get("symbol")): item for item in snapshots}
         closes = []
-        for position in self.ledger.paper_positions():
+        checkpoint_rows = [dict(row) for row in self.ledger.db.execute(
+            """SELECT * FROM intents WHERE strategy IN (?,?) AND
+            (status='PAPER_OPEN' OR (closed_at IS NOT NULL AND closed_at>=datetime('now','-5 hours')))""",
+            (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY)).fetchall()]
+        for position in checkpoint_rows:
             snapshot = marks.get(position["symbol"], {})
             # A long can be sold at bid; a short must be bought back at ask.
             executable = snapshot.get("bid") if position["side"] == "BUY" else snapshot.get("ask")
             price = float(executable or snapshot.get("price") or 0)
             if price <= 0: continue
+            opened = datetime.fromisoformat(str(position["created_at"]).replace("Z", "+00:00"))
+            elapsed = max(0, (datetime.now(UTC) - opened.astimezone(UTC)).total_seconds() / 60)
+            for checkpoint in (0, 15, 30, 60, 120, 240):
+                if elapsed >= checkpoint:
+                    self.ledger.record_checkpoint(position, checkpoint, snapshot, price)
+            if position.get("status") != "PAPER_OPEN":
+                continue
             side = position["side"]; stop = float(position["stop_price"]); target = float(position["target_price"])
             current_pnl = five_streak_position_pnl(position, price) if position.get("strategy") in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY} else 0.0
             with self.ledger.db:
                 self.ledger.db.execute("""UPDATE intents SET
                     max_favorable_pnl_usd=MAX(COALESCE(max_favorable_pnl_usd,0),?),
-                    max_adverse_pnl_usd=MIN(COALESCE(max_adverse_pnl_usd,0),?) WHERE id=?""",
-                    (current_pnl, current_pnl, position["id"]))
+                    max_adverse_pnl_usd=MIN(COALESCE(max_adverse_pnl_usd,0),?),
+                    max_favorable_at=CASE WHEN ?>COALESCE(max_favorable_pnl_usd,0) THEN ? ELSE max_favorable_at END,
+                    max_adverse_at=CASE WHEN ?<COALESCE(max_adverse_pnl_usd,0) THEN ? ELSE max_adverse_at END
+                    WHERE id=?""", (current_pnl, current_pnl, current_pnl, utcnow(),
+                    current_pnl, utcnow(), position["id"]))
             reason = "STOP" if (side == "BUY" and price <= stop) or (side == "SELL" and price >= stop) else \
                      "TARGET" if (side == "BUY" and price >= target) or (side == "SELL" and price <= target) else ""
+            if (not reason and position.get("strategy") == FIVE_STREAK_FILTERED_STRATEGY
+                    and os.getenv("FOREX_FIVE_STREAK_V3_PROFIT_PROTECTION", "true").lower() == "true"
+                    and max(current_pnl, float(position.get("max_favorable_pnl_usd") or 0)) >= .5 * float(position["maximum_loss_usd"])
+                    and current_pnl <= .1 * float(position["maximum_loss_usd"])):
+                reason = "PROFIT_PROTECTION_SHADOW"
             if reason:
                 direction = 1 if side == "BUY" else -1
                 if position.get("strategy") in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY}:
@@ -1092,7 +1198,11 @@ class Executor:
                   "open_trade_count": len(reconciliation["open_trades"]),
                   "pending_order_count": len(reconciliation["pending_orders"]),
                   "transaction_count_since_prior_scan": len(reconciliation["transactions"]),
+                  "broker_open_trades": [normalize_open_trade(item, next((snapshot for snapshot in snapshots
+                      if snapshot.get("symbol") == item.get("instrument")), {}))
+                      for item in reconciliation["open_trades"]],
                   "snapshots": snapshots, "outcomes": outcomes, "paper_closes": closes,
+                  "trade_checkpoints": self.ledger.trade_checkpoints(),
                   "five_streak": {"name": FIVE_STREAK_DISPLAY_NAME, "mode": "PAPER_ONLY",
                                   "version": "Filtered V3", "timeframe": "M5",
                                   "enabled": five_streak_enabled(),
