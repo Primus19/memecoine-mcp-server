@@ -39,7 +39,7 @@ class MultiAssetTests(unittest.TestCase):
 
     def test_forex_aligned_liquid_signal_reaches_calibrated_threshold(self):
         snapshot = {**self.base("FOREX", "EUR_USD"), "change_1h_pct": .02,
-                    "change_24h_pct": .20, "trend_strength": .01,
+                    "change_24h_pct": .20, "trend_strength": .08,
                     "liquidity_score": 1, "session_liquid": True,
                     "economic_event_within_minutes": 120}
         engine = ForexEngine(AssetPolicy(minimum_score=75, max_risk_usd=.5))
