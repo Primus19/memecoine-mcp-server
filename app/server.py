@@ -312,7 +312,19 @@ async def dashboard(request):
         "Cache-Control":"no-store",
         "X-Content-Type-Options":"nosniff",
         "Referrer-Policy":"no-referrer",
-        "Content-Security-Policy":"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy":"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    })
+@mcp.custom_route("/dashboard/data",methods=["GET"])
+async def dashboard_data(request):
+    if not dashboard_authorized(request.headers.get("authorization", "")):
+        return JSONResponse({"error":"unauthorized"},status_code=401,headers={
+            "WWW-Authenticate": 'Basic realm="Primus Trading Dashboard"',
+            "Cache-Control":"no-store",
+        })
+    return JSONResponse(build_snapshot(hourly_snapshot),headers={
+        "Cache-Control":"no-store, max-age=0",
+        "X-Content-Type-Options":"nosniff",
+        "Referrer-Policy":"no-referrer",
     })
 @mcp.custom_route("/setup",methods=["GET","POST"])
 async def setup(request):
