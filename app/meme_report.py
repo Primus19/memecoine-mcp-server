@@ -131,7 +131,20 @@ def render_meme_report(report: dict) -> str:
     recommendations_html = "".join(rec_rows) or '<tr><td colspan="9" style="padding:12px;color:#64748b">No recent recommendations.</td></tr>'
 
     event_rows = []
-    for event in events[:20]:
+    display_events = []
+    routine_counts: dict[str, int] = {}
+    for event in events:
+        kind = str(event.get("kind") or "")
+        if kind in {"PREFLIGHT_OK", "SUPERVISION_OK"}:
+            routine_counts[kind] = routine_counts.get(kind, 0) + 1
+        else:
+            display_events.append(event)
+    for kind, count in routine_counts.items():
+        first = next(event for event in events if str(event.get("kind") or "") == kind)
+        display_events.append({**first, "kind": f"{kind} × {count}",
+                               "payload": {"summary": f"{count} identical routine checks aggregated"}})
+    display_events.sort(key=lambda item: str(item.get("at") or ""), reverse=True)
+    for event in display_events[:20]:
         kind = str(event.get("kind") or "")
         detail_color = "#991b1b" if "ERROR" in kind or "FAILED" in kind else "#475569"
         event_rows.append(
