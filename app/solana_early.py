@@ -49,11 +49,13 @@ class EarlyPolicy:
     maximum_price_impact_bps: float = 250.0
     maximum_probe_usd: float = 3.0
     maximum_loss_usd: float = 1.0
-    paper_minimum_score: float = 25.0
-    paper_minimum_liquidity_usd: float = 2_500.0
-    paper_maximum_token_age_minutes: float = 1_440.0
-    paper_minimum_unique_buyers_5m: int = 3
-    paper_maximum_price_impact_bps: float = 500.0
+    paper_minimum_score: float = 40.0
+    paper_minimum_liquidity_usd: float = 7_500.0
+    paper_maximum_token_age_minutes: float = 180.0
+    paper_minimum_unique_buyers_5m: int = 10
+    paper_maximum_price_impact_bps: float = 250.0
+    paper_maximum_top10_holder_fraction: float = 0.80
+    paper_maximum_creator_fraction: float = 0.30
 
     @classmethod
     def from_env(cls) -> "EarlyPolicy":
@@ -64,11 +66,13 @@ class EarlyPolicy:
             minimum_unique_buyers_5m=int(os.getenv("SOLANA_EARLY_MIN_BUYERS_5M", "25")),
             maximum_probe_usd=min(5.0, max(1.0, float(os.getenv("SOLANA_EARLY_MAX_PROBE_USD", "3")))),
             maximum_loss_usd=min(1.0, max(0.25, float(os.getenv("SOLANA_EARLY_MAX_LOSS_USD", "1")))),
-            paper_minimum_score=max(0.0, min(100.0, float(os.getenv("SOLANA_PAPER_MIN_SCORE", "25")))),
-            paper_minimum_liquidity_usd=max(500.0, float(os.getenv("SOLANA_PAPER_MIN_LIQUIDITY_USD", "2500"))),
-            paper_maximum_token_age_minutes=max(90.0, float(os.getenv("SOLANA_PAPER_MAX_AGE_MINUTES", "1440"))),
-            paper_minimum_unique_buyers_5m=max(1, int(os.getenv("SOLANA_PAPER_MIN_BUYERS_5M", "3"))),
-            paper_maximum_price_impact_bps=max(250.0, float(os.getenv("SOLANA_PAPER_MAX_PRICE_IMPACT_BPS", "500"))),
+            # Evidence floors prevent stale Railway variables from silently
+            # restoring the loss-making, ultra-loose V1 paper gate.
+            paper_minimum_score=max(40.0, min(100.0, float(os.getenv("SOLANA_PAPER_MIN_SCORE", "40")))),
+            paper_minimum_liquidity_usd=max(7_500.0, float(os.getenv("SOLANA_PAPER_MIN_LIQUIDITY_USD", "7500"))),
+            paper_maximum_token_age_minutes=min(180.0, max(30.0, float(os.getenv("SOLANA_PAPER_MAX_AGE_MINUTES", "180")))),
+            paper_minimum_unique_buyers_5m=max(10, int(os.getenv("SOLANA_PAPER_MIN_BUYERS_5M", "10"))),
+            paper_maximum_price_impact_bps=min(250.0, max(50.0, float(os.getenv("SOLANA_PAPER_MAX_PRICE_IMPACT_BPS", "250")))),
         )
 
 
@@ -77,12 +81,20 @@ class PumpfunEvPolicy:
     enabled: bool = True
     target_market_cap_usd: float = 25_000.0
     maximum_entry_market_cap_usd: float = 15_000.0
-    minimum_trades_5m: int = 5
-    maximum_age_minutes: float = 30.0
+    minimum_trades_5m: int = 10
+    maximum_age_minutes: float = 20.0
     assumed_loss_fraction: float = 0.50
-    minimum_ev_rank: float = 0.15
-    minimum_stressed_expectancy: float = 0.0
+    minimum_ev_rank: float = 0.35
+    minimum_stressed_expectancy: float = 0.15
     maximum_payoff_multiple: float = 8.0
+    minimum_control_score: float = 20.0
+    minimum_net_buy_pressure: float = 0.15
+    minimum_buyer_acceleration: float = 1.20
+    minimum_volume_acceleration: float = 1.20
+    maximum_top10_holder_fraction: float = 0.85
+    maximum_creator_fraction: float = 0.35
+    minimum_price_change_5m_pct: float = 0.0
+    maximum_price_change_5m_pct: float = 40.0
 
     @classmethod
     def from_env(cls) -> "PumpfunEvPolicy":
@@ -90,11 +102,11 @@ class PumpfunEvPolicy:
             enabled=os.getenv("SOLANA_PUMPFUN_EV_ENABLED", "true").lower() == "true",
             target_market_cap_usd=float(os.getenv("SOLANA_PUMPFUN_EV_TARGET_MCAP_USD", "25000")),
             maximum_entry_market_cap_usd=float(os.getenv("SOLANA_PUMPFUN_EV_MAX_ENTRY_MCAP_USD", "15000")),
-            minimum_trades_5m=int(os.getenv("SOLANA_PUMPFUN_EV_MIN_TRADES_5M", "5")),
-            maximum_age_minutes=float(os.getenv("SOLANA_PUMPFUN_EV_MAX_AGE_MINUTES", "30")),
+            minimum_trades_5m=max(10, int(os.getenv("SOLANA_PUMPFUN_EV_MIN_TRADES_5M", "10"))),
+            maximum_age_minutes=min(20.0, float(os.getenv("SOLANA_PUMPFUN_EV_MAX_AGE_MINUTES", "20"))),
             assumed_loss_fraction=clamp(float(os.getenv("SOLANA_PUMPFUN_EV_ASSUMED_LOSS", "0.50")), .10, .90),
-            minimum_ev_rank=max(0.0, float(os.getenv("SOLANA_PUMPFUN_EV_MIN_EV_RANK", "0.15"))),
-            minimum_stressed_expectancy=max(0.0, float(os.getenv("SOLANA_PUMPFUN_EV_MIN_STRESSED_EXPECTANCY", "0"))),
+            minimum_ev_rank=max(0.35, float(os.getenv("SOLANA_PUMPFUN_EV_MIN_EV_RANK", "0.35"))),
+            minimum_stressed_expectancy=max(0.15, float(os.getenv("SOLANA_PUMPFUN_EV_MIN_STRESSED_EXPECTANCY", "0.15"))),
         )
 
 
@@ -243,8 +255,10 @@ def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPoli
     volume_accel = ratio(float(candidate.get("buy_volume_5m_usd", 0)),
                          float(candidate.get("buy_volume_previous_5m_usd", 0)))
     total = float(candidate.get("buy_volume_5m_usd", 0)) + float(candidate.get("sell_volume_5m_usd", 0))
-    pressure = ((float(candidate.get("buy_volume_5m_usd", 0)) -
-                 float(candidate.get("sell_volume_5m_usd", 0))) / total) if total else -1.0
+    pressure = (_number(candidate.get("transaction_buy_pressure"))
+                if "transaction_buy_pressure" in candidate else
+                ((float(candidate.get("buy_volume_5m_usd", 0)) -
+                  float(candidate.get("sell_volume_5m_usd", 0))) / total) if total else -1.0)
     wallet_points, qualified_wallets = smart_wallet_score(candidate.get("buyer_wallets") or [], ledger)
     top10 = float(candidate.get("top10_holder_fraction", 1))
     creator = float(candidate.get("creator_fraction", 1))
@@ -277,6 +291,19 @@ def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPoli
         paper_failures.append("paper unique buyers below minimum")
     if impact > policy.paper_maximum_price_impact_bps:
         paper_failures.append("paper sell price impact above maximum")
+    if float(candidate.get("top10_holder_fraction", 1)) > policy.paper_maximum_top10_holder_fraction:
+        paper_failures.append("paper top-10 concentration too high")
+    if float(candidate.get("creator_fraction", 1)) > policy.paper_maximum_creator_fraction:
+        paper_failures.append("paper creator concentration too high")
+    if buyer_accel < 1.20:
+        paper_failures.append("paper buyers are not accelerating")
+    if volume_accel < 1.20:
+        paper_failures.append("paper volume is not accelerating")
+    if pressure < 0.15:
+        paper_failures.append("paper net buy pressure below minimum")
+    price_change_5m = _number(candidate.get("price_change_5m_pct"), -999)
+    if price_change_5m <= 0:
+        paper_failures.append("paper five-minute price momentum is not positive")
     if score < policy.paper_minimum_score:
         paper_failures.append(f"paper score {score:.2f} below {policy.paper_minimum_score:.2f}")
     return {
@@ -286,6 +313,14 @@ def score_candidate(candidate: dict[str, Any], ledger: Ledger, policy: EarlyPoli
         "score": score, "components": {key: round(value, 2) for key, value in components.items()},
         "buyer_acceleration": round(buyer_accel, 4), "volume_acceleration": round(volume_accel, 4),
         "net_buy_pressure": round(pressure, 4), "qualified_wallet_count": len(qualified_wallets),
+        "token_age_minutes": round(age, 4), "liquidity_usd": round(liquidity, 2),
+        "unique_buyers_5m": buyers, "trades_5m": int(_number(candidate.get("trades_5m"))),
+        "sell_price_impact_bps": round(impact, 2),
+        "top10_holder_fraction": round(top10, 6), "creator_fraction": round(creator, 6),
+        "price_change_5m_pct": round(price_change_5m, 4),
+        "price_change_15m_pct": round(_number(candidate.get("price_change_15m_pct")), 4),
+        "safety_evidence_status": str(candidate.get("safety_evidence_status") or "MISSING"),
+        "flow_data_provenance": str(candidate.get("flow_data_provenance") or "UNSPECIFIED"),
         "qualified": not failures, "failures": list(dict.fromkeys(failures)),
         "paper_qualified": not paper_failures,
         "paper_failures": list(dict.fromkeys(paper_failures)),
@@ -314,6 +349,7 @@ def score_pumpfun_ev_candidate(candidate: dict[str, Any], ledger: Ledger,
     age = _number(candidate.get("token_age_minutes"), 9999)
     trades_5m = int(_number(candidate.get("trades_5m")))
     impact_bps = _number(candidate.get("sell_price_impact_bps"), 9999)
+    price_change_5m = _number(candidate.get("price_change_5m_pct"), -999)
     if not policy.enabled:
         failures.append("pumpfun EV strategy disabled")
     if market_cap <= 0:
@@ -326,6 +362,22 @@ def score_pumpfun_ev_candidate(candidate: dict[str, Any], ledger: Ledger,
         failures.append("insufficient recent trades")
     if impact_bps > safety_policy.maximum_price_impact_bps:
         failures.append("sell price impact above maximum")
+    if candidate.get("safety_evidence_status") != "VERIFIED":
+        failures.append("verified safety evidence missing")
+    if _number(candidate.get("top10_holder_fraction"), 1) > policy.maximum_top10_holder_fraction:
+        failures.append("pumpfun top-10 concentration too high")
+    if _number(candidate.get("creator_fraction"), 1) > policy.maximum_creator_fraction:
+        failures.append("pumpfun creator concentration too high")
+    if control["score"] < policy.minimum_control_score:
+        failures.append(f"control evidence score {control['score']:.2f} below {policy.minimum_control_score:.2f}")
+    if control["buyer_acceleration"] < policy.minimum_buyer_acceleration:
+        failures.append("pumpfun buyers are not accelerating")
+    if control["volume_acceleration"] < policy.minimum_volume_acceleration:
+        failures.append("pumpfun volume is not accelerating")
+    if control["net_buy_pressure"] < policy.minimum_net_buy_pressure:
+        failures.append("pumpfun net buy pressure below minimum")
+    if not policy.minimum_price_change_5m_pct < price_change_5m <= policy.maximum_price_change_5m_pct:
+        failures.append("pumpfun five-minute price momentum outside confirmation range")
 
     # This is intentionally conservative and transparent. It is a ranking
     # proxy for forward paper collection, not a claimed calibrated probability.
@@ -370,8 +422,11 @@ def score_pumpfun_ev_candidate(candidate: dict[str, Any], ledger: Ledger,
         "live_eligible": False,
         "model_status": "UNCALIBRATED_PROXY_FORWARD_PAPER_ONLY",
         "entry_reason": (
-            f"Paper-only Pump.fun EV v2 entry: market cap ${market_cap:,.0f} below "
+            f"Paper-only Divine V3 confirmed entry: market cap ${market_cap:,.0f} below "
             f"${policy.maximum_entry_market_cap_usd:,.0f}; {trades_5m} trades in 5m; "
+            f"five-minute price change {price_change_5m:.1f}%; net buy pressure "
+            f"{control['net_buy_pressure']:.1%}; buyers/volume acceleration "
+            f"{control['buyer_acceleration']:.2f}x/{control['volume_acceleration']:.2f}x; "
             f"probability proxy {probability_proxy:.1%}; executable target return "
             f"{win_return:.1%}; EV rank {ev_rank:.4f}; cost-stressed expectancy "
             f"{stressed_expectancy:.4f}; Jupiter sell impact {impact_bps:.0f} bps."
@@ -555,7 +610,8 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
         tx = attributes.get("transactions") or {}
         volume = attributes.get("volume_usd") or {}
         buys5, sells5 = _count(tx, "m5", "buys"), _count(tx, "m5", "sells")
-        buys15, sells15 = _count(tx, "m15", "buys"), _count(tx, "m15", "sells")
+        buyers5 = _count(tx, "m5", "buyers") or buys5
+        buyers15 = _count(tx, "m15", "buyers") or _count(tx, "m15", "buys")
         volume5 = _number(volume.get("m5"))
         volume15 = _number(volume.get("m15"))
         try:
@@ -587,10 +643,15 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
             "liquidity_usd": _number(attributes.get("reserve_in_usd")),
             "market_cap_usd": _number(attributes.get("market_cap_usd") or attributes.get("fdv_usd")),
             "trades_5m": buys5 + sells5,
-            "unique_buyers_5m": buys5, "unique_buyers_previous_5m": max(0, (buys15 - buys5) // 2),
+            "unique_buyers_5m": buyers5,
+            "unique_buyers_previous_5m": max(0, (buyers15 - buyers5) // 2),
             "buy_volume_5m_usd": volume5 * buys5 / max(buys5 + sells5, 1),
             "sell_volume_5m_usd": volume5 * sells5 / max(buys5 + sells5, 1),
             "buy_volume_previous_5m_usd": max(0, volume15 - volume5) / 2,
+            "transaction_buy_pressure": (buys5 - sells5) / max(buys5 + sells5, 1),
+            "price_change_5m_pct": _number((attributes.get("price_change_percentage") or {}).get("m5")),
+            "price_change_15m_pct": _number((attributes.get("price_change_percentage") or {}).get("m15")),
+            "flow_data_provenance": "GECKOTERMINAL_ROLLING_WINDOWS; buy/sell volume split estimated by transaction count",
             **safety,
             "sell_simulation_ok": sell_ok, "sell_price_impact_bps": sell_impact,
             "social_velocity_ratio": 0, "creator_history_score": 0,

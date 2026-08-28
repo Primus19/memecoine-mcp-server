@@ -24,6 +24,8 @@ def candidate(**changes):
         "top10_holder_fraction": .20, "creator_fraction": .02,
         "social_velocity_ratio": 3, "creator_history_score": 3, "buyer_wallets": [],
         "market_cap_usd": 5000, "trades_5m": 120,
+        "safety_evidence_status": "VERIFIED", "price_change_5m_pct": 10,
+        "price_change_15m_pct": 15,
     }
     value.update(changes)
     return value
@@ -64,11 +66,11 @@ class SolanaEarlyTests(unittest.TestCase):
 
     def test_exploratory_paper_tier_relaxes_only_non_contract_gates(self):
         result = score_candidate(candidate(
-            token_age_minutes=180, liquidity_usd=5000, unique_buyers_5m=20,
+            token_age_minutes=90, liquidity_usd=15000, unique_buyers_5m=20,
             unique_buyers_previous_5m=5, buy_volume_5m_usd=10000,
             buy_volume_previous_5m_usd=2000, sell_volume_5m_usd=1000,
-            sell_price_impact_bps=400, top10_holder_fraction=.8,
-            creator_fraction=.4, social_velocity_ratio=3, creator_history_score=3,
+            sell_price_impact_bps=200, top10_holder_fraction=.7,
+            creator_fraction=.25, social_velocity_ratio=3, creator_history_score=5,
         ), self.ledger, self.policy)
         self.assertFalse(result["qualified"])
         self.assertTrue(result["paper_qualified"])
@@ -206,13 +208,13 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertFalse(result["paper_qualified"])
         self.assertIn("sell simulation failed", result["paper_failures"])
 
-    def test_pumpfun_ev_can_collect_early_paper_data_despite_holder_concentration(self):
+    def test_pumpfun_ev_rejects_dangerous_holder_concentration(self):
         result = score_pumpfun_ev_candidate(
             candidate(top10_holder_fraction=.90, creator_fraction=.80),
             self.ledger, self.policy, PumpfunEvPolicy())
-        self.assertTrue(result["paper_qualified"])
-        self.assertNotIn("top-10 concentration too high", result["paper_failures"])
-        self.assertNotIn("creator concentration too high", result["paper_failures"])
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("pumpfun top-10 concentration too high", result["paper_failures"])
+        self.assertIn("pumpfun creator concentration too high", result["paper_failures"])
 
     def test_pumpfun_ev_requires_positive_cost_stressed_expectancy(self):
         result = score_pumpfun_ev_candidate(
@@ -224,7 +226,7 @@ class SolanaEarlyTests(unittest.TestCase):
 
     def test_pumpfun_ev_records_plain_language_entry_reason(self):
         result = score_pumpfun_ev_candidate(candidate(), self.ledger, self.policy, PumpfunEvPolicy())
-        self.assertIn("Pump.fun EV v2 entry", result["entry_reason"])
+        self.assertIn("Divine V3 confirmed entry", result["entry_reason"])
         self.assertIn("cost-stressed expectancy", result["entry_reason"])
 
     def test_strategy_diagnostics_counts_rejection_reasons(self):

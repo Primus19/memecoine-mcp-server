@@ -49,5 +49,11 @@ def test_strategy_action_reporting_is_separate_and_trade_triggered():
     assert "REASON FOR ENTRY / ACTION" in SOURCE
     assert "Reason for entry / action" in SOURCE
     assert "DIVINE_V2" in SOURCE
+    assert "DIVINE_V3" in SOURCE
+    assert "CONTROL_V2" in SOURCE
+    assert "confirmCandidate" in SOURCE
+    assert "postExitCounterfactuals" in SOURCE
+    assert "FAILED_MOMENTUM_15M" in SOURCE
     assert "TRAILING_PROFIT" in SOURCE
     assert "Divine V2 forward sample" in SOURCE
+    assert "res.end(reportV3())" in SOURCE
