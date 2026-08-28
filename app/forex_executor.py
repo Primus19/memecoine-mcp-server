@@ -60,7 +60,8 @@ def validated_snapshots(payload: dict, now: datetime | None = None) -> list[dict
 
 
 FIVE_STREAK_STRATEGY = "FOREX_FIVE_STREAK_EXPERIMENT"
-FIVE_STREAK_FILTERED_STRATEGY = "FOREX_FIVE_STREAK_FILTERED_V3"
+FIVE_STREAK_FILTERED_V3_STRATEGY = "FOREX_FIVE_STREAK_FILTERED_V3"
+FIVE_STREAK_FILTERED_STRATEGY = "FOREX_FIVE_STREAK_FILTERED_V4_RATCHET"
 FIVE_STREAK_DISPLAY_NAME = "Bryne and Lot-Bill Strategy"
 
 
@@ -221,7 +222,7 @@ def five_streak_signals(snapshot: dict) -> list[dict]:
                        "volatility_stop_1_5atr": 1.5 * atr if atr > 0 else None,
                        "profit_protection_ladder": {"0.50R": "0.20R", "0.75R": "0.50R",
                                                     "1.00R": "0.75R"}},
-        "entry_reason": (f"Filtered V3: first five-candle {side} streak; agreement={agreement:.2f}, "
+        "entry_reason": (f"Filtered V4 Ratchet: first five-candle {side} streak; agreement={agreement:.2f}, "
                          f"trend={trend:.4f}, 1h={one:.4f}%, spread={spread_bps:.2f}bps; target=1.5R."),
     })
     return [proposal]
@@ -812,7 +813,7 @@ def five_streak_email_actions(outcomes: list[dict], closes: list[dict], intents:
             "trigger": reason, "entry_reason": reason, "signal_trigger": reason,
             "position_impact": "Paper-only experiment; no broker funds or margin were used.",
             "calendar_state": "Paper experiment; market feed calendar evidence retained.",
-            "executor_state": "PAPER ONLY", "risk_summary": "Filtered V3 paper risk cap; stop or 1.5R target only.",
+            "executor_state": "PAPER ONLY", "risk_summary": "Filtered V4 Ratchet paper risk cap; protected floor or 1.5R target.",
             "warnings": ["Bryne and Lot-Bill Strategy is paper-only."],
         })
     for item in closes:
@@ -1189,7 +1190,7 @@ class Executor:
                     (FIVE_STREAK_FILTERED_STRATEGY, proposal["symbol"])).fetchone()
                 if same_symbol or self.ledger.symbol_in_cooldown(proposal["symbol"], 3600):
                     outcomes.append({"symbol": proposal["symbol"], "status": "COOLDOWN_REJECTED",
-                                     "reason": "Filtered V3 permits one position per symbol and a 60-minute cooldown"})
+                                     "reason": "Filtered V4 Ratchet permits one position per symbol and a 60-minute cooldown"})
                     continue
                 row = self.ledger.db.execute(
                     "SELECT COUNT(*),COALESCE(SUM(maximum_loss_usd),0) FROM intents WHERE strategy=? AND status='PAPER_OPEN'",
@@ -1199,7 +1200,7 @@ class Executor:
                                      "signal_time": proposal["signal_time"]})
                     continue
                 proposal["maximum_loss_usd"] = per_trade_risk
-                proposal.setdefault("entry_reason", "Filtered V3 five-candle entry with recorded market evidence.")
+                proposal.setdefault("entry_reason", "Filtered V4 Ratchet five-candle entry with recorded market evidence.")
                 self.ledger.add_intent(proposal, "PAPER_ONLY", "PAPER_OPEN")
                 self.ledger.event("FIVE_STREAK_PAPER_FILL", proposal)
                 outcomes.append({"symbol": proposal["symbol"], "side": proposal["side"],
@@ -1260,7 +1261,7 @@ class Executor:
                   "cross_strategy_learning": {
                       "name": "Bryne profit-protection transfer",
                       "mode": "SHADOW_ONLY", "version": "BRYNE_RATCHET_TRANSFER_V1",
-                      "source": "Bryne and Lot-Bill Filtered V3 paper strategy",
+                      "source": "Bryne and Lot-Bill Filtered V4 Ratchet paper strategy",
                       "live_forex_observations": live_profit_shadows,
                       "live_execution_changed": False,
                       "reason": "Measure profit capture prospectively before changing live OANDA orders",
@@ -1269,7 +1270,7 @@ class Executor:
                   "snapshots": snapshots, "outcomes": outcomes, "paper_closes": closes,
                   "trade_checkpoints": self.ledger.trade_checkpoints(),
                   "five_streak": {"name": FIVE_STREAK_DISPLAY_NAME, "mode": "PAPER_ONLY",
-                                  "version": "Filtered V3", "timeframe": "M5",
+                                  "version": "Filtered V4 Ratchet", "timeframe": "M5",
                                   "enabled": five_streak_enabled(),
                                   "exit_policy": "stop or 1.5R target only; no arbitrary time exit",
                                   "cost_model": "closed M5 signal; executable bid/ask entry and exit",
@@ -1281,6 +1282,22 @@ class Executor:
                                           for position in self.ledger.paper_positions()
                                           if position.get("strategy") == FIVE_STREAK_FILTERED_STRATEGY), 8)},
                                   "trades": self.ledger.strategy_intents(FIVE_STREAK_FILTERED_STRATEGY),
+                                  "promotion_checkpoint": {
+                                      "scope": "Filtered V4 Ratchet prospective closes only",
+                                      "required_additional_profitable_closes": 2,
+                                      "profitable_closes_observed": self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["wins"],
+                                      "closed_observations": self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["closed"],
+                                      "net_pnl_usd": self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["net_pnl_usd"],
+                                      "eligible_for_live_review": (
+                                          self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["wins"] >= 2
+                                          and self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["closed"] >= 2
+                                          and self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["net_pnl_usd"] > 0
+                                          and (self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["expectancy_usd"] or 0) > 0),
+                                      "automatic_live_promotion": False,
+                                  },
+                                  "filtered_v3_archived": {"new_entries_enabled": False,
+                                      "performance": self.ledger.strategy_stats(FIVE_STREAK_FILTERED_V3_STRATEGY),
+                                      "trades": self.ledger.strategy_intents(FIVE_STREAK_FILTERED_V3_STRATEGY)},
                                   "baseline_v2_archived": {"new_entries_enabled": False,
                                       "performance": self.ledger.strategy_stats(FIVE_STREAK_STRATEGY),
                                       "trades": self.ledger.strategy_intents(FIVE_STREAK_STRATEGY)}},
