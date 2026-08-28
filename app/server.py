@@ -17,6 +17,7 @@ from .meme_email import MemeReportEmailer
 from .policy import OpportunityPolicy
 from .risk import TicketRejected,risk_size_ticket,validate_ticket
 from .store import Store
+from .trading_dashboard import build_snapshot,dashboard_authorized,render_dashboard
 from .version import CRYPTO_MODEL_VERSION, deployment_info
 
 BASE_URL=validate_public_base_url(os.environ["PUBLIC_BASE_URL"]);SETUP_TOKEN=os.environ["SETUP_TOKEN"];REST_API_TOKEN=os.getenv("REST_API_TOKEN","")
@@ -298,6 +299,21 @@ def unauthorized():return JSONResponse({"error":"unauthorized"},status_code=401,
 @mcp.custom_route("/health",methods=["GET"])
 async def health(_):
     return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED",**deployment_info(),"preauthorized_auto_execution":PREAUTHORIZED_AUTO_EXECUTION,"expected_tool_count":9,"opportunity_policy":{"version":"1.0",**asdict(OpportunityPolicy.from_env())},"oauth":{"provider":"github","base_url":BASE_URL,"callback_url":oauth_callback_url(BASE_URL),"persistent_client_storage":os.path.abspath(OAUTH_STORAGE_DIR).startswith("/app/data/"),"jwt_signing_key_configured":True,"jwt_signing_key_source":JWT_SIGNING_KEY_SOURCE,"fastmcp_version":package_version("fastmcp")}})
+
+@mcp.custom_route("/dashboard",methods=["GET"])
+async def dashboard(request):
+    if not dashboard_authorized(request.headers.get("authorization", "")):
+        return HTMLResponse("Authentication required",status_code=401,headers={
+            "WWW-Authenticate": 'Basic realm="Primus Trading Dashboard"',
+            "Cache-Control": "no-store",
+        })
+    page=render_dashboard(build_snapshot(hourly_snapshot))
+    return HTMLResponse(page,headers={
+        "Cache-Control":"no-store",
+        "X-Content-Type-Options":"nosniff",
+        "Referrer-Policy":"no-referrer",
+        "Content-Security-Policy":"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    })
 @mcp.custom_route("/setup",methods=["GET","POST"])
 async def setup(request):
     if not hmac.compare_digest(request.query_params.get("token",""),SETUP_TOKEN):return HTMLResponse("Not found",status_code=404)
