@@ -291,6 +291,13 @@ class SolanaEarlyTests(unittest.TestCase):
                          'strategyName(f.strategy)', "microcapLaunchV1Performance"):
             self.assertIn(expected, source)
 
+    def test_microcap_action_reports_are_named_colored_and_retried(self):
+        source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+        for expected in ("Microcap Launch V1", "ORANGE • Microcap Launch V1",
+                         "pendingTradeEvent:true", "state.email.pendingTradeEvent",
+                         "pendingTradeEvent:false"):
+            self.assertIn(expected, source)
+
     def test_strategy_diagnostics_counts_rejection_reasons(self):
         rows = [
             {"strategy":"SOLANA_PUMPFUN_EV_EXPERIMENT", "paper_qualified":False,
