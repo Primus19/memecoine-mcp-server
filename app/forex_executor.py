@@ -253,6 +253,13 @@ class Ledger:
               pnl_usd REAL NOT NULL, source_observed_at TEXT,
               source_url TEXT, status TEXT NOT NULL,
               PRIMARY KEY(intent_id,checkpoint_minutes));
+            CREATE TABLE IF NOT EXISTS live_trade_checkpoints(
+              trade_id TEXT NOT NULL, instrument TEXT NOT NULL,
+              checkpoint_minutes INTEGER NOT NULL, observed_at TEXT NOT NULL,
+              executable_price REAL NOT NULL, pnl_usd REAL NOT NULL,
+              spread_bps REAL, financing_usd REAL, source_observed_at TEXT,
+              source_url TEXT, status TEXT NOT NULL,
+              PRIMARY KEY(trade_id,checkpoint_minutes));
             """)
             columns = {str(row[1]) for row in self.db.execute("PRAGMA table_info(intents)")}
             for name, kind in (("score", "REAL"), ("model_version", "TEXT"), ("closed_at", "TEXT"),
@@ -336,6 +343,23 @@ class Ledger:
     def trade_checkpoints(self, limit: int = 250) -> list[dict]:
         return [dict(row) for row in self.db.execute(
             "SELECT * FROM trade_checkpoints ORDER BY observed_at DESC LIMIT ?", (limit,)).fetchall()]
+
+    def record_live_checkpoint(self, trade: dict, checkpoint: int) -> bool:
+        price = float(trade.get("current_price") or 0)
+        if not trade.get("trade_id") or not trade.get("instrument") or price <= 0:
+            return False
+        with self.db:
+            cursor = self.db.execute("""INSERT OR IGNORE INTO live_trade_checkpoints
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (
+                str(trade["trade_id"]), str(trade["instrument"]), checkpoint, utcnow(), price,
+                float(trade.get("unrealized_pnl_usd") or 0), trade.get("current_spread_bps"),
+                trade.get("financing_usd"), trade.get("current_price_observed_at"),
+                "https://developer.oanda.com/rest-live-v20/pricing-ep/", "OPEN"))
+        return cursor.rowcount == 1
+
+    def live_trade_checkpoints(self, limit: int = 250) -> list[dict]:
+        return [dict(row) for row in self.db.execute(
+            "SELECT * FROM live_trade_checkpoints ORDER BY observed_at DESC LIMIT ?", (limit,)).fetchall()]
 
     def strategy_stats(self, strategy: str) -> dict:
         rows = [dict(row) for row in self.db.execute(
@@ -1264,6 +1288,13 @@ class Executor:
             intent = intent_by_trade.get(str(normalized.get("trade_id") or ""), {})
             normalized["notional_exposure_usd"] = notional or None
             normalized["maximum_planned_loss_usd"] = intent.get("maximum_loss_usd")
+            expected = float(intent.get("entry_price") or 0)
+            actual = float(normalized.get("entry_price") or 0)
+            direction = 1 if normalized.get("side") == "BUY" else -1
+            normalized["expected_entry_price"] = expected or None
+            normalized["entry_slippage_bps"] = (((actual - expected) / expected) * direction * 10_000
+                                                   if expected and actual else None)
+            normalized["commission_usd"] = float(raw.get("commission") or 0)
         total_notional = sum(raw_notionals)
         total_margin = float(reconciliation["summary"].get("margin_used") or 0)
         for normalized, notional in zip(broker_open_trades, raw_notionals):
@@ -1275,6 +1306,15 @@ class Executor:
             normalized["estimated_margin_allocation_usd"] = margin
             normalized["return_on_notional_pct"] = (pnl / notional * 100) if notional else None
             normalized["return_on_planned_risk_pct"] = (pnl / risk_amount * 100) if risk_amount else None
+            try:
+                opened = datetime.fromisoformat(str(normalized.get("open_time") or "").replace("Z", "+00:00"))
+                elapsed = max(0, (datetime.now(UTC) - opened.astimezone(UTC)).total_seconds() / 60)
+                tolerance = max(2.0, float(os.getenv("FOREX_CHECKPOINT_TOLERANCE_MINUTES", "2")))
+                for checkpoint in (0, 15, 30, 60, 120, 240):
+                    if checkpoint <= elapsed < checkpoint + tolerance:
+                        self.ledger.record_live_checkpoint(normalized, checkpoint)
+            except (TypeError, ValueError):
+                pass
         live_profit_shadows = []
         for trade in broker_open_trades:
             key = "live_profit_shadow_peak_r:" + str(trade.get("trade_id") or "")
@@ -1302,6 +1342,7 @@ class Executor:
                   },
                   "snapshots": snapshots, "outcomes": outcomes, "paper_closes": closes,
                   "trade_checkpoints": self.ledger.trade_checkpoints(),
+                  "live_trade_checkpoints": self.ledger.live_trade_checkpoints(),
                   "five_streak": {"name": FIVE_STREAK_DISPLAY_NAME, "mode": "PAPER_ONLY",
                                   "version": "Filtered V4 Ratchet", "timeframe": "M5",
                                   "enabled": five_streak_enabled(),

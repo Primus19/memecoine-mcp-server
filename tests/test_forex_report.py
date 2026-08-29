@@ -31,6 +31,11 @@ class ForexReportTests(unittest.TestCase):
                 "eligible": True, "trade_id": "10", "instrument": "EUR_JPY",
                 "current_r": .3, "maximum_favorable_r": .8,
                 "protected_floor_r": .5, "would_exit_now": True}]},
+            "broker_open_trades": [{"trade_id":"37", "instrument":"NZD_USD",
+                "side":"SELL", "entry_slippage_bps":1.25, "commission_usd":0}],
+            "live_trade_checkpoints": [{"trade_id":"37", "instrument":"NZD_USD",
+                "checkpoint_minutes":15, "executable_price":.59165, "pnl_usd":.0973,
+                "spread_bps":10.14, "source_observed_at":"2026-08-29T12:00:00Z"}],
         })
         self.assertIn("Production Forex Dashboard", body)
         self.assertIn("Filtered V4 Ratchet", body)
@@ -53,6 +58,8 @@ class ForexReportTests(unittest.TestCase):
         self.assertIn("Cross-strategy learning", body)
         self.assertIn("WOULD EXIT", body)
         self.assertIn("SHADOW ONLY", body)
+        self.assertIn("Live-trade executable checkpoints", body)
+        self.assertIn("+1.25 bps", body)
         self.assertNotIn("<script", body.lower())
 
 
