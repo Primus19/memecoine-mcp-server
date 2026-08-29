@@ -1,1 +1,61 @@
-Õø¥yÈZžÞ)ìz»b¢{>Õ×¥zØ¨™É½´Á…Ñ¡±¥ˆ¥µÁ½ÉÐA…Ñ (()M=UI€ô€¡A…Ñ ¡}}™¥±•}|¤¹Á…É•¹ÑÍlÅt€¼€‰Í•ÉÙ¥•Ì½Í½±…¹„µ•á•ÕÑ½È½¥¹‘•à¹µ©Ìˆ¤¹É•…‘}Ñ•áÐ ¤(()‘•˜Ñ•ÍÑ}±¥Ù•}•á•ÕÑ½É}É•ÅÕ¥É•Í}•á…Ñ}•áÁ•Ñ•‘}Ý…±±•Ñ}¥‘•¹Ñ¥Ñä ¤è(€€€…ÍÍ•ÉÐ€•¹Ø ‰M=19}aAQ}]11Q}IMLˆ¤œ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰Ý…±±•Ñ%‘•¹Ñ¥ÑåY•É¥™¥•éÝ…±±•Ñ5…Ñ¡•Ì ¤ˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰Í¥¹•ÈÝ…±±•Ðµ¥Íµ…Ñ ˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰¥˜ …Ý…±±•Ñ5…Ñ¡•Ì ¤¥Ñ¡É½ÜÉÉ½Èˆ¥¸M=UI(()‘•˜Ñ•ÍÑ}‰…±…¹•}ÁÉ•™±¥¡Ñ}¥Í}µ…¥¹¹•Ñ}¹…Ñ¥Ù•}ÕÍ‘}…¹‘}™…¥±}±½Í• ¤è(€€€…ÍÍ•ÉÐ€¹•ÑÝ½É¬è‰µ…¥¹¹•Ðµ‰•Ñ„ˆœ¥¸M=UI(€€€…ÍÍ•ÉÐ€UMô‰A©]‘ÕÕ™ÅMMÅ•4ÉÅ8Åáéå‰…ÁáÑÝ­iÝåQÐÅØˆœ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰Á…å±½…ü¹•ÉÉ½Èˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰É•ÑÕÉ¹•¹¼É•ÍÕ±Ðˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰Ý…±±•Ð‰…±…¹•ÌÍÑ…±”ˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰Ý…±±•Ð‰…±…¹”Õ¹…Ù…¥±…‰±”ˆ¥¸M=UI(()‘•˜Ñ•ÍÑ}Á…Á•É}•áÁ±½É…Ñ¥½¹}¥Í}Í•Á…É…Ñ•}™É½µ}±¥Ù•}ÅÕ…±¥™¥…Ñ¥½¸ ¤è(€€€…ÍÍ•ÉÐ€‰à¹Á…Á•É}ÅÕ…±¥™¥•ôôõÑÉÕ”ˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰à¹ÅÕ…±¥™¥•ôôõÑÉÕ”ˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰M=19}AAI}5a}!=1}5%9UQLˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰±¥Ù”µÍÑÉ…Ñ•äÍ¡…‘½Ü½ÍÐµÍÑÉ•ÍÍ••áÁ•Ñ…¹ä¥Ì¹½ÐÁ½Í¥Ñ¥Ù”ˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰±¥Ù•M¡…‘½ÝA½Í¥Ñ¥½¹Ìˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰±¥Ù•M¡…‘½Ý¥±±Ìˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰±¥Ù•M¡…‘½ÝAÉ½µ½Ñ¥½¸ˆ¥¸M=UI(()‘•˜Ñ•ÍÑ}‘¥Í½Ù•Éå}™…¥±ÕÉ•}‘½•Í}¹½Ñ}Í­¥Á}Ý…±±•Ñ}ÍÕÁ•ÉÙ¥Í¥½¸ ¤è(€€€‘¥Í½Ù•Éå}…Ñ €ôM=UI¹¥¹‘•à ÍÑ…Ñ”¹‘¥Í½Ù•ÉåÉÉ½Èõ”¹µ•ÍÍ…”¹Í±¥” À°ÔÀÀ¤œ¤(€€€‰…±…¹•}¡•¬€ôM=UI¹¥¹‘•à ¥˜¡Ý…±±•Ð˜™™œ¹¡•±¥ÕÌ¥ÑÉåí…Ý…¥Ð‰…±…¹•Ì ¥ôœ¤(€€€…ÍÍ•ÉÐ‘¥Í½Ù•Éå}…Ñ €ð‰…±…¹•}¡•¬(()‘•˜Ñ•ÍÑ}ÍÑÉ…Ñ•å}…Ñ¥½¹}É•Á½ÉÑ¥¹}¥Í}Í•Á…É…Ñ•}…¹‘}ÑÉ…‘•}ÑÉ¥•É• ¤è(€€€…ÍÍ•ÉÐ€ÍÑÉ…Ñ•åMÑ…ÑÌ ‰M=19}I1e}=9QI=0ˆ¤œ¥¸M=UI(€€€…ÍÍ•ÉÐ€ÍÑÉ…Ñ•åMÑ…ÑÌ ‰M=19}AU5AU9}Y}aAI%59Pˆ¤œ¥¸M=UI(€€€…ÍÍ•ÉÐ€¥Ù¥¹”MÑÉ…Ñ•ä€¡AÕµÀ¹™Õ¸X¤œ¥¸M=UI(€€€…ÍÍ•ÉÐ€ÍÑÉ…Ñ•åA•É™½Éµ…¹”éÍÑÉ…Ñ•åA•É™½Éµ…¹” ¤œ¥¸M=UI(€€€…ÍÍ•ÉÐ€œˆ½É•Á½ÉÐ¹©Í½¸ˆœ¥¸M=UI(€€€…ÍÍ•ÉÐ€œˆ½É•Á½ÉÐˆœ¥¸M=UI(€€€…ÍÍ•ÉÐ€¥˜¡¡…ÍQÉ…‘•Ù•¹Ð¥ÍÑ…Ñ”¹•µ…¥°õì¸¸¹ÍÑ…Ñ”¹•µ…¥°±Á•¹‘¥¹QÉ…‘•Ù•¹ÐéÑÉÕ”œ¥¸M=UI(€€€…ÍÍ•ÉÐ€¥˜ …ÍÑ…Ñ”¹•µ…¥°¹Á•¹‘¥¹QÉ…‘•Ù•¹Ñññ•µ…¥±	±½­•ÉÌ ¤¹±•¹Ñ ¥É•ÑÕÉ¸™…±Í”œ¥¸M=UI(€€€…ÍÍ•ÉÐ€Á•¹‘¥¹QÉ…‘•Ù•¹Ðé™…±Í”œ¥¸M=UI(€€€…ÍÍ•ÉÐ€µ½‘”è‰QI}Y9QM}=91dˆœ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰9\Q%=8ˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰IM=8=H9QId€¼Q%=8ˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰I•…Í½¸™½È•¹ÑÉä€¼…Ñ¥½¸ˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰%Y%9}XÈˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰%Y%9}XÌˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰=9QI=1}XÈˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰½¹™¥Éµ…¹‘¥‘…Ñ”ˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰Á½ÍÑá¥Ñ½Õ¹Ñ•É™…ÑÕ…±Ìˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰%1}5=59QU5|ÄÕ4ˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰QI%1%9}AI=%Pˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰¥Ù¥¹”XÈ™½ÉÝ…ÉÍ…µÁ±”ˆ¥¸M=UI(€€€…ÍÍ•ÉÐ€‰É•Ì¹•¹¡É•Á½ÉÑXÌ ¤¤ˆ¥¸M=UI
+from pathlib import Path
+
+
+SOURCE = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+
+
+def test_live_executor_requires_exact_expected_wallet_identity():
+    assert 'env("SOLANA_EXPECTED_WALLET_ADDRESS")' in SOURCE
+    assert "walletIdentityVerified:walletMatches()" in SOURCE
+    assert "signer wallet mismatch" in SOURCE
+    assert "if(!walletMatches())throw Error" in SOURCE
+
+
+def test_balance_preflight_is_mainnet_native_usdc_and_fail_closed():
+    assert 'network:"mainnet-beta"' in SOURCE
+    assert 'USDC="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"' in SOURCE
+    assert "payload?.error" in SOURCE
+    assert "returned no result" in SOURCE
+    assert "wallet balances stale" in SOURCE
+    assert "wallet balance unavailable" in SOURCE
+
+
+def test_paper_exploration_is_separate_from_live_qualification():
+    assert "x.paper_qualified===true" in SOURCE
+    assert "x.qualified===true" in SOURCE
+    assert "SOLANA_PAPER_MAX_HOLD_MINUTES" in SOURCE
+    assert "live-strategy shadow cost-stressed expectancy is not positive" in SOURCE
+    assert "liveShadowPositions" in SOURCE
+    assert "liveShadowFills" in SOURCE
+    assert "liveShadowPromotion" in SOURCE
+
+
+def test_discovery_failure_does_not_skip_wallet_supervision():
+    discovery_catch = SOURCE.index('state.discoveryError=e.message.slice(0,500)')
+    balance_check = SOURCE.index('if(wallet&&cfg.helius)try{await balances()}')
+    assert discovery_catch < balance_check
+
+
+def test_strategy_action_reporting_is_separate_and_trade_triggered():
+    assert 'strategyStats("SOLANA_EARLY_CONTROL")' in SOURCE
+    assert 'strategyStats("SOLANA_PUMPFUN_EV_EXPERIMENT")' in SOURCE
+    assert 'Divine Strategy (Pump.fun EV)' in SOURCE
+    assert 'strategyPerformance:strategyPerformance()' in SOURCE
+    assert '"/report.json"' in SOURCE
+    assert '"/report"' in SOURCE
+    assert 'if(hasTradeEvent)state.email={...state.email,pendingTradeEvent:true' in SOURCE
+    assert 'if(!state.email.pendingTradeEvent||emailBlockers().length)return false' in SOURCE
+    assert 'pendingTradeEvent:false' in SOURCE
+    assert 'mode:"TRADE_EVENTS_ONLY"' in SOURCE
+    assert "NEW ACTION" in SOURCE
+    assert "REASON FOR ENTRY / ACTION" in SOURCE
+    assert "Reason for entry / action" in SOURCE
+    assert "DIVINE_V2" in SOURCE
+    assert "DIVINE_V3" in SOURCE
+    assert "CONTROL_V2" in SOURCE
+    assert "confirmCandidate" in SOURCE
+    assert "postExitCounterfactuals" in SOURCE
+    assert "FAILED_MOMENTUM_15M" in SOURCE
+    assert "TRAILING_PROFIT" in SOURCE
+    assert "Divine V2 forward sample" in SOURCE
+    assert "res.end(reportV3())" in SOURCE
