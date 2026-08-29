@@ -35,6 +35,8 @@ const cfg = {
   ),
   probePartialFraction: 0.25,
   probeMaxOpen: 2,
+  probeMaxQuarantined: 4,
+  probeMaxOpenExposureUsd: 2,
   probeMaxHoldMinutes: 20,
   entry: Math.min(3, Math.max(1, num(env("SOLANA_MAX_ENTRY_USD"), 3))),
   total: Math.min(6, Math.max(3, num(env("SOLANA_MAX_TOTAL_EXPOSURE_USD"), 6))),
@@ -331,24 +333,33 @@ function probeDailySpendUsd() {
     .filter((f) => f.action === "PROBE_BUY" && String(f.at).startsWith(day))
     .reduce((total, f) => total + num(f.inputUsd), 0);
 }
-function probeDailyRiskUsd() {
-  const day = new Date().toISOString().slice(0, 10),
-    realizedLosses = state.probeFills
+function probeDailyRealizedLossUsd() {
+  const day = new Date().toISOString().slice(0, 10);
+  return state.probeFills
       .filter(
         (f) =>
           f.action === "PROBE_FINAL_SELL" &&
           String(f.at).startsWith(day) &&
           f.realizedPnlUsd != null,
       )
-      .reduce((total, f) => total + Math.max(0, -num(f.realizedPnlUsd)), 0),
-    openCapitalAtRisk = state.probePositions.reduce(
-      (total, p) => total + Math.max(0, num(p.entryUsd) - num(p.proceedsUsd)),
-      0,
-    );
-  return realizedLosses + openCapitalAtRisk;
+      .reduce((total, f) => total + Math.max(0, -num(f.realizedPnlUsd)), 0);
+}
+function probeOpenExposureUsd() {
+  return state.probePositions.reduce(
+    (total, p) => total + Math.max(0, num(p.entryUsd) - num(p.proceedsUsd)),
+    0,
+  );
+}
+function probeIsQuarantined(p) {
+  return (
+    num(p.sellFailures) >= 3 &&
+    Date.now() - Date.parse(p.openedAt) >= cfg.probeMaxHoldMinutes * 60000
+  );
 }
 function probeBlockers() {
-  const b = [];
+  const b = [],
+    active = state.probePositions.filter((p) => !probeIsQuarantined(p)),
+    quarantined = state.probePositions.filter(probeIsQuarantined);
   if (!cfg.enabled) b.push("executor disabled");
   if (!cfg.probeLive) b.push("runner live-probe acknowledgement not armed");
   if (!cfg.discovery) b.push("discovery URL missing");
@@ -362,10 +373,14 @@ function probeBlockers() {
     b.push("USDC balance below runner live-probe amount");
   if (num(state.balances?.sol) < 0.005)
     b.push("SOL balance below fee minimum");
-  if (state.probePositions.length >= cfg.probeMaxOpen)
+  if (active.length >= cfg.probeMaxOpen)
     b.push(`runner live-probe open-position limit ${cfg.probeMaxOpen} reached`);
-  if (probeDailyRiskUsd() + cfg.probeEntry > cfg.probeDailyCap)
-    b.push("runner live-probe daily loss/exposure cap reached");
+  if (quarantined.length >= cfg.probeMaxQuarantined)
+    b.push(`runner live-probe quarantine limit ${cfg.probeMaxQuarantined} reached`);
+  if (probeOpenExposureUsd() + cfg.probeEntry > cfg.probeMaxOpenExposureUsd)
+    b.push("runner live-probe total open-exposure cap reached");
+  if (probeDailyRealizedLossUsd() >= cfg.probeDailyCap)
+    b.push("runner live-probe daily realized-loss cap reached");
   return b;
 }
 function emailBlockers() {
@@ -399,11 +414,15 @@ function publicState() {
       blockers: probeBlockers(),
       entryUsd: cfg.probeEntry,
       dailyCapUsd: cfg.probeDailyCap,
-      dailyCapType: "NET_REALIZED_LOSS_PLUS_OPEN_UNRECOVERED_CAPITAL",
-      dailyRiskUsedUsd: probeDailyRiskUsd(),
+      dailyCapType: "REALIZED_LOSS_ONLY",
+      dailyRiskUsedUsd: probeDailyRealizedLossUsd(),
+      openExposureUsd: probeOpenExposureUsd(),
+      maxOpenExposureUsd: cfg.probeMaxOpenExposureUsd,
       spentTodayUsd: probeDailySpendUsd(),
       partialExitFraction: cfg.probePartialFraction,
       maxOpenPositions: cfg.probeMaxOpen,
+      maxQuarantinedPositions: cfg.probeMaxQuarantined,
+      quarantined: state.probePositions.filter(probeIsQuarantined).length,
       maxHoldMinutes: cfg.probeMaxHoldMinutes,
       open: state.probePositions.length,
       fills: state.probeFills.slice(0, 20),
@@ -1406,7 +1425,7 @@ function reportV3() {
         `<tr style="background:#fee2e2;color:#7f1d1d"><td>${esc(f.at)}</td><td><b>LIVE RUNNER PROBE</b></td><td>${esc(f.action)}</td><td>${esc(f.symbol || f.mint?.slice(0, 6))}</td><td>${esc(f.reason || "REAL_MONEY_ENTRY")}</td><td>${f.inputUsd == null ? "-" : `${num(f.inputUsd).toFixed(4)}`}</td><td>${f.outputUsd == null ? "-" : `${num(f.outputUsd).toFixed(4)}`}</td><td>${f.realizedPnlUsd == null ? "-" : `${num(f.realizedPnlUsd).toFixed(4)}`}</td><td>${esc(f.id)}</td><td>${esc(f.error || "")}</td></tr>`,
     )
     .join("");
-  const probeSummary = `<div style="margin:16px 0;padding:16px;border:3px solid #dc2626;background:#fef2f2;border-radius:10px"><h3 style="margin-top:0">REAL-MONEY RUNNER LIQUIDITY PROBE</h3><p><b>Amount per probe:</b> ${cfg.probeEntry.toFixed(2)}; <b>daily loss/exposure cap:</b> ${cfg.probeDailyCap.toFixed(2)}; <b>risk used:</b> ${probeDailyRiskUsd().toFixed(4)}; <b>gross entries today:</b> ${probeDailySpendUsd().toFixed(2)}; <b>open:</b> ${state.probePositions.length}</p><p>Recovered principal and profits are recycled; only realized losses and unrecovered capital in open probes consume the daily cap.</p><p><b>Status:</b> ${esc(probeBlockers().join("; ") || "ARMED AND READY")}</p><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr><th>UTC</th><th>Strategy</th><th>Action</th><th>Token</th><th>Reason</th><th>Input</th><th>Recovered</th><th>P&amp;L</th><th>Transaction signature</th><th>Error</th></tr>${probeRows || '<tr><td colspan="10">No real probe action yet</td></tr>'}</table></div>`;
+  const probeSummary = `<div style="margin:16px 0;padding:16px;border:3px solid #dc2626;background:#fef2f2;border-radius:10px"><h3 style="margin-top:0">REAL-MONEY RUNNER LIQUIDITY PROBE</h3><p><b>Amount per probe:</b> ${cfg.probeEntry.toFixed(2)}; <b>daily realized-loss cap:</b> ${cfg.probeDailyCap.toFixed(2)}; <b>realized loss used:</b> ${probeDailyRealizedLossUsd().toFixed(4)}; <b>open exposure:</b> ${probeOpenExposureUsd().toFixed(4)} / $${cfg.probeMaxOpenExposureUsd.toFixed(2)}; <b>gross entries today:</b> ${probeDailySpendUsd().toFixed(2)}; <b>open:</b> ${state.probePositions.length}; <b>quarantined:</b> ${state.probePositions.filter(probeIsQuarantined).length}</p><p>Unsellable positions move to background quarantine after the maximum hold. They continue receiving exit attempts without occupying an active trading slot.</p><p><b>Status:</b> ${esc(probeBlockers().join("; ") || "ARMED AND READY")}</p><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr><th>UTC</th><th>Strategy</th><th>Action</th><th>Token</th><th>Reason</th><th>Input</th><th>Recovered</th><th>P&amp;L</th><th>Transaction signature</th><th>Error</th></tr>${probeRows || '<tr><td colspan="10">No real probe action yet</td></tr>'}</table></div>`;
   return reportV2().replace(
     "<h3>Recent actions</h3>",
     summary + probeSummary + "<h3>Recent actions</h3>",
@@ -1463,7 +1482,7 @@ function runnerProbeEmailReport() {
               ).toFixed(6)} ${newest.symbol || "tokens"} requested for sale; none sold`
             : "Not reported",
     status = open
-      ? `OPEN — $${Math.max(0, num(open.entryUsd) - num(open.proceedsUsd)).toFixed(6)} unrecovered cost basis; ${num(open.sellFailures)} failed sell attempts`
+      ? `${probeIsQuarantined(open) ? "QUARANTINED — background exit monitoring continues" : "OPEN"} — $${Math.max(0, num(open.entryUsd) - num(open.proceedsUsd)).toFixed(6)} unrecovered cost basis; ${num(open.sellFailures)} failed sell attempts`
       : "CLOSED",
     result = completed.length
       ? `$${realizedBeforeFees.toFixed(6)} realized before network fees`
@@ -1476,7 +1495,7 @@ function runnerProbeEmailReport() {
           `<tr><td>${esc(f.at)}</td><td>${esc(f.symbol || f.mint?.slice(0, 6))}</td><td>${esc(f.action)}</td><td>${f.inputUsd != null ? `$${num(f.inputUsd).toFixed(6)}` : "-"}</td><td>${f.outputUsd != null ? `$${num(f.outputUsd).toFixed(6)}` : "-"}</td></tr>`,
       )
       .join("");
-  return `<div style="font-family:Arial,sans-serif;color:#172033;max-width:760px;margin:auto"><div style="background:#0f3d56;color:white;padding:20px;border-radius:14px 14px 0 0"><span style="background:${newest?.action === "PROBE_SELL_FAILED" ? "#dc2626" : "#f97316"};color:white;border-radius:999px;padding:5px 10px;font-weight:800">${newest?.action === "PROBE_SELL_FAILED" ? "EXECUTION ALERT" : "NEW ACTION"}</span><h2 style="margin:12px 0 4px">Runner Probe — ${esc(newest?.symbol || "Unknown token")}</h2><div>${esc(actionLabel)}</div></div><div style="border:1px solid #cbd5e1;padding:18px;border-radius:0 0 14px 14px"><div style="background:#fff7ed;border-left:5px solid #f97316;padding:12px;margin-bottom:14px"><b>Why this report was sent</b><br>${esc(reasonText)}</div><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%;background:#f8fafc"><tr><td><b>Action amount</b><br>${esc(actionAmount)}</td><td><b>Position status</b><br>${esc(status)}</td></tr><tr><td><b>Completed result</b><br>${esc(result)}</td><td><b>Current daily risk used</b><br>$${probeDailyRiskUsd().toFixed(6)} / $${cfg.probeDailyCap.toFixed(2)}</td></tr></table>${newest?.error ? `<div style="margin-top:12px;padding:10px;background:#fee2e2;color:#991b1b"><b>Execution problem:</b> No executable Jupiter sell route is currently available. The detailed provider response remains in the audit ledger.</div>` : ""}<p><b>Service totals:</b> ${buys.length} buys; ${successfulSells.length} successful sales; ${completed.length} completed round trips; ${state.probePositions.length} open position${state.probePositions.length === 1 ? "" : "s"}. Gross entries: $${grossEntries.toFixed(6)}. USDC recovered: $${recovered.toFixed(6)}. Network fees are not included unless explicitly recorded.</p><h3>Successful actions</h3><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>UTC</th><th>Token</th><th>Action</th><th>Spent</th><th>Recovered</th></tr>${recent || '<tr><td colspan="5">No successful action recorded</td></tr>'}</table><p style="color:#64748b;font-size:12px">Every failed retry remains in the audit ledger. After the first, fifth and tenth failures, reminder emails are limited to once per hour.</p></div></div>`;
+  return `<div style="font-family:Arial,sans-serif;color:#172033;max-width:760px;margin:auto"><div style="background:#0f3d56;color:white;padding:20px;border-radius:14px 14px 0 0"><span style="background:${newest?.action === "PROBE_SELL_FAILED" ? "#dc2626" : "#f97316"};color:white;border-radius:999px;padding:5px 10px;font-weight:800">${newest?.action === "PROBE_SELL_FAILED" ? "EXECUTION ALERT" : "NEW ACTION"}</span><h2 style="margin:12px 0 4px">Runner Probe — ${esc(newest?.symbol || "Unknown token")}</h2><div>${esc(actionLabel)}</div></div><div style="border:1px solid #cbd5e1;padding:18px;border-radius:0 0 14px 14px"><div style="background:#fff7ed;border-left:5px solid #f97316;padding:12px;margin-bottom:14px"><b>Why this report was sent</b><br>${esc(reasonText)}</div><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%;background:#f8fafc"><tr><td><b>Action amount</b><br>${esc(actionAmount)}</td><td><b>Position status</b><br>${esc(status)}</td></tr><tr><td><b>Completed result</b><br>${esc(result)}</td><td><b>Risk controls</b><br>Realized loss today: $${probeDailyRealizedLossUsd().toFixed(6)} / $${cfg.probeDailyCap.toFixed(2)}<br>Open exposure: $${probeOpenExposureUsd().toFixed(6)} / $${cfg.probeMaxOpenExposureUsd.toFixed(2)}</td></tr></table>${newest?.error ? `<div style="margin-top:12px;padding:10px;background:#fee2e2;color:#991b1b"><b>Execution problem:</b> No executable Jupiter sell route is currently available. The position is quarantined after the maximum hold and remains under background exit supervision without occupying the active trading lane.</div>` : ""}<p><b>Service totals:</b> ${buys.length} buys; ${successfulSells.length} successful sales; ${completed.length} completed round trips; ${state.probePositions.length} open position${state.probePositions.length === 1 ? "" : "s"}; ${state.probePositions.filter(probeIsQuarantined).length} quarantined. Gross entries: $${grossEntries.toFixed(6)}. USDC recovered: $${recovered.toFixed(6)}. Network fees are not included unless explicitly recorded.</p><h3>Successful actions</h3><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>UTC</th><th>Token</th><th>Action</th><th>Spent</th><th>Recovered</th></tr>${recent || '<tr><td colspan="5">No successful action recorded</td></tr>'}</table><p style="color:#64748b;font-size:12px">Every failed retry remains in the audit ledger. After the first, fifth and tenth failures, reminder emails are limited to once per hour.</p></div></div>`;
 }
 async function email(hasTradeEvent = false) {
   if (hasTradeEvent)
