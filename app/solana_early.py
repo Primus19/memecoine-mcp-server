@@ -753,6 +753,17 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
          "runner creator concentration too high"),
     )
     failures.extend(reason for failed, reason in checks if failed)
+    # A live liquidity probe deliberately permits the exit quote to be absent or
+    # above the normal trading threshold. Its purpose is to measure a tiny real
+    # round trip, while every momentum, activity, liquidity and contract-safety
+    # requirement remains mandatory.
+    live_probe_failures = [
+        reason for reason in failures
+        if reason not in {
+            "sell simulation failed",
+            "runner executable sell impact above maximum",
+        }
+    ]
     score = round(clamp(momentum_5m, 0, 100) * .35 +
                   clamp(return_since_seen * 100, 0, 100) * .30 +
                   clamp(pressure * 100, 0, 100) * .20 +
@@ -767,12 +778,15 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
         "decimals": int(candidate.get("decimals") or 0),
         "strategy": "SOLANA_MICROCAP_RUNNER_CAPTURE",
         "strategy_version": "RUNNER_CAPTURE_V1",
-        "mode": "PAPER_ONLY",
+        "mode": ("LIVE_LIQUIDITY_PROBE_ELIGIBLE" if not live_probe_failures
+                 else "PAPER_ONLY"),
         "qualified": False,
         "live_eligible": False,
+        "live_probe_qualified": not live_probe_failures,
+        "live_probe_failures": list(dict.fromkeys(live_probe_failures)),
         "paper_qualified": not failures,
         "paper_failures": list(dict.fromkeys(failures)),
-        "failures": ["paper-only explosive-runner cohort"],
+        "failures": ["normal live trading disabled; separately capped liquidity probe only"],
         "score": score,
         "token_age_minutes": round(age, 4),
         "volume_24h_usd": round(volume_24h, 2),
