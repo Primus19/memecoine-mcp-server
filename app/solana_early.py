@@ -143,6 +143,41 @@ class MicrocapLaunchPolicy:
         )
 
 
+@dataclass(frozen=True)
+class RunnerCapturePolicy:
+    """Paper-only cohort for already-confirmed, unusually strong launch runners."""
+
+    enabled: bool = True
+    minimum_volume_24h_usd: float = 100_000.0
+    minimum_liquidity_usd: float = 10_000.0
+    maximum_age_minutes: float = 60.0
+    minimum_trades_5m: int = 20
+    minimum_unique_buyers_5m: int = 12
+    minimum_net_buy_pressure: float = 0.15
+    minimum_price_change_5m_pct: float = 15.0
+    maximum_price_change_5m_pct: float = 200.0
+    minimum_return_since_seen: float = 0.20
+    maximum_retracement_from_high: float = 0.10
+    maximum_sell_price_impact_bps: float = 150.0
+    maximum_top10_holder_fraction: float = 0.80
+    maximum_creator_fraction: float = 0.30
+
+    @classmethod
+    def from_env(cls) -> "RunnerCapturePolicy":
+        return cls(
+            enabled=os.getenv("SOLANA_RUNNER_CAPTURE_ENABLED", "true").lower() == "true",
+            minimum_volume_24h_usd=max(
+                100_000.0, float(os.getenv("SOLANA_RUNNER_MIN_VOLUME_24H_USD", "100000"))
+            ),
+            minimum_liquidity_usd=max(
+                7_500.0, float(os.getenv("SOLANA_RUNNER_MIN_LIQUIDITY_USD", "10000"))
+            ),
+            maximum_age_minutes=min(
+                90.0, max(10.0, float(os.getenv("SOLANA_RUNNER_MAX_AGE_MINUTES", "60")))
+            ),
+        )
+
+
 class EarlyRejected(ValueError):
     pass
 
@@ -183,10 +218,16 @@ class Ledger:
         now = str(candidate.get("observed_at") or utcnow())
         with self.lock, self.db:
             row = self.db.execute(
-                "SELECT first_seen_at,initial_price,max_price,checkpoints FROM candidate_watchlist WHERE strategy=? AND mint=?",
+                "SELECT first_seen_at,initial_price,max_price,checkpoints,payload FROM candidate_watchlist WHERE strategy=? AND mint=?",
                 (strategy, mint)).fetchone()
             first, initial, maximum, checkpoints = (now, price, price, {}) if not row else (
                 str(row[0]), float(row[1]), max(float(row[2]), price), json.loads(row[3] or "{}"))
+            prior_payload = json.loads(row[4] or "{}") if row else {}
+            first_candidate = (prior_payload.get("first_candidate")
+                               if isinstance(prior_payload, dict) else None)
+            if not isinstance(first_candidate, dict):
+                first_candidate = prior_payload if row and isinstance(prior_payload, dict) else candidate
+            retained_payload = {"first_candidate": first_candidate, "latest_candidate": candidate}
             elapsed = max(0, (datetime.fromisoformat(now.replace("Z", "+00:00")) -
                               datetime.fromisoformat(first.replace("Z", "+00:00"))).total_seconds() / 60)
             for minute in (5, 15, 30, 60):
@@ -197,7 +238,8 @@ class Ledger:
                 latest_price=excluded.latest_price,max_price=excluded.max_price,payload=excluded.payload,
                 checkpoints=excluded.checkpoints,status=excluded.status""",
                 (strategy, mint, pool, first, now, initial, price, maximum,
-                 json.dumps(candidate, sort_keys=True), json.dumps(checkpoints, sort_keys=True), status))
+                 json.dumps(retained_payload, sort_keys=True),
+                 json.dumps(checkpoints, sort_keys=True), status))
         return row is None
 
     def watched_pools(self, strategy: str, maximum_age_minutes: int = 60,
@@ -218,11 +260,40 @@ class Ledger:
     def watchlist_snapshot(self, strategy: str, limit: int = 100) -> list[dict[str, Any]]:
         with self.lock:
             rows = self.db.execute("""SELECT mint,pool,first_seen_at,last_seen_at,initial_price,
-                latest_price,max_price,checkpoints,status FROM candidate_watchlist
+                latest_price,max_price,payload,checkpoints,status FROM candidate_watchlist
                 WHERE strategy=? ORDER BY last_seen_at DESC LIMIT ?""", (strategy, limit)).fetchall()
-        return [{**dict(row), "return_since_seen": round(float(row["latest_price"]) /
-                 max(float(row["initial_price"]), 1e-30) - 1, 6),
-                 "checkpoints": json.loads(row["checkpoints"] or "{}")} for row in rows]
+        output = []
+        for row in rows:
+            item = dict(row)
+            payload = json.loads(item.pop("payload") or "{}")
+            item["first_candidate"] = payload.get("first_candidate", payload)
+            item["latest_candidate"] = payload.get("latest_candidate", payload)
+            item["return_since_seen"] = round(float(row["latest_price"]) /
+                                               max(float(row["initial_price"]), 1e-30) - 1, 6)
+            item["retracement_from_high"] = round(
+                max(0.0, 1 - float(row["latest_price"]) / max(float(row["max_price"]), 1e-30)), 6)
+            item["checkpoints"] = json.loads(row["checkpoints"] or "{}")
+            output.append(item)
+        return output
+
+    def watched_candidate(self, strategy: str, mint: str) -> dict[str, Any] | None:
+        with self.lock:
+            row = self.db.execute("""SELECT mint,pool,first_seen_at,last_seen_at,initial_price,
+                latest_price,max_price,payload,checkpoints,status FROM candidate_watchlist
+                WHERE strategy=? AND mint=?""", (strategy, mint)).fetchone()
+        if not row:
+            return None
+        payload = json.loads(row["payload"] or "{}")
+        return {
+            **dict(row),
+            "first_candidate": payload.get("first_candidate", payload),
+            "latest_candidate": payload.get("latest_candidate", payload),
+            "return_since_seen": float(row["latest_price"]) / max(float(row["initial_price"]), 1e-30) - 1,
+            "retracement_from_high": max(
+                0.0, 1 - float(row["latest_price"]) / max(float(row["max_price"]), 1e-30)
+            ),
+            "checkpoints": json.loads(row["checkpoints"] or "{}"),
+        }
 
     def wallet_stats(self, wallet: str) -> dict[str, float]:
         with self.lock:
@@ -639,11 +710,106 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
     }
 
 
+def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
+                                   policy: RunnerCapturePolicy) -> dict[str, Any]:
+    """Test persistent explosive runners without making them live eligible."""
+    watch_strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+    history = ledger.watched_candidate(watch_strategy, str(candidate.get("mint") or ""))
+    age = _number(candidate.get("token_age_minutes"), 9999)
+    volume_24h = _number(candidate.get("volume_24h_usd"), 0)
+    liquidity = _number(candidate.get("liquidity_usd"), 0)
+    trades = int(_number(candidate.get("trades_5m"), 0))
+    buyers = int(_number(candidate.get("unique_buyers_5m"), 0))
+    pressure = _number(candidate.get("transaction_buy_pressure"), -1)
+    momentum_5m = _number(candidate.get("price_change_5m_pct"), -999)
+    momentum_15m = _number(candidate.get("price_change_15m_pct"), -999)
+    impact = _number(candidate.get("sell_price_impact_bps"), 9999)
+    return_since_seen = _number((history or {}).get("return_since_seen"), -1)
+    retracement = _number((history or {}).get("retracement_from_high"), 1)
+    top10 = candidate.get("top10_holder_fraction")
+    creator = candidate.get("creator_fraction")
+    failures = contract_safety_failures(candidate)
+    checks = (
+        (not policy.enabled, "runner capture strategy disabled"),
+        (history is None, "runner has no retained first-seen history"),
+        (not 1 <= age <= policy.maximum_age_minutes, "runner token age outside test window"),
+        (volume_24h < policy.minimum_volume_24h_usd,
+         f"runner 24h volume below ${policy.minimum_volume_24h_usd / 1000:.0f}k minimum"),
+        (liquidity < policy.minimum_liquidity_usd, "runner liquidity below minimum"),
+        (trades < policy.minimum_trades_5m, "runner recent trades below minimum"),
+        (buyers < policy.minimum_unique_buyers_5m, "runner unique buyers below minimum"),
+        (pressure < policy.minimum_net_buy_pressure, "runner net buy pressure below minimum"),
+        (not policy.minimum_price_change_5m_pct <= momentum_5m <= policy.maximum_price_change_5m_pct,
+         "runner five-minute momentum outside explosive range"),
+        (momentum_15m <= 0, "runner fifteen-minute momentum is not positive"),
+        (return_since_seen < policy.minimum_return_since_seen,
+         "runner has not gained 20% since first observation"),
+        (retracement > policy.maximum_retracement_from_high,
+         "runner has already retraced more than 10% from its observed high"),
+        (impact > policy.maximum_sell_price_impact_bps, "runner executable sell impact above maximum"),
+        (top10 is not None and _number(top10) > policy.maximum_top10_holder_fraction,
+         "runner top-10 concentration too high"),
+        (creator is not None and _number(creator) > policy.maximum_creator_fraction,
+         "runner creator concentration too high"),
+    )
+    failures.extend(reason for failed, reason in checks if failed)
+    score = round(clamp(momentum_5m, 0, 100) * .35 +
+                  clamp(return_since_seen * 100, 0, 100) * .30 +
+                  clamp(pressure * 100, 0, 100) * .20 +
+                  clamp(math.log10(max(liquidity, 1) / policy.minimum_liquidity_usd + 1) * 50,
+                        0, 15), 2)
+    distribution_status = ("VERIFIED" if top10 is not None and creator is not None
+                           else "UNAVAILABLE_PAPER_ONLY")
+    return {
+        "mint": str(candidate.get("mint") or ""),
+        "symbol": str(candidate.get("symbol") or ""),
+        "price_usd": _number(candidate.get("price_usd")),
+        "decimals": int(candidate.get("decimals") or 0),
+        "strategy": "SOLANA_MICROCAP_RUNNER_CAPTURE",
+        "strategy_version": "RUNNER_CAPTURE_V1",
+        "mode": "PAPER_ONLY",
+        "qualified": False,
+        "live_eligible": False,
+        "paper_qualified": not failures,
+        "paper_failures": list(dict.fromkeys(failures)),
+        "failures": ["paper-only explosive-runner cohort"],
+        "score": score,
+        "token_age_minutes": round(age, 4),
+        "volume_24h_usd": round(volume_24h, 2),
+        "liquidity_usd": round(liquidity, 2),
+        "trades_5m": trades,
+        "unique_buyers_5m": buyers,
+        "net_buy_pressure": round(pressure, 4),
+        "price_change_5m_pct": round(momentum_5m, 4),
+        "price_change_15m_pct": round(momentum_15m, 4),
+        "return_since_seen": round(return_since_seen, 6),
+        "retracement_from_high": round(retracement, 6),
+        "first_seen_at": str((history or {}).get("first_seen_at") or ""),
+        "sell_price_impact_bps": round(impact, 2),
+        "top10_holder_fraction": _number(top10) if top10 is not None else None,
+        "creator_fraction": _number(creator) if creator is not None else None,
+        "distribution_evidence_status": distribution_status,
+        "safety_evidence_status": str(candidate.get("safety_evidence_status") or "MISSING"),
+        "flow_data_provenance": str(candidate.get("flow_data_provenance") or "UNSPECIFIED"),
+        "pool_address": str(candidate.get("pool") or ""),
+        "source_observed_at": str(candidate.get("observed_at") or ""),
+        "source_url": str(candidate.get("source_url") or ""),
+        "qualified_wallet_count": 0,
+        "entry_reason": (
+            f"Runner Capture V1 paper entry: {return_since_seen:.1%} since first observation; "
+            f"{momentum_5m:.1f}% five-minute and {momentum_15m:.1f}% fifteen-minute momentum; "
+            f"${volume_24h:,.0f} volume; ${liquidity:,.0f} liquidity; {pressure:.1%} buy pressure; "
+            f"{retracement:.1%} retracement from high; executable sell impact {impact:.0f} bps; "
+            f"distribution evidence {distribution_status}."
+        ),
+    }
+
+
 def strategy_diagnostics(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Explain why each paper strategy did or did not produce candidates."""
     diagnostics: dict[str, Any] = {}
     for strategy in ("SOLANA_EARLY_CONTROL", "SOLANA_PUMPFUN_EV_EXPERIMENT",
-                     "SOLANA_MICROCAP_LAUNCH_MOMENTUM"):
+                     "SOLANA_MICROCAP_LAUNCH_MOMENTUM", "SOLANA_MICROCAP_RUNNER_CAPTURE"):
         rows = [item for item in results if item.get("strategy") == strategy]
         failure_counts: dict[str, int] = {}
         for row in rows:
@@ -1002,6 +1168,7 @@ def main() -> None:
     policy = EarlyPolicy.from_env()
     pumpfun_policy = PumpfunEvPolicy.from_env()
     microcap_policy = MicrocapLaunchPolicy.from_env()
+    runner_policy = RunnerCapturePolicy.from_env()
     server = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     # Public GeckoTerminal allows 30 calls/minute. Three pages once a minute
@@ -1030,6 +1197,10 @@ def main() -> None:
                 ledger.store_signal({**candidate, "strategy": microcap["strategy"]}, microcap["score"],
                                     "PAPER_QUALIFIED" if microcap["paper_qualified"] else "REJECTED")
                 results.append(microcap)
+                runner = score_runner_capture_candidate(candidate, ledger, runner_policy)
+                ledger.store_signal({**candidate, "strategy": runner["strategy"]}, runner["score"],
+                                    "PAPER_QUALIFIED" if runner["paper_qualified"] else "REJECTED")
+                results.append(runner)
             results.sort(key=lambda item: (item.get("paper_qualified", False),
                                            item.get("ev_rank", item["score"])), reverse=True)
             diagnostics = strategy_diagnostics(results)
@@ -1043,6 +1214,9 @@ def main() -> None:
                                  "tracked": len(watchlist),
                                  "execution_volume_floor_usd": microcap_policy.minimum_volume_24h_usd,
                                  "watch_volume_floor_usd": microcap_policy.watch_minimum_volume_24h_usd,
+                                 "runner_capture_enabled": runner_policy.enabled,
+                                 "runner_minimum_return_since_seen":
+                                     runner_policy.minimum_return_since_seen,
                                  "checkpoints_minutes": [5, 15, 30, 60],
                              },
                              watched_wallets=[value.strip() for value in

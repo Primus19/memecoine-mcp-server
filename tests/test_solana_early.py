@@ -6,9 +6,11 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from app.solana_early import (EarlyPolicy, Ledger, MicrocapLaunchPolicy, PumpfunEvPolicy, contract_safety_failures,
+from app.solana_early import (EarlyPolicy, Ledger, MicrocapLaunchPolicy, PumpfunEvPolicy,
+                              RunnerCapturePolicy, contract_safety_failures,
                               goplus_safety, json_request, public_onchain_candidates,
-                              safety_failures, score_candidate, score_microcap_launch_candidate, score_pumpfun_ev_candidate,
+                              safety_failures, score_candidate, score_microcap_launch_candidate,
+                              score_pumpfun_ev_candidate, score_runner_capture_candidate,
                               strategy_diagnostics)
 
 
@@ -290,6 +292,59 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertAlmostEqual(.2, row["checkpoints"]["15"])
         self.assertNotIn("30", row["checkpoints"])
 
+    def test_microcap_watchlist_retains_first_and_latest_evidence(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool1", price_usd=.001, volume_24h_usd=25000,
+                          observed_at="2026-08-29T12:00:00+00:00")
+        later = candidate(pool="pool1", price_usd=.0013, volume_24h_usd=140000,
+                          observed_at="2026-08-29T12:06:00+00:00")
+        self.ledger.upsert_watch_candidate(first, strategy)
+        self.ledger.upsert_watch_candidate(later, strategy)
+        row = self.ledger.watchlist_snapshot(strategy)[0]
+        self.assertEqual(25000, row["first_candidate"]["volume_24h_usd"])
+        self.assertEqual(140000, row["latest_candidate"]["volume_24h_usd"])
+        self.assertAlmostEqual(.3, row["return_since_seen"])
+
+    def test_runner_capture_qualifies_persistent_explosive_move_for_paper_only(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool1", price_usd=.001, volume_24h_usd=25000,
+                          observed_at="2026-08-29T12:00:00+00:00")
+        current = candidate(
+            pool="pool1", price_usd=.0013, volume_24h_usd=150000,
+            token_age_minutes=18, price_change_5m_pct=60, price_change_15m_pct=75,
+            transaction_buy_pressure=.65, observed_at="2026-08-29T12:06:00+00:00",
+            top10_holder_fraction=None, creator_fraction=None,
+        )
+        self.ledger.upsert_watch_candidate(first, strategy)
+        self.ledger.upsert_watch_candidate(current, strategy)
+        result = score_runner_capture_candidate(current, self.ledger, RunnerCapturePolicy())
+        self.assertTrue(result["paper_qualified"])
+        self.assertFalse(result["qualified"])
+        self.assertFalse(result["live_eligible"])
+        self.assertEqual("RUNNER_CAPTURE_V1", result["strategy_version"])
+        self.assertEqual("UNAVAILABLE_PAPER_ONLY", result["distribution_evidence_status"])
+        self.assertIn("30.0% since first observation", result["entry_reason"])
+
+    def test_runner_capture_rejects_late_retracement_or_missing_sell_route(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool1", price_usd=.001,
+                          observed_at="2026-08-29T12:00:00+00:00")
+        peak = candidate(pool="pool1", price_usd=.002,
+                         observed_at="2026-08-29T12:05:00+00:00")
+        current = candidate(
+            pool="pool1", price_usd=.0015, volume_24h_usd=150000,
+            token_age_minutes=18, price_change_5m_pct=25, price_change_15m_pct=45,
+            transaction_buy_pressure=.65, sell_simulation_ok=False,
+            observed_at="2026-08-29T12:06:00+00:00",
+        )
+        for item in (first, peak, current):
+            self.ledger.upsert_watch_candidate(item, strategy)
+        result = score_runner_capture_candidate(current, self.ledger, RunnerCapturePolicy())
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("sell simulation failed", result["paper_failures"])
+        self.assertIn("runner has already retraced more than 10% from its observed high",
+                      result["paper_failures"])
+
     def test_microcap_launch_keeps_sellability_and_safety_mandatory(self):
         result = score_microcap_launch_candidate(
             candidate(sell_simulation_ok=False, safety_evidence_status="UNAVAILABLE"),
@@ -310,8 +365,17 @@ class SolanaEarlyTests(unittest.TestCase):
         source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
         compact = "".join(source.split())
         for expected in ("MICROCAP_DOWNTREND", "MICROCAP_PROFIT_PROTECTION",
-                         "MAX_HOLD_20M", 'stop=isMicrocap?0.08', 'target=isMicrocap?0.2',
+                         "MAX_HOLD_20M", 'isMicrocap?0.08', 'isMicrocap?0.2',
                          'strategyName(f.strategy)', "microcapLaunchV2Performance"):
+            self.assertTrue(expected in source or "".join(expected.split()) in compact)
+
+    def test_runner_capture_executor_is_paper_only_and_has_tiered_exits(self):
+        source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+        compact = "".join(source.split())
+        for expected in ("RUNNER_CAPTURE_V1", "RUNNER_TIERED_PROFIT", "RUNNER_DOWNTREND",
+                         "MAX_HOLD_30M", "Runner Capture Experiment",
+                         "runnerCaptureV1Performance", "CYAN • Runner Capture V1",
+                         "target=isRunner?5.0", "stop=isRunner?0.1"):
             self.assertTrue(expected in source or "".join(expected.split()) in compact)
 
     def test_microcap_action_reports_are_named_colored_and_retried(self):
