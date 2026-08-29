@@ -23,7 +23,7 @@ def candidate(**changes):
         "non_transferable": False, "creator_selling": False, "sell_simulation_ok": True,
         "top10_holder_fraction": .20, "creator_fraction": .02,
         "social_velocity_ratio": 3, "creator_history_score": 3, "buyer_wallets": [],
-        "market_cap_usd": 5000, "trades_5m": 120, "volume_24h_usd": 25000,
+        "market_cap_usd": 5000, "trades_5m": 120, "volume_24h_usd": 125000,
         "safety_evidence_status": "VERIFIED", "price_change_5m_pct": 10,
         "price_change_15m_pct": 15,
     }
@@ -252,8 +252,8 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertTrue(result["paper_qualified"])
         self.assertFalse(result["qualified"])
         self.assertFalse(result["live_eligible"])
-        self.assertEqual("MICROCAP_LAUNCH_V1", result["strategy_version"])
-        self.assertIn("$25,000 24h volume", result["entry_reason"])
+        self.assertEqual("MICROCAP_LAUNCH_V2", result["strategy_version"])
+        self.assertIn("$125,000 24h volume", result["entry_reason"])
 
     def test_microcap_launch_accepts_volume_upward_without_small_ceiling(self):
         result = score_microcap_launch_candidate(candidate(volume_24h_usd=250000), self.ledger,
@@ -262,12 +262,33 @@ class SolanaEarlyTests(unittest.TestCase):
 
     def test_microcap_launch_rejects_weak_run_and_low_volume(self):
         result = score_microcap_launch_candidate(
-            candidate(volume_24h_usd=19999, price_change_5m_pct=2,
+            candidate(volume_24h_usd=99999, price_change_5m_pct=2,
                       transaction_buy_pressure=.10), self.ledger, MicrocapLaunchPolicy())
         self.assertFalse(result["paper_qualified"])
-        self.assertIn("microcap 24h volume below $20k minimum", result["paper_failures"])
+        self.assertIn("microcap 24h volume below $100k execution minimum", result["paper_failures"])
         self.assertIn("microcap five-minute momentum outside serious-run range", result["paper_failures"])
         self.assertIn("microcap net buy pressure below minimum", result["paper_failures"])
+
+    def test_microcap_launch_retains_promising_pool_before_execution_volume(self):
+        value = candidate(volume_24h_usd=25000, pool="pool1", price_usd=.001)
+        result = score_microcap_launch_candidate(value, self.ledger, MicrocapLaunchPolicy())
+        self.assertTrue(result["watch_eligible"])
+        self.assertFalse(result["paper_qualified"])
+        self.assertTrue(self.ledger.upsert_watch_candidate(value, result["strategy"]))
+        self.assertEqual(["pool1"], self.ledger.watched_pools(result["strategy"], 999999))
+
+    def test_microcap_watchlist_records_price_checkpoints(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool1", price_usd=.001,
+                          observed_at="2026-08-29T12:00:00+00:00")
+        later = candidate(pool="pool1", price_usd=.0012,
+                          observed_at="2026-08-29T12:16:00+00:00")
+        self.ledger.upsert_watch_candidate(first, strategy)
+        self.ledger.upsert_watch_candidate(later, strategy)
+        row = self.ledger.watchlist_snapshot(strategy)[0]
+        self.assertAlmostEqual(.2, row["checkpoints"]["5"])
+        self.assertAlmostEqual(.2, row["checkpoints"]["15"])
+        self.assertNotIn("30", row["checkpoints"])
 
     def test_microcap_launch_keeps_sellability_and_safety_mandatory(self):
         result = score_microcap_launch_candidate(
@@ -288,12 +309,12 @@ class SolanaEarlyTests(unittest.TestCase):
         source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
         for expected in ("MICROCAP_DOWNTREND", "MICROCAP_PROFIT_PROTECTION",
                          "MAX_HOLD_20M", 'stop=isMicrocap?.08', 'target=isMicrocap?.20',
-                         'strategyName(f.strategy)', "microcapLaunchV1Performance"):
+                         'strategyName(f.strategy)', "microcapLaunchV2Performance"):
             self.assertIn(expected, source)
 
     def test_microcap_action_reports_are_named_colored_and_retried(self):
         source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
-        for expected in ("Microcap Launch V1", "ORANGE • Microcap Launch V1",
+        for expected in ("Microcap Launch V2", "ORANGE • Microcap Launch V2",
                          "pendingTradeEvent:true", "state.email.pendingTradeEvent",
                          "pendingTradeEvent:false"):
             self.assertIn(expected, source)

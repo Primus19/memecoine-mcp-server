@@ -115,7 +115,8 @@ class MicrocapLaunchPolicy:
     """Paper-only fast momentum test for newly created Solana pools."""
 
     enabled: bool = True
-    minimum_volume_24h_usd: float = 20_000.0
+    minimum_volume_24h_usd: float = 100_000.0
+    watch_minimum_volume_24h_usd: float = 5_000.0
     minimum_liquidity_usd: float = 10_000.0
     maximum_age_minutes: float = 30.0
     minimum_trades_5m: int = 25
@@ -133,7 +134,10 @@ class MicrocapLaunchPolicy:
     def from_env(cls) -> "MicrocapLaunchPolicy":
         return cls(
             enabled=os.getenv("SOLANA_MICROCAP_LAUNCH_ENABLED", "true").lower() == "true",
-            minimum_volume_24h_usd=max(20_000.0, float(os.getenv("SOLANA_MICROCAP_MIN_VOLUME_24H_USD", "20000"))),
+            # $100k is a non-overridable evidence floor. The scanner may retain
+            # earlier pools, but the paper executor cannot enter them yet.
+            minimum_volume_24h_usd=max(100_000.0, float(os.getenv("SOLANA_MICROCAP_MIN_VOLUME_24H_USD", "100000"))),
+            watch_minimum_volume_24h_usd=max(5_000.0, float(os.getenv("SOLANA_MICROCAP_WATCH_MIN_VOLUME_24H_USD", "5000"))),
             minimum_liquidity_usd=max(7_500.0, float(os.getenv("SOLANA_MICROCAP_MIN_LIQUIDITY_USD", "10000"))),
             maximum_age_minutes=min(60.0, max(5.0, float(os.getenv("SOLANA_MICROCAP_MAX_AGE_MINUTES", "30")))),
         )
@@ -161,7 +165,64 @@ class Ledger:
               signature TEXT PRIMARY KEY, wallet TEXT NOT NULL, mint TEXT NOT NULL,
               side TEXT NOT NULL, quantity REAL NOT NULL, observed_at TEXT NOT NULL,
               payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS candidate_watchlist(
+              strategy TEXT NOT NULL, mint TEXT NOT NULL, pool TEXT NOT NULL,
+              first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+              initial_price REAL NOT NULL, latest_price REAL NOT NULL,
+              max_price REAL NOT NULL, payload TEXT NOT NULL,
+              checkpoints TEXT NOT NULL, status TEXT NOT NULL,
+              PRIMARY KEY(strategy,mint));
             """)
+
+    def upsert_watch_candidate(self, candidate: dict[str, Any], strategy: str,
+                               status: str = "WATCHING") -> bool:
+        mint, pool = str(candidate.get("mint") or ""), str(candidate.get("pool") or "")
+        price = _number(candidate.get("price_usd"), 0)
+        if not mint or not pool or price <= 0:
+            return False
+        now = str(candidate.get("observed_at") or utcnow())
+        with self.lock, self.db:
+            row = self.db.execute(
+                "SELECT first_seen_at,initial_price,max_price,checkpoints FROM candidate_watchlist WHERE strategy=? AND mint=?",
+                (strategy, mint)).fetchone()
+            first, initial, maximum, checkpoints = (now, price, price, {}) if not row else (
+                str(row[0]), float(row[1]), max(float(row[2]), price), json.loads(row[3] or "{}"))
+            elapsed = max(0, (datetime.fromisoformat(now.replace("Z", "+00:00")) -
+                              datetime.fromisoformat(first.replace("Z", "+00:00"))).total_seconds() / 60)
+            for minute in (5, 15, 30, 60):
+                if elapsed >= minute and str(minute) not in checkpoints:
+                    checkpoints[str(minute)] = round(price / initial - 1, 6)
+            self.db.execute("""INSERT INTO candidate_watchlist VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(strategy,mint) DO UPDATE SET pool=excluded.pool,last_seen_at=excluded.last_seen_at,
+                latest_price=excluded.latest_price,max_price=excluded.max_price,payload=excluded.payload,
+                checkpoints=excluded.checkpoints,status=excluded.status""",
+                (strategy, mint, pool, first, now, initial, price, maximum,
+                 json.dumps(candidate, sort_keys=True), json.dumps(checkpoints, sort_keys=True), status))
+        return row is None
+
+    def watched_pools(self, strategy: str, maximum_age_minutes: int = 60,
+                      limit: int = 100) -> list[str]:
+        cutoff = datetime.fromtimestamp(time.time() - maximum_age_minutes * 60, UTC).isoformat()
+        with self.lock:
+            rows = self.db.execute("""SELECT pool FROM candidate_watchlist
+                WHERE strategy=? AND first_seen_at>=? ORDER BY last_seen_at DESC LIMIT ?""",
+                (strategy, cutoff, limit)).fetchall()
+        return [str(row[0]) for row in rows if row[0]]
+
+    def is_watched(self, strategy: str, mint: str) -> bool:
+        with self.lock:
+            row = self.db.execute(
+                "SELECT 1 FROM candidate_watchlist WHERE strategy=? AND mint=?", (strategy, mint)).fetchone()
+        return row is not None
+
+    def watchlist_snapshot(self, strategy: str, limit: int = 100) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.db.execute("""SELECT mint,pool,first_seen_at,last_seen_at,initial_price,
+                latest_price,max_price,checkpoints,status FROM candidate_watchlist
+                WHERE strategy=? ORDER BY last_seen_at DESC LIMIT ?""", (strategy, limit)).fetchall()
+        return [{**dict(row), "return_since_seen": round(float(row["latest_price"]) /
+                 max(float(row["initial_price"]), 1e-30) - 1, 6),
+                 "checkpoints": json.loads(row["checkpoints"] or "{}")} for row in rows]
 
     def wallet_stats(self, wallet: str) -> dict[str, float]:
         with self.lock:
@@ -524,7 +585,8 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
     checks = (
         (not policy.enabled, "microcap launch strategy disabled"),
         (not 1 <= age <= policy.maximum_age_minutes, "microcap token age outside launch window"),
-        (volume_24h < policy.minimum_volume_24h_usd, "microcap 24h volume below $20k minimum"),
+        (volume_24h < policy.minimum_volume_24h_usd,
+         f"microcap 24h volume below ${policy.minimum_volume_24h_usd / 1000:.0f}k execution minimum"),
         (liquidity < policy.minimum_liquidity_usd, "microcap liquidity below minimum"),
         (trades < policy.minimum_trades_5m, "microcap recent trades below minimum"),
         (buyers < policy.minimum_unique_buyers_5m, "microcap unique buyers below minimum"),
@@ -550,7 +612,7 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
     return {
         "mint": str(candidate.get("mint") or ""), "symbol": str(candidate.get("symbol") or ""),
         "price_usd": _number(candidate.get("price_usd")), "decimals": int(candidate.get("decimals") or 0),
-        "strategy": "SOLANA_MICROCAP_LAUNCH_MOMENTUM", "strategy_version": "MICROCAP_LAUNCH_V1",
+        "strategy": "SOLANA_MICROCAP_LAUNCH_MOMENTUM", "strategy_version": "MICROCAP_LAUNCH_V2",
         "mode": "PAPER_ONLY", "qualified": False, "live_eligible": False,
         "paper_qualified": not failures, "paper_failures": list(dict.fromkeys(failures)),
         "failures": ["paper-only challenger"], "score": score,
@@ -566,7 +628,11 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
         "pool_address": str(candidate.get("pool") or ""),
         "source_observed_at": str(candidate.get("observed_at") or ""),
         "source_url": str(candidate.get("source_url") or ""), "qualified_wallet_count": 0,
-        "entry_reason": (f"Microcap Launch V1 serious-run entry: {age:.1f}-minute pool; "
+        "watch_eligible": (policy.enabled and 0 <= age <= 60 and
+                           volume_24h >= policy.watch_minimum_volume_24h_usd and
+                           liquidity >= 7_500 and buyers >= 10 and pressure > 0 and
+                           (momentum_5m >= 3 or buyer_accel >= 1.2 or volume_accel >= 1.2)),
+        "entry_reason": (f"Microcap Launch V2 rolling-confirmation entry: {age:.1f}-minute pool; "
                          f"${volume_24h:,.0f} 24h volume; {momentum_5m:.2f}% five-minute momentum; "
                          f"{pressure:.2f} buy pressure; {buyer_accel:.2f}x buyer and "
                          f"{volume_accel:.2f}x volume acceleration; executable sell impact {impact:.0f} bps."),
@@ -737,6 +803,23 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
                 seen_pools.add(pool)
                 rows.append((row, payload))
 
+    # A promising pool can disappear from the newest-pools pages before it
+    # reaches executable evidence. Refresh retained pools directly for an hour.
+    strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+    refresh_limit = max(5, min(25, int(os.getenv("SOLANA_MICROCAP_WATCH_REFRESH_LIMIT", "10"))))
+    for pool in ledger.watched_pools(strategy, limit=refresh_limit):
+        if pool in seen_pools:
+            continue
+        try:
+            payload = json_request(
+                f"{base}/networks/solana/pools/{pool}?include=base_token,quote_token,dex", headers)
+            row = payload.get("data") if isinstance(payload, dict) else None
+            if isinstance(row, dict):
+                seen_pools.add(pool)
+                rows.insert(0, (row, payload))
+        except Exception as exc:
+            errors.append(f"watched pool {pool}: {exc}")
+
     def enrich(item: tuple[dict[str, Any], dict[str, Any]]) -> dict[str, Any] | None:
         row, payload = item
         attributes = row.get("attributes") or {}
@@ -897,7 +980,8 @@ class Handler(BaseHTTPRequestHandler):
                      "scan_started_at": value.get("scan_started_at", ""),
                      "scan_status": value.get("scan_status", "UNKNOWN"),
                      "feed": value.get("feed", ""), "wallet_events": value.get("wallet_events", 0),
-                     "strategy_diagnostics": value.get("strategy_diagnostics", {})}
+                     "strategy_diagnostics": value.get("strategy_diagnostics", {}),
+                     "microcap_watchlist_summary": value.get("microcap_watchlist_summary", {})}
         body = json.dumps(value).encode()
         self.send_response(200 if self.path == "/health" or value.get("ok", True) else 503)
         self.send_header("Content-Type", "application/json")
@@ -939,16 +1023,28 @@ def main() -> None:
                                     "PAPER_QUALIFIED" if pumpfun["paper_qualified"] else "REJECTED")
                 results.append(pumpfun)
                 microcap = score_microcap_launch_candidate(candidate, ledger, microcap_policy)
+                if microcap["watch_eligible"] or ledger.is_watched(microcap["strategy"], microcap["mint"]):
+                    ledger.upsert_watch_candidate(
+                        candidate, microcap["strategy"],
+                        "QUALIFIED" if microcap["paper_qualified"] else "WATCHING")
                 ledger.store_signal({**candidate, "strategy": microcap["strategy"]}, microcap["score"],
                                     "PAPER_QUALIFIED" if microcap["paper_qualified"] else "REJECTED")
                 results.append(microcap)
             results.sort(key=lambda item: (item.get("paper_qualified", False),
                                            item.get("ev_rank", item["score"])), reverse=True)
             diagnostics = strategy_diagnostics(results)
+            watchlist = ledger.watchlist_snapshot("SOLANA_MICROCAP_LAUNCH_MOMENTUM")
             with LOCK:
                 STATE.update(ok=True, scanned_at=utcnow(), scan_status="COMPLETE",
                              candidates=results[:100], error="", feed=feed,
                              strategy_diagnostics=diagnostics,
+                             microcap_watchlist=watchlist,
+                             microcap_watchlist_summary={
+                                 "tracked": len(watchlist),
+                                 "execution_volume_floor_usd": microcap_policy.minimum_volume_24h_usd,
+                                 "watch_volume_floor_usd": microcap_policy.watch_minimum_volume_24h_usd,
+                                 "checkpoints_minutes": [5, 15, 30, 60],
+                             },
                              watched_wallets=[value.strip() for value in
                                  os.getenv("SOLANA_WATCH_WALLETS", "").split(",") if value.strip()],
                              wallet_evidence=ledger.wallet_evidence(),
