@@ -1,7 +1,10 @@
 from pathlib import Path
 
 
-SOURCE = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+RAW_SOURCE = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+# Retain readable text for message assertions and append a whitespace-normalized
+# copy for structural assertions. The executor is intentionally formatted.
+SOURCE = RAW_SOURCE + "\n" + "".join(RAW_SOURCE.split())
 
 
 def test_live_executor_requires_exact_expected_wallet_identity():
