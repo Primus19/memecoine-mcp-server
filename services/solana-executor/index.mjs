@@ -356,6 +356,13 @@ function probeIsQuarantined(p) {
     Date.now() - Date.parse(p.openedAt) >= cfg.probeMaxHoldMinutes * 60000
   );
 }
+function probeRetryDue(p) {
+  if (!probeIsQuarantined(p)) return true;
+  const ageMs = Date.now() - Date.parse(p.openedAt),
+    retryMs = ageMs < 60 * 60000 ? 5 * 60000 : 15 * 60000,
+    lastAttempt = Date.parse(p.lastSellAttemptAt || 0);
+  return !lastAttempt || Date.now() - lastAttempt >= retryMs;
+}
 function probeBlockers() {
   const b = [],
     active = state.probePositions.filter((p) => !probeIsQuarantined(p)),
@@ -1144,6 +1151,9 @@ async function runnerProbeBuy(c) {
 async function superviseRunnerProbes() {
   let changed = false;
   for (const p of [...state.probePositions]) {
+    // Keep background recovery active without hammering a dead route every
+    // minute: five-minute retries initially, then fifteen-minute retries.
+    if (!probeRetryDue(p)) continue;
     try {
       const o = await order(p.mint, USDC, Math.floor(p.quantity)),
         mark = num(o.outAmount || o.outputAmount) / 1e6,

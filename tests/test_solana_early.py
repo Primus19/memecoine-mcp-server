@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import io
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from app.solana_early import (EarlyPolicy, Ledger, MicrocapLaunchPolicy, PumpfunEvPolicy,
                               RunnerCapturePolicy, contract_safety_failures,
                               goplus_safety, json_request, public_onchain_candidates,
+                              solana_rpc_mint_safety,
                               safety_failures, score_candidate, score_microcap_launch_candidate,
                               score_pumpfun_ev_candidate, score_runner_capture_candidate,
                               strategy_diagnostics)
@@ -73,6 +75,32 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertIn("top-10 concentration unavailable", result["failures"])
         self.assertIsNone(result["top10_holder_fraction"])
         self.assertEqual("UNAVAILABLE", result["concentration_evidence_status"])
+
+    def test_onchain_verified_mint_is_eligible_only_for_contract_safety_lane(self):
+        value = candidate(
+            safety_evidence_status="ONCHAIN_VERIFIED",
+            top10_holder_fraction=None, creator_fraction=None, creator_selling=None,
+        )
+        self.assertEqual([], contract_safety_failures(value))
+        # Full strategy continues to require distribution/provider evidence.
+        self.assertFalse(score_candidate(value, self.ledger, self.policy)["qualified"])
+
+    def test_solana_rpc_fallback_parses_classic_immutable_mint(self):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "result": {"value": {
+                "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                "data": {"parsed": {"type": "mint", "info": {
+                    "mintAuthority": None, "freezeAuthority": None,
+                }}},
+            }}
+        }).encode()
+        with patch("app.solana_early.urllib.request.urlopen", return_value=response):
+            result = solana_rpc_mint_safety("mint1")
+        self.assertEqual("ONCHAIN_VERIFIED", result["safety_evidence_status"])
+        self.assertFalse(result["mint_authority_active"])
+        self.assertFalse(result["freeze_authority_active"])
+        self.assertFalse(result["transfer_hook_active"])
 
     def test_sell_simulation_is_mandatory(self):
         result = score_candidate(candidate(sell_simulation_ok=False), self.ledger, self.policy)
@@ -196,7 +224,8 @@ class SolanaEarlyTests(unittest.TestCase):
 
     def test_discovery_scan_is_bounded_by_default(self):
         source = (Path(__file__).parents[1] / "app/solana_early.py").read_text()
-        self.assertIn('SOLANA_EARLY_MAX_CANDIDATES", "20"', source)
+        self.assertIn('SOLANA_EARLY_MAX_CANDIDATES", "40"', source)
+        self.assertIn('SOLANA_MICROCAP_WATCH_REFRESH_LIMIT", "20"', source)
         self.assertIn('scan_status="IN_PROGRESS"', source)
         self.assertIn('timeout=5.0', source)
 
@@ -388,6 +417,8 @@ class SolanaEarlyTests(unittest.TestCase):
 
     def test_microcap_executor_retains_fast_exit_and_named_reporting(self):
         source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+        self.assertIn("function probeRetryDue", source)
+        self.assertIn("15 * 60000", source)
         compact = "".join(source.split())
         for expected in ("MICROCAP_DOWNTREND", "MICROCAP_PROFIT_PROTECTION",
                          "MAX_HOLD_20M", 'isMicrocap?0.08', 'isMicrocap?0.2',
