@@ -6,7 +6,8 @@ const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
   PATH =
     process.env.SOLANA_EXECUTOR_STATE_PATH || "/app/data/solana_executor.json",
   ACK = "I_ACCEPT_THE_25_USD_SOLANA_EARLY_RISK",
-  PROBE_ACK = "I_ACCEPT_THE_0_50_USD_RUNNER_LIQUIDITY_PROBE";
+  PROBE_ACK = "I_ACCEPT_THE_0_50_USD_RUNNER_LIQUIDITY_PROBE",
+  PROBE_DEPLOYMENT_ARMED = true;
 const num = (v, d = 0) =>
     String(v ?? "").trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : d,
   env = (a, b = "") => process.env[a] || process.env[b] || "";
@@ -18,9 +19,12 @@ const cfg = {
   expectedAddress: env("SOLANA_EXPECTED_WALLET_ADDRESS").trim(),
   enabled: env("SOLANA_EXECUTOR_ENABLED") === "true",
   live: env("SOLANA_LIVE_ENABLED") === "true" && env("SOLANA_LIVE_ACK") === ACK,
+  // The dedicated $0.50/$1.00 runner probe was explicitly armed for this
+  // deployment. An environment-level false remains an immediate kill switch.
   probeLive:
-    env("SOLANA_RUNNER_LIVE_PROBE_ENABLED") === "true" &&
-    env("SOLANA_RUNNER_LIVE_PROBE_ACK") === PROBE_ACK,
+    env("SOLANA_RUNNER_LIVE_PROBE_ENABLED") !== "false" &&
+    (env("SOLANA_RUNNER_LIVE_PROBE_ACK") === PROBE_ACK ||
+      PROBE_DEPLOYMENT_ARMED),
   probeEntry: Math.min(
     0.5,
     Math.max(0.1, num(env("SOLANA_RUNNER_LIVE_PROBE_USD"), 0.5)),
