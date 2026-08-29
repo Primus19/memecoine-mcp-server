@@ -94,8 +94,12 @@ def forex_snapshot(adapter: OandaAdapter, symbol: str) -> dict:
     five_streak_candles = [{"time": str(c.get("time") or ""),
                             "open": float(c["mid"]["o"]), "high": float(c["mid"]["h"]),
                             "low": float(c["mid"]["l"]), "close": float(c["mid"]["c"])} for c in m5[-12:]]
+    bryne_h1_candles = [{"time": str(c.get("time") or ""),
+                         "open": float(c["mid"]["o"]), "high": float(c["mid"]["h"]),
+                         "low": float(c["mid"]["l"]), "close": float(c["mid"]["c"])} for c in h1[-80:]]
     return {"asset_class": "FOREX", "symbol": symbol, "price": mid, "bid": bid, "ask": ask,
             "five_streak_candles": five_streak_candles,
+            "bryne_h1_candles": bryne_h1_candles,
             "spread_bps": spread_bps, "median_spread_bps": median_spread,
             "bid_liquidity": bid_liquidity, "ask_liquidity": ask_liquidity,
             "quote_age_seconds": quote_age, "tradable": quote.get("status") == "tradeable",
