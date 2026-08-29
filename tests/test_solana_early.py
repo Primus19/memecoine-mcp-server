@@ -345,6 +345,31 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertIn("runner has already retraced more than 10% from its observed high",
                       result["paper_failures"])
 
+    def test_runner_live_probe_can_measure_missing_sell_route_without_weakening_other_gates(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool-probe", price_usd=.001, volume_24h_usd=25000,
+                          observed_at="2026-08-29T12:00:00+00:00")
+        current = candidate(
+            pool="pool-probe", price_usd=.0014, volume_24h_usd=150000,
+            token_age_minutes=18, price_change_5m_pct=60, price_change_15m_pct=75,
+            transaction_buy_pressure=.65, sell_simulation_ok=False,
+            sell_price_impact_bps=9999,
+            observed_at="2026-08-29T12:06:00+00:00",
+        )
+        self.ledger.upsert_watch_candidate(first, strategy)
+        self.ledger.upsert_watch_candidate(current, strategy)
+        result = score_runner_capture_candidate(current, self.ledger, RunnerCapturePolicy())
+        self.assertTrue(result["live_probe_qualified"])
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("sell simulation failed", result["paper_failures"])
+        self.assertNotIn("sell simulation failed", result["live_probe_failures"])
+        self.assertEqual("LIVE_LIQUIDITY_PROBE_ELIGIBLE", result["mode"])
+
+        unsafe = score_runner_capture_candidate(
+            dict(current, mint_authority_active=True), self.ledger, RunnerCapturePolicy())
+        self.assertFalse(unsafe["live_probe_qualified"])
+        self.assertIn("mint_authority_active", unsafe["live_probe_failures"])
+
     def test_microcap_launch_keeps_sellability_and_safety_mandatory(self):
         result = score_microcap_launch_candidate(
             candidate(sell_simulation_ok=False, safety_evidence_status="UNAVAILABLE"),
@@ -369,13 +394,20 @@ class SolanaEarlyTests(unittest.TestCase):
                          'strategyName(f.strategy)', "microcapLaunchV2Performance"):
             self.assertTrue(expected in source or "".join(expected.split()) in compact)
 
-    def test_runner_capture_executor_is_paper_only_and_has_tiered_exits(self):
+    def test_runner_capture_has_isolated_capped_live_probe_and_tiered_paper_exits(self):
         source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
         compact = "".join(source.split())
         for expected in ("RUNNER_CAPTURE_V1", "RUNNER_TIERED_PROFIT", "RUNNER_DOWNTREND",
                          "MAX_HOLD_30M", "Runner Capture Experiment",
                          "runnerCaptureV1Performance", "CYAN • Runner Capture V1",
-                         "target=isRunner?5.0", "stop=isRunner?0.1"):
+                         "target=isRunner?5.0", "stop=isRunner?0.1",
+                         "SOLANA_RUNNER_LIVE_PROBE_ENABLED",
+                         "I_ACCEPT_THE_0_50_USD_RUNNER_LIQUIDITY_PROBE",
+                         "probeEntry:Math.min(0.5", "probeDailyCap:Math.min(1",
+                         "IMMEDIATE_EXITABILITY_TEST", "PROBE_PARTIAL_SELL",
+                         "PROBE_FINAL_SELL", "runnerProbeBuy(candidate)",
+                         'x.live_probe_qualified===true',
+                         "REAL-MONEY RUNNER LIQUIDITY PROBE"):
             self.assertTrue(expected in source or "".join(expected.split()) in compact)
 
     def test_microcap_action_reports_are_named_colored_and_retried(self):
