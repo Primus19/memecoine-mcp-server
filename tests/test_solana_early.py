@@ -374,7 +374,7 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertIn("runner has already retraced more than 10% from its observed high",
                       result["paper_failures"])
 
-    def test_runner_live_probe_can_measure_missing_sell_route_without_weakening_other_gates(self):
+    def test_runner_live_probe_requires_sell_route_and_acceptable_impact(self):
         strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
         first = candidate(pool="pool-probe", price_usd=.001, volume_24h_usd=25000,
                           observed_at="2026-08-29T12:00:00+00:00")
@@ -388,11 +388,13 @@ class SolanaEarlyTests(unittest.TestCase):
         self.ledger.upsert_watch_candidate(first, strategy)
         self.ledger.upsert_watch_candidate(current, strategy)
         result = score_runner_capture_candidate(current, self.ledger, RunnerCapturePolicy())
-        self.assertTrue(result["live_probe_qualified"])
+        self.assertFalse(result["live_probe_qualified"])
         self.assertFalse(result["paper_qualified"])
         self.assertIn("sell simulation failed", result["paper_failures"])
-        self.assertNotIn("sell simulation failed", result["live_probe_failures"])
-        self.assertEqual("LIVE_LIQUIDITY_PROBE_ELIGIBLE", result["mode"])
+        self.assertIn("sell simulation failed", result["live_probe_failures"])
+        self.assertIn("runner executable sell impact above maximum",
+                      result["live_probe_failures"])
+        self.assertEqual("PAPER_ONLY", result["mode"])
 
         unsafe = score_runner_capture_candidate(
             dict(current, mint_authority_active=True), self.ledger, RunnerCapturePolicy())
@@ -438,7 +440,11 @@ class SolanaEarlyTests(unittest.TestCase):
                          "IMMEDIATE_EXITABILITY_TEST", "PROBE_PARTIAL_SELL",
                          "PROBE_FINAL_SELL", "runnerProbeBuy(candidate)",
                          'x.live_probe_qualified===true',
-                         "REAL-MONEY RUNNER LIQUIDITY PROBE"):
+                         "REAL-MONEY RUNNER LIQUIDITY PROBE",
+                         "ROUND_TRIP_PREFLIGHT_RECOVERY_BELOW_MINIMUM",
+                         "REALIZED_LOSS_PLUS_NEXT_ENTRY_RESERVATION",
+                         "runnerLiveProbePerformance",
+                         "containsRealMoneyProbe:true"):
             self.assertTrue(expected in source or "".join(expected.split()) in compact)
 
     def test_microcap_action_reports_are_named_colored_and_retried(self):
