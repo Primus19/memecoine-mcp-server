@@ -21,6 +21,8 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 LOCK = threading.RLock()
 GOPLUS_LOCK = threading.RLock()
 GOPLUS_LAST_REQUEST = 0.0
+TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 STATE: dict[str, Any] = {"ok": False, "scanned_at": "", "scan_started_at": "",
                          "scan_status": "NOT_STARTED", "candidates": [], "error": "not scanned",
                          "feed": "", "wallet_events": 0, "strategy_diagnostics": {}}
@@ -246,10 +248,19 @@ class Ledger:
                       limit: int = 100) -> list[str]:
         cutoff = datetime.fromtimestamp(time.time() - maximum_age_minutes * 60, UTC).isoformat()
         with self.lock:
-            rows = self.db.execute("""SELECT pool FROM candidate_watchlist
+            # Refresh both newly observed pools and the strongest developing
+            # runners. Ordering only by last_seen_at starved a fast runner once
+            # enough newer pools entered the watchlist.
+            recent = self.db.execute("""SELECT pool FROM candidate_watchlist
                 WHERE strategy=? AND first_seen_at>=? ORDER BY last_seen_at DESC LIMIT ?""",
+                (strategy, cutoff, max(1, limit // 2))).fetchall()
+            strongest = self.db.execute("""SELECT pool FROM candidate_watchlist
+                WHERE strategy=? AND first_seen_at>=?
+                ORDER BY (latest_price / MAX(initial_price, 1e-30)) DESC,
+                         last_seen_at DESC LIMIT ?""",
                 (strategy, cutoff, limit)).fetchall()
-        return [str(row[0]) for row in rows if row[0]]
+        return list(dict.fromkeys(str(row[0]) for row in [*recent, *strongest]
+                                  if row[0]))[:limit]
 
     def is_watched(self, strategy: str, mint: str) -> bool:
         with self.lock:
@@ -403,7 +414,7 @@ def safety_failures(candidate: dict[str, Any], policy: EarlyPolicy) -> list[str]
 def contract_safety_failures(candidate: dict[str, Any]) -> list[str]:
     """Non-negotiable controls shared by paper exploration and live selection."""
     failures: list[str] = []
-    if candidate.get("safety_evidence_status") != "VERIFIED":
+    if candidate.get("safety_evidence_status") not in {"VERIFIED", "ONCHAIN_VERIFIED"}:
         failures.append("verified safety evidence missing")
     for field in ("mint_authority_active", "freeze_authority_active", "transfer_hook_active",
                   "non_transferable", "creator_selling"):
@@ -941,6 +952,54 @@ def goplus_safety(mint: str) -> dict[str, Any]:
     }
 
 
+def solana_rpc_mint_safety(mint: str) -> dict[str, Any]:
+    """Verify immutable mint controls without trusting a market-data provider.
+
+    This fallback intentionally verifies only facts available from the mint
+    account. Holder distribution and creator behaviour remain unavailable, so
+    normal strategies still fail closed. The separately capped $0.50 liquidity
+    probe may use these immutable on-chain facts when GoPlus is unavailable.
+    """
+    url = (os.getenv("SOLANA_SAFETY_RPC_URL") or os.getenv("SOLANA_RPC_URL") or
+           "https://api.mainnet-beta.solana.com").strip()
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+        "params": [mint, {"encoding": "jsonParsed", "commitment": "confirmed"}],
+    }).encode()
+    request = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Accept": "application/json", "Content-Type": "application/json",
+                 "User-Agent": "primus-solana-early/1.2"})
+    with urllib.request.urlopen(request, timeout=6.0) as response:
+        payload = json.loads(response.read().decode())
+    value = (payload.get("result") or {}).get("value")
+    if not isinstance(value, dict):
+        raise RuntimeError("Solana RPC returned no mint account")
+    owner = str(value.get("owner") or "")
+    parsed = ((value.get("data") or {}).get("parsed") or {})
+    info = parsed.get("info") or {}
+    if parsed.get("type") != "mint" or owner not in {TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID}:
+        raise RuntimeError("Solana RPC account is not a supported token mint")
+    extensions = info.get("extensions") or parsed.get("extensions") or []
+    extension_types = {
+        str(item.get("extension") or item.get("extensionType") or item.get("type") or "").lower()
+        for item in extensions if isinstance(item, dict)
+    }
+    if owner == TOKEN_2022_PROGRAM_ID and not isinstance(extensions, list):
+        raise RuntimeError("Token-2022 extensions were not parsed")
+    return {
+        "mint_authority_active": info.get("mintAuthority") is not None,
+        "freeze_authority_active": info.get("freezeAuthority") is not None,
+        "transfer_hook_active": any("transferhook" in value for value in extension_types),
+        "non_transferable": any("nontransferable" in value for value in extension_types),
+        "top10_holder_fraction": None,
+        "creator_fraction": None,
+        "creator_selling": None,
+        "safety_evidence_status": "ONCHAIN_VERIFIED",
+        "safety_evidence_source": "SOLANA_RPC_MINT_ACCOUNT",
+    }
+
+
 def jupiter_sell_check(mint: str, decimals: int, price_usd: float) -> tuple[bool, float]:
     key = os.environ["JUPITER_API_KEY"]
     if not price_usd or decimals < 0:
@@ -986,7 +1045,9 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
     # A promising pool can disappear from the newest-pools pages before it
     # reaches executable evidence. Refresh retained pools directly for an hour.
     strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
-    refresh_limit = max(5, min(25, int(os.getenv("SOLANA_MICROCAP_WATCH_REFRESH_LIMIT", "10"))))
+    # Twenty direct pool refreshes plus three discovery pages remain inside the
+    # public 30-request/minute GeckoTerminal allowance.
+    refresh_limit = max(10, min(20, int(os.getenv("SOLANA_MICROCAP_WATCH_REFRESH_LIMIT", "20"))))
     for pool in ledger.watched_pools(strategy, limit=refresh_limit):
         if pool in seen_pools:
             continue
@@ -1026,16 +1087,23 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
         try:
             safety = goplus_safety(mint)
         except Exception as exc:
-            # Missing safety evidence must reject only this token, not stop the
-            # complete discovery cycle.
-            safety = {
-                "mint_authority_active": None, "freeze_authority_active": None,
-                "transfer_hook_active": None, "non_transferable": None,
-                "top10_holder_fraction": None, "creator_fraction": None,
-                "creator_selling": None,
-                "safety_evidence_status": "UNAVAILABLE",
-                "safety_evidence_error": str(exc)[:180],
-            }
+            try:
+                safety = {
+                    **solana_rpc_mint_safety(mint),
+                    "safety_evidence_error": f"GoPlus unavailable; RPC fallback used: {exc}"[:180],
+                }
+            except Exception as rpc_exc:
+                # Missing safety evidence must reject only this token, not stop
+                # the complete discovery cycle.
+                safety = {
+                    "mint_authority_active": None, "freeze_authority_active": None,
+                    "transfer_hook_active": None, "non_transferable": None,
+                    "top10_holder_fraction": None, "creator_fraction": None,
+                    "creator_selling": None,
+                    "safety_evidence_status": "UNAVAILABLE",
+                    "safety_evidence_error":
+                        f"GoPlus: {exc}; Solana RPC: {rpc_exc}"[:180],
+                }
         try:
             sell_ok, sell_impact = jupiter_sell_check(
                 mint, int(base_token.get("decimals") or 0),
@@ -1070,7 +1138,7 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
             "quote_symbol": str(quote_token.get("symbol") or ""), "source": "geckoterminal_public",
         }
 
-    maximum = max(10, min(100, int(os.getenv("SOLANA_EARLY_MAX_CANDIDATES", "20"))))
+    maximum = max(20, min(60, int(os.getenv("SOLANA_EARLY_MAX_CANDIDATES", "40"))))
     workers = max(1, min(12, int(os.getenv("SOLANA_EARLY_ENRICH_WORKERS", "6"))))
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -1221,7 +1289,10 @@ def main() -> None:
             watchlist = ledger.watchlist_snapshot("SOLANA_MICROCAP_LAUNCH_MOMENTUM")
             with LOCK:
                 STATE.update(ok=True, scanned_at=utcnow(), scan_status="COMPLETE",
-                             candidates=results[:100], error="", feed=feed,
+                             # Four strategy evaluations are emitted per pool.
+                             # Keep all bounded results so a valid Runner Probe
+                             # candidate cannot be truncated by other cohorts.
+                             candidates=results[:240], error="", feed=feed,
                              strategy_diagnostics=diagnostics,
                              microcap_watchlist=watchlist,
                              microcap_watchlist_summary={
