@@ -330,6 +330,22 @@ function probeDailySpendUsd() {
     .filter((f) => f.action === "PROBE_BUY" && String(f.at).startsWith(day))
     .reduce((total, f) => total + num(f.inputUsd), 0);
 }
+function probeDailyRiskUsd() {
+  const day = new Date().toISOString().slice(0, 10),
+    realizedLosses = state.probeFills
+      .filter(
+        (f) =>
+          f.action === "PROBE_FINAL_SELL" &&
+          String(f.at).startsWith(day) &&
+          f.realizedPnlUsd != null,
+      )
+      .reduce((total, f) => total + Math.max(0, -num(f.realizedPnlUsd)), 0),
+    openCapitalAtRisk = state.probePositions.reduce(
+      (total, p) => total + Math.max(0, num(p.entryUsd) - num(p.proceedsUsd)),
+      0,
+    );
+  return realizedLosses + openCapitalAtRisk;
+}
 function probeBlockers() {
   const b = [];
   if (!cfg.enabled) b.push("executor disabled");
@@ -347,8 +363,8 @@ function probeBlockers() {
     b.push("SOL balance below fee minimum");
   if (state.probePositions.length)
     b.push("one runner live probe is already open");
-  if (probeDailySpendUsd() + cfg.probeEntry > cfg.probeDailyCap)
-    b.push("runner live-probe daily cap reached");
+  if (probeDailyRiskUsd() + cfg.probeEntry > cfg.probeDailyCap)
+    b.push("runner live-probe daily loss/exposure cap reached");
   return b;
 }
 function emailBlockers() {
@@ -382,6 +398,8 @@ function publicState() {
       blockers: probeBlockers(),
       entryUsd: cfg.probeEntry,
       dailyCapUsd: cfg.probeDailyCap,
+      dailyCapType: "NET_REALIZED_LOSS_PLUS_OPEN_UNRECOVERED_CAPITAL",
+      dailyRiskUsedUsd: probeDailyRiskUsd(),
       spentTodayUsd: probeDailySpendUsd(),
       partialExitFraction: cfg.probePartialFraction,
       maxHoldMinutes: cfg.probeMaxHoldMinutes,
@@ -1352,7 +1370,7 @@ function reportV3() {
         `<tr style="background:#fee2e2;color:#7f1d1d"><td>${esc(f.at)}</td><td><b>LIVE RUNNER PROBE</b></td><td>${esc(f.action)}</td><td>${esc(f.symbol || f.mint?.slice(0, 6))}</td><td>${esc(f.reason || "REAL_MONEY_ENTRY")}</td><td>${f.inputUsd == null ? "-" : `${num(f.inputUsd).toFixed(4)}`}</td><td>${f.outputUsd == null ? "-" : `${num(f.outputUsd).toFixed(4)}`}</td><td>${f.realizedPnlUsd == null ? "-" : `${num(f.realizedPnlUsd).toFixed(4)}`}</td><td>${esc(f.id)}</td><td>${esc(f.error || "")}</td></tr>`,
     )
     .join("");
-  const probeSummary = `<div style="margin:16px 0;padding:16px;border:3px solid #dc2626;background:#fef2f2;border-radius:10px"><h3 style="margin-top:0">REAL-MONEY RUNNER LIQUIDITY PROBE</h3><p><b>Amount per probe:</b> ${cfg.probeEntry.toFixed(2)}; <b>daily cap:</b> ${cfg.probeDailyCap.toFixed(2)}; <b>open:</b> ${state.probePositions.length}; <b>spent today:</b> ${probeDailySpendUsd().toFixed(2)}</p><p><b>Status:</b> ${esc(probeBlockers().join("; ") || "ARMED AND READY")}</p><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr><th>UTC</th><th>Strategy</th><th>Action</th><th>Token</th><th>Reason</th><th>Input</th><th>Recovered</th><th>P&amp;L</th><th>Transaction signature</th><th>Error</th></tr>${probeRows || '<tr><td colspan="10">No real probe action yet</td></tr>'}</table></div>`;
+  const probeSummary = `<div style="margin:16px 0;padding:16px;border:3px solid #dc2626;background:#fef2f2;border-radius:10px"><h3 style="margin-top:0">REAL-MONEY RUNNER LIQUIDITY PROBE</h3><p><b>Amount per probe:</b> ${cfg.probeEntry.toFixed(2)}; <b>daily loss/exposure cap:</b> ${cfg.probeDailyCap.toFixed(2)}; <b>risk used:</b> ${probeDailyRiskUsd().toFixed(4)}; <b>gross entries today:</b> ${probeDailySpendUsd().toFixed(2)}; <b>open:</b> ${state.probePositions.length}</p><p>Recovered principal and profits are recycled; only realized losses and unrecovered capital in open probes consume the daily cap.</p><p><b>Status:</b> ${esc(probeBlockers().join("; ") || "ARMED AND READY")}</p><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr><th>UTC</th><th>Strategy</th><th>Action</th><th>Token</th><th>Reason</th><th>Input</th><th>Recovered</th><th>P&amp;L</th><th>Transaction signature</th><th>Error</th></tr>${probeRows || '<tr><td colspan="10">No real probe action yet</td></tr>'}</table></div>`;
   return reportV2().replace(
     "<h3>Recent actions</h3>",
     summary + probeSummary + "<h3>Recent actions</h3>",
