@@ -759,7 +759,10 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
     # requirement remains mandatory.
     live_probe_failures = [
         reason for reason in failures
-        if reason != "runner executable sell impact above maximum"
+        if reason not in {
+            "sell simulation failed",
+            "runner executable sell impact above maximum",
+        }
     ]
     score = round(clamp(momentum_5m, 0, 100) * .35 +
                   clamp(return_since_seen * 100, 0, 100) * .30 +
