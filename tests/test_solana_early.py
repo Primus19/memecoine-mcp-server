@@ -6,9 +6,9 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from app.solana_early import (EarlyPolicy, Ledger, PumpfunEvPolicy, contract_safety_failures,
+from app.solana_early import (EarlyPolicy, Ledger, MicrocapLaunchPolicy, PumpfunEvPolicy, contract_safety_failures,
                               goplus_safety, json_request, public_onchain_candidates,
-                              safety_failures, score_candidate, score_pumpfun_ev_candidate,
+                              safety_failures, score_candidate, score_microcap_launch_candidate, score_pumpfun_ev_candidate,
                               strategy_diagnostics)
 
 
@@ -23,7 +23,7 @@ def candidate(**changes):
         "non_transferable": False, "creator_selling": False, "sell_simulation_ok": True,
         "top10_holder_fraction": .20, "creator_fraction": .02,
         "social_velocity_ratio": 3, "creator_history_score": 3, "buyer_wallets": [],
-        "market_cap_usd": 5000, "trades_5m": 120,
+        "market_cap_usd": 5000, "trades_5m": 120, "volume_24h_usd": 25000,
         "safety_evidence_status": "VERIFIED", "price_change_5m_pct": 10,
         "price_change_15m_pct": 15,
     }
@@ -246,6 +246,50 @@ class SolanaEarlyTests(unittest.TestCase):
         result = score_pumpfun_ev_candidate(candidate(), self.ledger, self.policy, PumpfunEvPolicy())
         self.assertIn("Divine V3 confirmed entry", result["entry_reason"])
         self.assertIn("cost-stressed expectancy", result["entry_reason"])
+
+    def test_microcap_launch_qualifies_serious_run_as_paper_only(self):
+        result = score_microcap_launch_candidate(candidate(), self.ledger, MicrocapLaunchPolicy())
+        self.assertTrue(result["paper_qualified"])
+        self.assertFalse(result["qualified"])
+        self.assertFalse(result["live_eligible"])
+        self.assertEqual("MICROCAP_LAUNCH_V1", result["strategy_version"])
+        self.assertIn("$25,000 24h volume", result["entry_reason"])
+
+    def test_microcap_launch_accepts_volume_upward_without_small_ceiling(self):
+        result = score_microcap_launch_candidate(candidate(volume_24h_usd=250000), self.ledger,
+                                                 MicrocapLaunchPolicy())
+        self.assertTrue(result["paper_qualified"])
+
+    def test_microcap_launch_rejects_weak_run_and_low_volume(self):
+        result = score_microcap_launch_candidate(
+            candidate(volume_24h_usd=19999, price_change_5m_pct=2,
+                      transaction_buy_pressure=.10), self.ledger, MicrocapLaunchPolicy())
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("microcap 24h volume below $20k minimum", result["paper_failures"])
+        self.assertIn("microcap five-minute momentum outside serious-run range", result["paper_failures"])
+        self.assertIn("microcap net buy pressure below minimum", result["paper_failures"])
+
+    def test_microcap_launch_keeps_sellability_and_safety_mandatory(self):
+        result = score_microcap_launch_candidate(
+            candidate(sell_simulation_ok=False, safety_evidence_status="UNAVAILABLE"),
+            self.ledger, MicrocapLaunchPolicy())
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("sell simulation failed", result["paper_failures"])
+        self.assertIn("verified safety evidence missing", result["paper_failures"])
+
+    def test_microcap_launch_cannot_enter_live_executor_path(self):
+        result = score_microcap_launch_candidate(candidate(), self.ledger, MicrocapLaunchPolicy())
+        self.assertFalse(result["qualified"])
+        source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+        self.assertIn('candidates.filter(x=>x.qualified===true)', source)
+        self.assertIn('candidates.filter(x=>x.paper_qualified===true)', source)
+
+    def test_microcap_executor_retains_fast_exit_and_named_reporting(self):
+        source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+        for expected in ("MICROCAP_DOWNTREND", "MICROCAP_PROFIT_PROTECTION",
+                         "MAX_HOLD_20M", 'stop=isMicrocap?.08', 'target=isMicrocap?.20',
+                         'strategyName(f.strategy)', "microcapLaunchV1Performance"):
+            self.assertIn(expected, source)
 
     def test_strategy_diagnostics_counts_rejection_reasons(self):
         rows = [
