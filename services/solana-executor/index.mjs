@@ -244,6 +244,10 @@ function strategyPerformance() {
       ...strategyStats("SOLANA_MICROCAP_LAUNCH_MOMENTUM"),
       displayName: "Microcap Launch Momentum",
     },
+    runnerCapture: {
+      ...strategyStats("SOLANA_MICROCAP_RUNNER_CAPTURE"),
+      displayName: "Runner Capture Experiment",
+    },
   };
 }
 function liveShadowStats() {
@@ -455,7 +459,9 @@ async function paperBuy(c) {
         ? "DIVINE_V3"
         : strategy === "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
           ? "MICROCAP_LAUNCH_V2"
-          : "CONTROL_V2"),
+          : strategy === "SOLANA_MICROCAP_RUNNER_CAPTURE"
+            ? "RUNNER_CAPTURE_V1"
+            : "CONTROL_V2"),
     entryReason =
       c.entry_reason ||
       `Confirmed paper entry passed ${strategy} qualification gates with score ${num(c.score).toFixed(2)}.`,
@@ -471,10 +477,15 @@ async function paperBuy(c) {
       buyerAcceleration: c.buyer_acceleration,
       volumeAcceleration: c.volume_acceleration,
       priceChange5mPct: c.price_change_5m_pct,
+      priceChange15mPct: c.price_change_15m_pct,
+      returnSinceSeen: c.return_since_seen,
+      retracementFromHigh: c.retracement_from_high,
+      firstSeenAt: c.first_seen_at,
       sellPriceImpactBps: c.sell_price_impact_bps,
       top10HolderFraction: c.top10_holder_fraction,
       creatorFraction: c.creator_fraction,
       safetyEvidenceStatus: c.safety_evidence_status,
+      distributionEvidenceStatus: c.distribution_evidence_status,
       walletEvidence: c.qualified_wallet_count || 0,
       flowDataProvenance: c.flow_data_provenance,
     };
@@ -593,16 +604,19 @@ async function supervisePaper() {
         isMicrocap = String(p.strategyVersion || "").startsWith(
           "MICROCAP_LAUNCH_",
         ),
+        isRunner = p.strategyVersion === "RUNNER_CAPTURE_V1",
         ageMs = Date.now() - Date.parse(p.openedAt),
-        maxHoldMs = isMicrocap
-          ? 20 * 60000
-          : isDivineV3
-            ? 90 * 60000
-            : isPump
-              ? 3600e3
-              : isControlV2
-                ? 120 * 60000
-                : cfg.paperMaxHoldMinutes * 60000,
+        maxHoldMs = isRunner
+          ? 30 * 60000
+          : isMicrocap
+            ? 20 * 60000
+            : isDivineV3
+              ? 90 * 60000
+              : isPump
+                ? 3600e3
+                : isControlV2
+                  ? 120 * 60000
+                  : cfg.paperMaxHoldMinutes * 60000,
         o = await order(p.mint, USDC, Math.floor(p.quantity)),
         mark = num(o.outAmount || o.outputAmount) / 1e6;
       if (!mark) {
@@ -619,26 +633,30 @@ async function supervisePaper() {
       delete p.markError;
       p.highUsd = Math.max(num(p.highUsd, p.entryUsd), mark);
       const r = mark / p.entryUsd - 1,
-        stop = isMicrocap
-          ? 0.08
-          : isDivineV3
-            ? 0.2
-            : isPump
-              ? 0.5
-              : isControlV2
-                ? 0.15
-                : cfg.stop,
-        target = isMicrocap
-          ? 0.2
-          : isDivineV3
-            ? 0.12
-            : isDivineV2
-              ? 0.1
+        stop = isRunner
+          ? 0.1
+          : isMicrocap
+            ? 0.08
+            : isDivineV3
+              ? 0.2
               : isPump
-                ? Math.max(0.15, num(p.targetReturn, 0.4))
+                ? 0.5
                 : isControlV2
-                  ? 0.3
-                  : cfg.target,
+                  ? 0.15
+                  : cfg.stop,
+        target = isRunner
+          ? 5.0
+          : isMicrocap
+            ? 0.2
+            : isDivineV3
+              ? 0.12
+              : isDivineV2
+                ? 0.1
+                : isPump
+                  ? Math.max(0.15, num(p.targetReturn, 0.4))
+                  : isControlV2
+                    ? 0.3
+                    : cfg.target,
         failedMomentum =
           (isDivineV3 || isControlV2) &&
           ageMs >= 15 * 60000 &&
@@ -666,54 +684,89 @@ async function supervisePaper() {
           isMicrocap &&
           p.highUsd >= p.entryUsd * 1.06 &&
           mark <= Math.max(p.entryUsd * 1.01, p.highUsd * 0.96),
+        runnerPeakReturn = p.highUsd / p.entryUsd - 1,
+        runnerTrailPct =
+          runnerPeakReturn >= 1
+            ? 0.15
+            : runnerPeakReturn >= 0.5
+              ? 0.12
+              : runnerPeakReturn >= 0.2
+                ? 0.1
+                : 0.08,
+        runnerProfitFloor =
+          runnerPeakReturn >= 1
+            ? 0.6
+            : runnerPeakReturn >= 0.5
+              ? 0.25
+              : runnerPeakReturn >= 0.2
+                ? 0.08
+                : 0.02,
+        runnerTieredProfit =
+          isRunner &&
+          runnerPeakReturn >= 0.1 &&
+          mark <= p.highUsd * (1 - runnerTrailPct) &&
+          mark >= p.entryUsd * (1 + runnerProfitFloor),
+        runnerRollover =
+          isRunner &&
+          ageMs >= 2 * 60000 &&
+          num(p.downTicks) >= 2 &&
+          mark <= p.highUsd * 0.95,
         reason =
           r <= -stop
             ? "STOP_LOSS"
             : r >= target
               ? "TAKE_PROFIT"
-              : microcapProfitTrail
-                ? "MICROCAP_PROFIT_PROTECTION"
-                : microcapRollover
-                  ? "MICROCAP_DOWNTREND"
-                  : failedMomentum
-                    ? "FAILED_MOMENTUM_15M"
-                    : stalled
-                      ? "STALLED_30M"
-                      : divineTrail
-                        ? "TRAILING_PROFIT"
-                        : controlTrail
-                          ? "TRAILING_PROFIT"
-                          : !isPump &&
-                              !isControlV2 &&
-                              !isMicrocap &&
-                              mark <= p.highUsd * (1 - cfg.trail) &&
-                              p.highUsd > p.entryUsd
-                            ? "TRAILING_STOP"
-                            : ageMs >= maxHoldMs
-                              ? isMicrocap
-                                ? "MAX_HOLD_20M"
-                                : isDivineV3
-                                  ? "MAX_HOLD_90M"
-                                  : isPump
-                                    ? "MAX_HOLD_1H"
-                                    : isControlV2
-                                      ? "MAX_HOLD_120M"
-                                      : `MAX_HOLD_${cfg.paperMaxHoldMinutes}M`
-                              : "";
+              : runnerTieredProfit
+                ? "RUNNER_TIERED_PROFIT"
+                : runnerRollover
+                  ? "RUNNER_DOWNTREND"
+                  : microcapProfitTrail
+                    ? "MICROCAP_PROFIT_PROTECTION"
+                    : microcapRollover
+                      ? "MICROCAP_DOWNTREND"
+                      : failedMomentum
+                        ? "FAILED_MOMENTUM_15M"
+                        : stalled
+                          ? "STALLED_30M"
+                          : divineTrail
+                            ? "TRAILING_PROFIT"
+                            : controlTrail
+                              ? "TRAILING_PROFIT"
+                              : !isPump &&
+                                  !isControlV2 &&
+                                  !isMicrocap &&
+                                  !isRunner &&
+                                  mark <= p.highUsd * (1 - cfg.trail) &&
+                                  p.highUsd > p.entryUsd
+                                ? "TRAILING_STOP"
+                                : ageMs >= maxHoldMs
+                                  ? isRunner
+                                    ? "MAX_HOLD_30M"
+                                    : isMicrocap
+                                      ? "MAX_HOLD_20M"
+                                      : isDivineV3
+                                        ? "MAX_HOLD_90M"
+                                        : isPump
+                                          ? "MAX_HOLD_1H"
+                                          : isControlV2
+                                            ? "MAX_HOLD_120M"
+                                            : `MAX_HOLD_${cfg.paperMaxHoldMinutes}M`
+                                  : "";
       if (reason) changed = (await paperClose(p, reason, o)) || changed;
     } catch (e) {
       p.markError = e.message.slice(0, 180);
-      const maxHoldMs = String(p.strategyVersion || "").startsWith(
-        "MICROCAP_LAUNCH_",
-      )
-        ? 20 * 60000
-        : p.strategyVersion === "DIVINE_V3"
-          ? 90 * 60000
-          : p.strategy === "SOLANA_PUMPFUN_EV_EXPERIMENT"
-            ? 3600e3
-            : p.strategyVersion === "CONTROL_V2"
-              ? 120 * 60000
-              : cfg.paperMaxHoldMinutes * 60000;
+      const maxHoldMs =
+        p.strategyVersion === "RUNNER_CAPTURE_V1"
+          ? 30 * 60000
+          : String(p.strategyVersion || "").startsWith("MICROCAP_LAUNCH_")
+            ? 20 * 60000
+            : p.strategyVersion === "DIVINE_V3"
+              ? 90 * 60000
+              : p.strategy === "SOLANA_PUMPFUN_EV_EXPERIMENT"
+                ? 3600e3
+                : p.strategyVersion === "CONTROL_V2"
+                  ? 120 * 60000
+                  : cfg.paperMaxHoldMinutes * 60000;
       if (Date.now() - Date.parse(p.openedAt) >= maxHoldMs)
         changed = paperVoid(p, p.markError) || changed;
     }
@@ -937,15 +990,19 @@ const esc = (v) =>
 const strategyName = (s) =>
   s === "SOLANA_PUMPFUN_EV_EXPERIMENT"
     ? "Divine Strategy (Pump.fun EV)"
-    : s === "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
-      ? "Microcap Launch Momentum"
-      : "Solana Early Control";
+    : s === "SOLANA_MICROCAP_RUNNER_CAPTURE"
+      ? "Runner Capture Experiment"
+      : s === "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        ? "Microcap Launch Momentum"
+        : "Solana Early Control";
 const strategyStyle = (s) =>
   s.strategy === "SOLANA_PUMPFUN_EV_EXPERIMENT"
     ? "background:#f3e8ff;color:#581c87"
-    : s.strategy === "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
-      ? "background:#fff7ed;color:#9a3412"
-      : "background:#ecfdf5;color:#065f46";
+    : s.strategy === "SOLANA_MICROCAP_RUNNER_CAPTURE"
+      ? "background:#ecfeff;color:#155e75"
+      : s.strategy === "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        ? "background:#fff7ed;color:#9a3412"
+        : "background:#ecfdf5;color:#065f46";
 function report() {
   const shadow = liveShadowStats(),
     performance = strategyPerformance(),
@@ -981,7 +1038,12 @@ function actionExplanation(f) {
       "Two consecutive executable marks declined and price retraced at least 3% from the high, confirming rollover.",
     MICROCAP_PROFIT_PROTECTION:
       "The launch gained at least 6%, then retraced 4%; the paper exit protected at least 1% over entry.",
+    RUNNER_TIERED_PROFIT:
+      "The explosive runner retraced through its gain-dependent profit tier, so the paper experiment captured the remaining protected gain.",
+    RUNNER_DOWNTREND:
+      "Two consecutive executable values declined and the runner retraced at least 5% from its peak.",
     MAX_HOLD_20M: "The 20-minute launch-momentum observation window ended.",
+    MAX_HOLD_30M: "The 30-minute runner-capture observation window ended.",
     FAILED_MOMENTUM_15M:
       "After 15 minutes the position remained down at least 8% and had never gained 2%.",
     STALLED_30M:
@@ -1025,7 +1087,7 @@ function reportV2() {
         return `<tr style="${rowStyle}"><td>${esc(f.at)}</td><td><b>${esc(strategyName(f.strategy))}</b></td><td>${badge}${esc(f.action)}</td><td>${esc(f.symbol || f.mint.slice(0, 6))}</td><td>${esc(actionExplanation(f))}</td><td>${f.evRank == null ? "-" : num(f.evRank).toFixed(4)}</td><td>${f.realizedPnlUsd == null ? "-" : `$${num(f.realizedPnlUsd).toFixed(4)}`}</td><td>${f.costStressedPnlUsd == null ? "-" : `$${num(f.costStressedPnlUsd).toFixed(4)}`}</td></tr>`;
       })
       .join("");
-  return `<div style="font-family:Arial,sans-serif;color:#0f172a"><div style="background:#312e81;color:white;border-radius:14px;padding:20px"><span style="display:inline-block;background:#dc2626;color:white;padding:6px 11px;border-radius:999px;font-weight:900">NEW ACTION</span><h2 style="margin:10px 0 8px">Solana Strategy Action Report</h2><div style="font-size:20px;font-weight:bold">Divine Strategy + Solana Early Control + Microcap Launch V2</div></div>${newest ? `<div style="margin-top:12px;padding:16px;border:3px solid #f59e0b;background:#fef3c7;border-radius:8px"><b>REASON FOR ENTRY / ACTION</b><div style="margin-top:7px">${esc(actionExplanation(newest))}</div></div>` : ""}<p><span style="display:inline-block;background:#f3e8ff;color:#6b21a8;border:1px solid #c084fc;border-radius:999px;padding:7px 12px;font-weight:bold">PURPLE • Divine Strategy</span> <span style="display:inline-block;background:#ecfdf5;color:#065f46;border:1px solid #34d399;border-radius:999px;padding:7px 12px;font-weight:bold">GREEN • Solana Early Control</span> <span style="display:inline-block;background:#fff7ed;color:#9a3412;border:1px solid #fb923c;border-radius:999px;padding:7px 12px;font-weight:bold">ORANGE • Microcap Launch V2</span></p><p><b>PAPER ONLY - no funds were spent.</b></p><p><b>Divine V2 forward sample:</b> ${divineV2.closed} closed, ${divineV2.open} open, ${divineV2.winRatePct.toFixed(1)}% win rate, $${divineV2.costStressedPnlUsd.toFixed(4)} cost-stressed P&amp;L. Historical V1 results remain in the all-time row below.</p><p><b>Strict live-strategy shadow:</b> Closed ${shadow.closed}/${cfg.minPaper}; cost-stressed P&amp;L $${shadow.costStressedPnlUsd.toFixed(4)}; open ${state.liveShadowPositions.length}.</p><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>Strategy</th><th>Actions</th><th>Buys</th><th>Closed</th><th>Open</th><th>Win rate</th><th>Raw P&amp;L</th><th>Cost-stressed P&amp;L</th><th>Expectancy</th></tr>${cards}</table><h3>Recent actions</h3><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>UTC</th><th>Strategy</th><th>Action</th><th>Token</th><th>Reason for entry / action</th><th>EV rank</th><th>Raw P&amp;L</th><th>Stressed P&amp;L</th></tr>${rows || "<tr><td colspan=8>No paper fills yet</td></tr>"}</table></div>`;
+  return `<div style="font-family:Arial,sans-serif;color:#0f172a"><div style="background:#312e81;color:white;border-radius:14px;padding:20px"><span style="display:inline-block;background:#dc2626;color:white;padding:6px 11px;border-radius:999px;font-weight:900">NEW ACTION</span><h2 style="margin:10px 0 8px">Solana Strategy Action Report</h2><div style="font-size:20px;font-weight:bold">Divine Strategy + Solana Early Control + Microcap Launch V2 + Runner Capture V1</div></div>${newest ? `<div style="margin-top:12px;padding:16px;border:3px solid #f59e0b;background:#fef3c7;border-radius:8px"><b>REASON FOR ENTRY / ACTION</b><div style="margin-top:7px">${esc(actionExplanation(newest))}</div></div>` : ""}<p><span style="display:inline-block;background:#f3e8ff;color:#6b21a8;border:1px solid #c084fc;border-radius:999px;padding:7px 12px;font-weight:bold">PURPLE • Divine Strategy</span> <span style="display:inline-block;background:#ecfdf5;color:#065f46;border:1px solid #34d399;border-radius:999px;padding:7px 12px;font-weight:bold">GREEN • Solana Early Control</span> <span style="display:inline-block;background:#fff7ed;color:#9a3412;border:1px solid #fb923c;border-radius:999px;padding:7px 12px;font-weight:bold">ORANGE • Microcap Launch V2</span> <span style="display:inline-block;background:#ecfeff;color:#155e75;border:1px solid #22d3ee;border-radius:999px;padding:7px 12px;font-weight:bold">CYAN • Runner Capture V1</span></p><p><b>PAPER ONLY - no funds were spent.</b></p><p><b>Divine V2 forward sample:</b> ${divineV2.closed} closed, ${divineV2.open} open, ${divineV2.winRatePct.toFixed(1)}% win rate, $${divineV2.costStressedPnlUsd.toFixed(4)} cost-stressed P&amp;L. Historical V1 results remain in the all-time row below.</p><p><b>Strict live-strategy shadow:</b> Closed ${shadow.closed}/${cfg.minPaper}; cost-stressed P&amp;L $${shadow.costStressedPnlUsd.toFixed(4)}; open ${state.liveShadowPositions.length}.</p><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>Strategy</th><th>Actions</th><th>Buys</th><th>Closed</th><th>Open</th><th>Win rate</th><th>Raw P&amp;L</th><th>Cost-stressed P&amp;L</th><th>Expectancy</th></tr>${cards}</table><h3>Recent actions</h3><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>UTC</th><th>Strategy</th><th>Action</th><th>Token</th><th>Reason for entry / action</th><th>EV rank</th><th>Raw P&amp;L</th><th>Stressed P&amp;L</th></tr>${rows || "<tr><td colspan=8>No paper fills yet</td></tr>"}</table></div>`;
 }
 function reportV3() {
   const divine = strategyVersionStats(
@@ -1037,19 +1099,26 @@ function reportV3() {
       "SOLANA_MICROCAP_LAUNCH_MOMENTUM",
       "MICROCAP_LAUNCH_V2",
     ),
+    runner = strategyVersionStats(
+      "SOLANA_MICROCAP_RUNNER_CAPTURE",
+      "RUNNER_CAPTURE_V1",
+    ),
     positions =
       state.paperPositions
         .filter((p) =>
-          ["DIVINE_V3", "CONTROL_V2", "MICROCAP_LAUNCH_V2"].includes(
-            p.strategyVersion,
-          ),
+          [
+            "DIVINE_V3",
+            "CONTROL_V2",
+            "MICROCAP_LAUNCH_V2",
+            "RUNNER_CAPTURE_V1",
+          ].includes(p.strategyVersion),
         )
         .map(
           (p) =>
             `<li><b>${esc(p.strategyVersion)} ${esc(p.symbol)}</b> • mint ${esc(p.mint)} • $${num(p.entryUsd).toFixed(2)} paper amount • score ${num(p.score).toFixed(2)} • ${esc(p.entryReason)}</li>`,
         )
         .join("") || "<li>No current-version positions open.</li>",
-    summary = `<div style="margin:14px 0;padding:14px;border:2px solid #7c3aed;background:#faf5ff;border-radius:10px"><h3 style="margin-top:0">NEW evidence-confirmed strategy versions</h3><p><b>Divine V3:</b> ${divine.closed} closed, ${divine.open} open, ${divine.winRatePct.toFixed(1)}% wins, $${divine.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Control V2:</b> ${control.closed} closed, ${control.open} open, ${control.winRatePct.toFixed(1)}% wins, $${control.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Microcap Launch V2:</b> ${micro.closed} closed, ${micro.open} open, ${micro.winRatePct.toFixed(1)}% wins, $${micro.costStressedPnlUsd.toFixed(4)} stressed P&amp;L.</p><p><b>Microcap entry:</b> at least $100k rolling 24-hour volume, a pool no older than 30 minutes, serious five-minute momentum, persistent buyer/volume acceleration across two scans, verified safety/concentration, and an executable Jupiter sell route.</p><p><b>Microcap exit:</b> 8% hard stop, 20% target, two-tick downside confirmation with 3% peak retracement, 6% activation/4% profit-protection trail, or 20-minute maximum hold. Every amount and reason is retained.</p><ul>${positions}</ul></div>`;
+    summary = `<div style="margin:14px 0;padding:14px;border:2px solid #7c3aed;background:#faf5ff;border-radius:10px"><h3 style="margin-top:0">NEW evidence-confirmed strategy versions</h3><p><b>Divine V3:</b> ${divine.closed} closed, ${divine.open} open, ${divine.winRatePct.toFixed(1)}% wins, $${divine.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Control V2:</b> ${control.closed} closed, ${control.open} open, ${control.winRatePct.toFixed(1)}% wins, $${control.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Microcap Launch V2:</b> ${micro.closed} closed, ${micro.open} open, ${micro.winRatePct.toFixed(1)}% wins, $${micro.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Runner Capture V1:</b> ${runner.closed} closed, ${runner.open} open, ${runner.winRatePct.toFixed(1)}% wins, $${runner.costStressedPnlUsd.toFixed(4)} stressed P&amp;L.</p><p><b>Microcap entry:</b> at least $100k rolling 24-hour volume, a pool no older than 30 minutes, serious five-minute momentum, persistent buyer/volume acceleration across two scans, verified safety/concentration, and an executable Jupiter sell route.</p><p><b>Runner Capture entry:</b> paper only; at least $100k volume, 20% retained gain, 15% current five-minute momentum, positive fifteen-minute momentum, two-scan persistence, executable sell route, adequate liquidity and no more than 10% retracement from the observed high.</p><p><b>Runner Capture exit:</b> 10% hard stop, gain-dependent 8–15% trailing protection, two-tick 5% rollover confirmation, 500% terminal target, or 30-minute maximum hold.</p><ul>${positions}</ul></div>`;
   return reportV2().replace(
     "<h3>Recent actions</h3>",
     summary + "<h3>Recent actions</h3>",
@@ -1261,8 +1330,15 @@ http
                   "SOLANA_MICROCAP_LAUNCH_MOMENTUM",
                   "MICROCAP_LAUNCH_V2",
                 ),
+                runnerCaptureV1Performance: strategyVersionStats(
+                  "SOLANA_MICROCAP_RUNNER_CAPTURE",
+                  "RUNNER_CAPTURE_V1",
+                ),
                 discoveryDiagnostics: p.discoveryDiagnostics,
-                microcapWatchlist: (state.microcapWatchlist || []).slice(0, 100),
+                microcapWatchlist: (state.microcapWatchlist || []).slice(
+                  0,
+                  100,
+                ),
                 microcapWatchlistSummary: state.microcapWatchlistSummary || {},
                 watchedWallets: state.watchedWallets || [],
                 walletEvidence: state.walletEvidence || [],
