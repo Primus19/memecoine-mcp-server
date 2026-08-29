@@ -110,6 +110,35 @@ class PumpfunEvPolicy:
         )
 
 
+@dataclass(frozen=True)
+class MicrocapLaunchPolicy:
+    """Paper-only fast momentum test for newly created Solana pools."""
+
+    enabled: bool = True
+    minimum_volume_24h_usd: float = 20_000.0
+    minimum_liquidity_usd: float = 10_000.0
+    maximum_age_minutes: float = 30.0
+    minimum_trades_5m: int = 25
+    minimum_unique_buyers_5m: int = 15
+    minimum_net_buy_pressure: float = 0.25
+    minimum_buyer_acceleration: float = 1.30
+    minimum_volume_acceleration: float = 1.30
+    minimum_price_change_5m_pct: float = 5.0
+    maximum_price_change_5m_pct: float = 30.0
+    maximum_sell_price_impact_bps: float = 150.0
+    maximum_top10_holder_fraction: float = 0.70
+    maximum_creator_fraction: float = 0.20
+
+    @classmethod
+    def from_env(cls) -> "MicrocapLaunchPolicy":
+        return cls(
+            enabled=os.getenv("SOLANA_MICROCAP_LAUNCH_ENABLED", "true").lower() == "true",
+            minimum_volume_24h_usd=max(20_000.0, float(os.getenv("SOLANA_MICROCAP_MIN_VOLUME_24H_USD", "20000"))),
+            minimum_liquidity_usd=max(7_500.0, float(os.getenv("SOLANA_MICROCAP_MIN_LIQUIDITY_USD", "10000"))),
+            maximum_age_minutes=min(60.0, max(5.0, float(os.getenv("SOLANA_MICROCAP_MAX_AGE_MINUTES", "30")))),
+        )
+
+
 class EarlyRejected(ValueError):
     pass
 
@@ -469,10 +498,86 @@ def score_pumpfun_ev_candidate(candidate: dict[str, Any], ledger: Ledger,
     }
 
 
+def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
+                                    policy: MicrocapLaunchPolicy) -> dict[str, Any]:
+    """Find sustained early runs while failing closed on safety and sellability."""
+    age = _number(candidate.get("token_age_minutes"), 9999)
+    volume_24h = _number(candidate.get("volume_24h_usd"), 0)
+    liquidity = _number(candidate.get("liquidity_usd"), 0)
+    trades = int(_number(candidate.get("trades_5m"), 0))
+    buyers = int(_number(candidate.get("unique_buyers_5m"), 0))
+    buyer_accel = ratio(buyers, int(_number(candidate.get("unique_buyers_previous_5m"), 0)))
+    volume_accel = ratio(_number(candidate.get("buy_volume_5m_usd")),
+                         _number(candidate.get("buy_volume_previous_5m_usd")))
+    total_flow = (_number(candidate.get("buy_volume_5m_usd")) +
+                  _number(candidate.get("sell_volume_5m_usd")))
+    pressure = (_number(candidate.get("transaction_buy_pressure"))
+                if "transaction_buy_pressure" in candidate else
+                ((_number(candidate.get("buy_volume_5m_usd")) -
+                  _number(candidate.get("sell_volume_5m_usd"))) / total_flow)
+                if total_flow else -1.0)
+    momentum_5m = _number(candidate.get("price_change_5m_pct"), -999)
+    momentum_15m = _number(candidate.get("price_change_15m_pct"), -999)
+    impact = _number(candidate.get("sell_price_impact_bps"), 9999)
+    top10, creator = candidate.get("top10_holder_fraction"), candidate.get("creator_fraction")
+    failures = contract_safety_failures(candidate)
+    checks = (
+        (not policy.enabled, "microcap launch strategy disabled"),
+        (not 1 <= age <= policy.maximum_age_minutes, "microcap token age outside launch window"),
+        (volume_24h < policy.minimum_volume_24h_usd, "microcap 24h volume below $20k minimum"),
+        (liquidity < policy.minimum_liquidity_usd, "microcap liquidity below minimum"),
+        (trades < policy.minimum_trades_5m, "microcap recent trades below minimum"),
+        (buyers < policy.minimum_unique_buyers_5m, "microcap unique buyers below minimum"),
+        (pressure < policy.minimum_net_buy_pressure, "microcap net buy pressure below minimum"),
+        (buyer_accel < policy.minimum_buyer_acceleration, "microcap buyers are not accelerating"),
+        (volume_accel < policy.minimum_volume_acceleration, "microcap buy volume is not accelerating"),
+        (not policy.minimum_price_change_5m_pct <= momentum_5m <= policy.maximum_price_change_5m_pct,
+         "microcap five-minute momentum outside serious-run range"),
+        (momentum_15m <= 0, "microcap fifteen-minute momentum is not positive"),
+        (impact > policy.maximum_sell_price_impact_bps, "microcap executable sell impact above maximum"),
+        (top10 is None, "microcap top-10 concentration unavailable"),
+        (top10 is not None and _number(top10) > policy.maximum_top10_holder_fraction,
+         "microcap top-10 concentration too high"),
+        (creator is None, "microcap creator concentration unavailable"),
+        (creator is not None and _number(creator) > policy.maximum_creator_fraction,
+         "microcap creator concentration too high"),
+    )
+    failures.extend(reason for failed, reason in checks if failed)
+    score = round(clamp(momentum_5m, 0, 20) + clamp(pressure * 30, 0, 15) +
+                  clamp((buyer_accel - 1) * 15, 0, 15) +
+                  clamp((volume_accel - 1) * 10, 0, 10) +
+                  clamp(math.log10(max(liquidity, 1) / policy.minimum_liquidity_usd + 1) * 15, 0, 15), 2)
+    return {
+        "mint": str(candidate.get("mint") or ""), "symbol": str(candidate.get("symbol") or ""),
+        "price_usd": _number(candidate.get("price_usd")), "decimals": int(candidate.get("decimals") or 0),
+        "strategy": "SOLANA_MICROCAP_LAUNCH_MOMENTUM", "strategy_version": "MICROCAP_LAUNCH_V1",
+        "mode": "PAPER_ONLY", "qualified": False, "live_eligible": False,
+        "paper_qualified": not failures, "paper_failures": list(dict.fromkeys(failures)),
+        "failures": ["paper-only challenger"], "score": score,
+        "token_age_minutes": round(age, 4), "volume_24h_usd": round(volume_24h, 2),
+        "liquidity_usd": round(liquidity, 2), "trades_5m": trades, "unique_buyers_5m": buyers,
+        "buyer_acceleration": round(buyer_accel, 4), "volume_acceleration": round(volume_accel, 4),
+        "net_buy_pressure": round(pressure, 4), "price_change_5m_pct": round(momentum_5m, 4),
+        "price_change_15m_pct": round(momentum_15m, 4), "sell_price_impact_bps": round(impact, 2),
+        "top10_holder_fraction": _number(top10) if top10 is not None else None,
+        "creator_fraction": _number(creator) if creator is not None else None,
+        "safety_evidence_status": str(candidate.get("safety_evidence_status") or "MISSING"),
+        "flow_data_provenance": str(candidate.get("flow_data_provenance") or "UNSPECIFIED"),
+        "pool_address": str(candidate.get("pool") or ""),
+        "source_observed_at": str(candidate.get("observed_at") or ""),
+        "source_url": str(candidate.get("source_url") or ""), "qualified_wallet_count": 0,
+        "entry_reason": (f"Microcap Launch V1 serious-run entry: {age:.1f}-minute pool; "
+                         f"${volume_24h:,.0f} 24h volume; {momentum_5m:.2f}% five-minute momentum; "
+                         f"{pressure:.2f} buy pressure; {buyer_accel:.2f}x buyer and "
+                         f"{volume_accel:.2f}x volume acceleration; executable sell impact {impact:.0f} bps."),
+    }
+
+
 def strategy_diagnostics(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Explain why each paper strategy did or did not produce candidates."""
     diagnostics: dict[str, Any] = {}
-    for strategy in ("SOLANA_EARLY_CONTROL", "SOLANA_PUMPFUN_EV_EXPERIMENT"):
+    for strategy in ("SOLANA_EARLY_CONTROL", "SOLANA_PUMPFUN_EV_EXPERIMENT",
+                     "SOLANA_MICROCAP_LAUNCH_MOMENTUM"):
         rows = [item for item in results if item.get("strategy") == strategy]
         failure_counts: dict[str, int] = {}
         for row in rows:
@@ -683,6 +788,7 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
             "decimals": int(base_token.get("decimals") or 0),
             "observed_at": utcnow(), "token_age_minutes": age,
             "liquidity_usd": _number(attributes.get("reserve_in_usd")),
+            "volume_24h_usd": _number(volume.get("h24")),
             "market_cap_usd": _number(attributes.get("market_cap_usd") or attributes.get("fdv_usd")),
             "trades_5m": buys5 + sells5,
             "unique_buyers_5m": buyers5,
@@ -811,6 +917,7 @@ def main() -> None:
     Handler.ledger = ledger
     policy = EarlyPolicy.from_env()
     pumpfun_policy = PumpfunEvPolicy.from_env()
+    microcap_policy = MicrocapLaunchPolicy.from_env()
     server = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     # Public GeckoTerminal allows 30 calls/minute. Three pages once a minute
@@ -831,6 +938,10 @@ def main() -> None:
                 ledger.store_signal(pumpfun_payload, pumpfun["ev_rank"],
                                     "PAPER_QUALIFIED" if pumpfun["paper_qualified"] else "REJECTED")
                 results.append(pumpfun)
+                microcap = score_microcap_launch_candidate(candidate, ledger, microcap_policy)
+                ledger.store_signal({**candidate, "strategy": microcap["strategy"]}, microcap["score"],
+                                    "PAPER_QUALIFIED" if microcap["paper_qualified"] else "REJECTED")
+                results.append(microcap)
             results.sort(key=lambda item: (item.get("paper_qualified", False),
                                            item.get("ev_rank", item["score"])), reverse=True)
             diagnostics = strategy_diagnostics(results)
