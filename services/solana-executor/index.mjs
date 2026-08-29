@@ -34,6 +34,7 @@ const cfg = {
     Math.max(0.5, num(env("SOLANA_RUNNER_LIVE_PROBE_DAILY_CAP_USD"), 1)),
   ),
   probePartialFraction: 0.25,
+  probeMaxOpen: 2,
   probeMaxHoldMinutes: 20,
   entry: Math.min(3, Math.max(1, num(env("SOLANA_MAX_ENTRY_USD"), 3))),
   total: Math.min(6, Math.max(3, num(env("SOLANA_MAX_TOTAL_EXPOSURE_USD"), 6))),
@@ -361,8 +362,8 @@ function probeBlockers() {
     b.push("USDC balance below runner live-probe amount");
   if (num(state.balances?.sol) < 0.005)
     b.push("SOL balance below fee minimum");
-  if (state.probePositions.length)
-    b.push("one runner live probe is already open");
+  if (state.probePositions.length >= cfg.probeMaxOpen)
+    b.push(`runner live-probe open-position limit ${cfg.probeMaxOpen} reached`);
   if (probeDailyRiskUsd() + cfg.probeEntry > cfg.probeDailyCap)
     b.push("runner live-probe daily loss/exposure cap reached");
   return b;
@@ -402,6 +403,7 @@ function publicState() {
       dailyRiskUsedUsd: probeDailyRiskUsd(),
       spentTodayUsd: probeDailySpendUsd(),
       partialExitFraction: cfg.probePartialFraction,
+      maxOpenPositions: cfg.probeMaxOpen,
       maxHoldMinutes: cfg.probeMaxHoldMinutes,
       open: state.probePositions.length,
       fills: state.probeFills.slice(0, 20),
