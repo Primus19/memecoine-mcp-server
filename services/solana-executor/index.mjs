@@ -1118,11 +1118,32 @@ async function superviseRunnerProbes() {
       p.lastMarkedAt = new Date().toISOString();
       p.lastMarkUsd = mark;
       p.highTotalUsd = Math.max(num(p.highTotalUsd, p.entryUsd), total);
+      if (!p.profitPartialSoldAt && total >= p.entryUsd * 1.08) {
+        const quantityBefore = p.quantity;
+        changed =
+          (await recordProbeSell(
+            p,
+            Math.min(
+              p.quantity,
+              Math.max(
+                1,
+                Math.floor(p.originalQuantity * cfg.probePartialFraction),
+              ),
+            ),
+            "PROBE_PROFIT_PARTIAL_SELL",
+            "PROBE_PROFIT_CAPTURE_8PCT",
+          )) || changed;
+        if (p.quantity < quantityBefore)
+          p.profitPartialSoldAt = new Date().toISOString();
+        continue;
+      }
       const ret = total / p.entryUsd - 1,
         retracement = p.highTotalUsd > 0 ? 1 - total / p.highTotalUsd : 0,
         reason =
-          ret <= -0.2
-            ? "PROBE_STOP_LOSS"
+          num(p.sellFailures) >= 2
+            ? "PROBE_EXIT_ROUTE_RECOVERED"
+            : ret <= -0.2
+              ? "PROBE_STOP_LOSS"
             : ret >= 1
               ? "PROBE_TAKE_PROFIT_100"
               : p.highTotalUsd >= p.entryUsd * 1.2 && retracement >= 0.15
