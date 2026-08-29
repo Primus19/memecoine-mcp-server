@@ -1045,13 +1045,19 @@ async function recordProbeSell(p, quantity, action, reason) {
       error: p.lastSellError,
       strategy: "SOLANA_MICROCAP_RUNNER_LIVE_PROBE",
     });
-    // Keep every retry in the audit ledger, but notify only on meaningful
-    // escalation milestones instead of emailing once per minute.
-    return (
+    // Keep every retry in the audit ledger. After the initial escalation
+    // milestones, send at most one reminder per hour.
+    const priorAlertAt = Date.parse(
+        p.lastFailureAlertAt || state.email.lastSentAt || 0,
+      ),
+      shouldNotify =
       p.sellFailures === 1 ||
       p.sellFailures === 5 ||
-      p.sellFailures % 10 === 0
-    );
+      p.sellFailures === 10 ||
+      !priorAlertAt ||
+      Date.now() - priorAlertAt >= 3600000;
+    if (shouldNotify) p.lastFailureAlertAt = at;
+    return shouldNotify;
   }
 }
 async function runnerProbeBuy(c) {
@@ -1067,6 +1073,7 @@ async function runnerProbeBuy(c) {
       quantity,
       originalQuantity: quantity,
       entryUsd: cfg.probeEntry,
+      decimals: num(c.decimals, 6),
       proceedsUsd: 0,
       highTotalUsd: cfg.probeEntry,
       openedAt: at,
@@ -1151,7 +1158,7 @@ async function superviseRunnerProbes() {
           num(p.sellFailures) >= 2
             ? "PROBE_EXIT_ROUTE_RECOVERED"
             : ret <= -0.2
-              ? "PROBE_STOP_LOSS"
+            ? "PROBE_STOP_LOSS"
             : ret >= 1
               ? "PROBE_TAKE_PROFIT_100"
               : p.highTotalUsd >= p.entryUsd * 1.2 && retracement >= 0.15
@@ -1424,29 +1431,52 @@ function runnerProbeEmailReport() {
       0,
     ),
     open = state.probePositions.find((p) => p.mint === newest?.mint),
+    actionLabel =
+      newest?.action === "PROBE_SELL_FAILED"
+        ? "EXIT RETRY FAILED — NO TRADE OCCURRED"
+        : newest?.action === "PROBE_BUY"
+          ? "BUY COMPLETED"
+          : newest?.action === "PROBE_PARTIAL_SELL"
+            ? "LIQUIDITY-TEST SALE COMPLETED"
+            : newest?.action === "PROBE_PROFIT_PARTIAL_SELL"
+              ? "PROFIT PARTIAL SALE COMPLETED"
+              : newest?.action === "PROBE_FINAL_SELL"
+                ? "POSITION CLOSED"
+                : newest?.action || "STATUS UPDATE",
+    reasonText =
+      newest?.action === "PROBE_SELL_FAILED"
+        ? "The system tried to sell the open token position, but Jupiter could not provide an executable route. No tokens moved and no new loss was realized by this retry."
+        : newest?.reason === "IMMEDIATE_EXITABILITY_TEST"
+          ? "The strategy sold a small portion immediately to verify that the token could be converted back to USDC."
+          : newest?.reason === "PROBE_PROFIT_CAPTURE_8PCT"
+            ? "Executable total value reached the +8% profit-capture level."
+            : newest?.reason || "The live runner-probe position changed.",
     actionAmount =
       newest?.inputUsd != null
-        ? `${num(newest.inputUsd).toFixed(6)} spent`
+        ? `$${num(newest.inputUsd).toFixed(6)} spent`
         : newest?.outputUsd != null
-          ? `${num(newest.outputUsd).toFixed(6)} recovered`
+          ? `$${num(newest.outputUsd).toFixed(6)} recovered`
           : newest?.quantity != null
-            ? `${num(newest.quantity).toFixed(0)} raw units requested`
+            ? `${(
+                num(newest.quantity) /
+                10 ** num(open?.decimals, 6)
+              ).toFixed(6)} ${newest.symbol || "tokens"} requested for sale; none sold`
             : "Not reported",
     status = open
-      ? `OPEN — ${Math.max(0, num(open.entryUsd) - num(open.proceedsUsd)).toFixed(6)} unrecovered cost basis; ${num(open.sellFailures)} failed sell attempts`
+      ? `OPEN — $${Math.max(0, num(open.entryUsd) - num(open.proceedsUsd)).toFixed(6)} unrecovered cost basis; ${num(open.sellFailures)} failed sell attempts`
       : "CLOSED",
     result = completed.length
-      ? `${realizedBeforeFees.toFixed(6)} realized before network fees`
+      ? `$${realizedBeforeFees.toFixed(6)} realized before network fees`
       : "No completed round trip; final profit/loss is not yet known",
     recent = state.probeFills
       .filter((f) => f.action !== "PROBE_SELL_FAILED")
       .slice(0, 6)
       .map(
         (f) =>
-          `<tr><td>${esc(f.at)}</td><td>${esc(f.symbol || f.mint?.slice(0, 6))}</td><td>${esc(f.action)}</td><td>${f.inputUsd != null ? `${num(f.inputUsd).toFixed(6)}` : "-"}</td><td>${f.outputUsd != null ? `${num(f.outputUsd).toFixed(6)}` : "-"}</td></tr>`,
+          `<tr><td>${esc(f.at)}</td><td>${esc(f.symbol || f.mint?.slice(0, 6))}</td><td>${esc(f.action)}</td><td>${f.inputUsd != null ? `$${num(f.inputUsd).toFixed(6)}` : "-"}</td><td>${f.outputUsd != null ? `$${num(f.outputUsd).toFixed(6)}` : "-"}</td></tr>`,
       )
       .join("");
-  return `<div style="font-family:Arial,sans-serif;color:#172033;max-width:760px;margin:auto"><div style="background:#0f3d56;color:white;padding:20px;border-radius:14px 14px 0 0"><span style="background:#f97316;color:white;border-radius:999px;padding:5px 10px;font-weight:800">NEW ACTION</span><h2 style="margin:12px 0 4px">Runner Probe — ${esc(newest?.symbol || "Unknown token")}</h2><div>${esc(newest?.action || "STATUS")}</div></div><div style="border:1px solid #cbd5e1;padding:18px;border-radius:0 0 14px 14px"><div style="background:#fff7ed;border-left:5px solid #f97316;padding:12px;margin-bottom:14px"><b>Why this report was sent</b><br>${esc(newest?.reason || newest?.error || "Live runner-probe state changed.")}</div><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%;background:#f8fafc"><tr><td><b>Action amount</b><br>${esc(actionAmount)}</td><td><b>Position status</b><br>${esc(status)}</td></tr><tr><td><b>Completed result</b><br>${esc(result)}</td><td><b>Current daily risk used</b><br>${probeDailyRiskUsd().toFixed(6)} / ${cfg.probeDailyCap.toFixed(2)}</td></tr></table>${newest?.error ? `<div style="margin-top:12px;padding:10px;background:#fee2e2;color:#991b1b"><b>Execution problem:</b> ${esc(newest.error)}</div>` : ""}<p><b>Service totals:</b> ${buys.length} buys, ${successfulSells.length} successful sales, ${completed.length} completed round trips, ${state.probePositions.length} open; ${grossEntries.toFixed(6)} gross entries and ${recovered.toFixed(6)} recovered. Network fees are not included unless explicitly recorded.</p><h3>Successful actions</h3><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>UTC</th><th>Token</th><th>Action</th><th>Spent</th><th>Recovered</th></tr>${recent || '<tr><td colspan="5">No successful action recorded</td></tr>'}</table><p style="color:#64748b;font-size:12px">Failed retries remain available in the audit ledger but are summarized rather than emailed every minute.</p></div></div>`;
+  return `<div style="font-family:Arial,sans-serif;color:#172033;max-width:760px;margin:auto"><div style="background:#0f3d56;color:white;padding:20px;border-radius:14px 14px 0 0"><span style="background:${newest?.action === "PROBE_SELL_FAILED" ? "#dc2626" : "#f97316"};color:white;border-radius:999px;padding:5px 10px;font-weight:800">${newest?.action === "PROBE_SELL_FAILED" ? "EXECUTION ALERT" : "NEW ACTION"}</span><h2 style="margin:12px 0 4px">Runner Probe — ${esc(newest?.symbol || "Unknown token")}</h2><div>${esc(actionLabel)}</div></div><div style="border:1px solid #cbd5e1;padding:18px;border-radius:0 0 14px 14px"><div style="background:#fff7ed;border-left:5px solid #f97316;padding:12px;margin-bottom:14px"><b>Why this report was sent</b><br>${esc(reasonText)}</div><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%;background:#f8fafc"><tr><td><b>Action amount</b><br>${esc(actionAmount)}</td><td><b>Position status</b><br>${esc(status)}</td></tr><tr><td><b>Completed result</b><br>${esc(result)}</td><td><b>Current daily risk used</b><br>$${probeDailyRiskUsd().toFixed(6)} / $${cfg.probeDailyCap.toFixed(2)}</td></tr></table>${newest?.error ? `<div style="margin-top:12px;padding:10px;background:#fee2e2;color:#991b1b"><b>Execution problem:</b> No executable Jupiter sell route is currently available. The detailed provider response remains in the audit ledger.</div>` : ""}<p><b>Service totals:</b> ${buys.length} buys; ${successfulSells.length} successful sales; ${completed.length} completed round trips; ${state.probePositions.length} open position${state.probePositions.length === 1 ? "" : "s"}. Gross entries: $${grossEntries.toFixed(6)}. USDC recovered: $${recovered.toFixed(6)}. Network fees are not included unless explicitly recorded.</p><h3>Successful actions</h3><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>UTC</th><th>Token</th><th>Action</th><th>Spent</th><th>Recovered</th></tr>${recent || '<tr><td colspan="5">No successful action recorded</td></tr>'}</table><p style="color:#64748b;font-size:12px">Every failed retry remains in the audit ledger. After the first, fifth and tenth failures, reminder emails are limited to once per hour.</p></div></div>`;
 }
 async function email(hasTradeEvent = false) {
   if (hasTradeEvent)
