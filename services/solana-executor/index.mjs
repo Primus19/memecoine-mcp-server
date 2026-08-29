@@ -5,7 +5,8 @@ import bs58 from "bs58";
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
   PATH =
     process.env.SOLANA_EXECUTOR_STATE_PATH || "/app/data/solana_executor.json",
-  ACK = "I_ACCEPT_THE_25_USD_SOLANA_EARLY_RISK";
+  ACK = "I_ACCEPT_THE_25_USD_SOLANA_EARLY_RISK",
+  PROBE_ACK = "I_ACCEPT_THE_0_50_USD_RUNNER_LIQUIDITY_PROBE";
 const num = (v, d = 0) =>
     String(v ?? "").trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : d,
   env = (a, b = "") => process.env[a] || process.env[b] || "";
@@ -17,6 +18,19 @@ const cfg = {
   expectedAddress: env("SOLANA_EXPECTED_WALLET_ADDRESS").trim(),
   enabled: env("SOLANA_EXECUTOR_ENABLED") === "true",
   live: env("SOLANA_LIVE_ENABLED") === "true" && env("SOLANA_LIVE_ACK") === ACK,
+  probeLive:
+    env("SOLANA_RUNNER_LIVE_PROBE_ENABLED") === "true" &&
+    env("SOLANA_RUNNER_LIVE_PROBE_ACK") === PROBE_ACK,
+  probeEntry: Math.min(
+    0.5,
+    Math.max(0.1, num(env("SOLANA_RUNNER_LIVE_PROBE_USD"), 0.5)),
+  ),
+  probeDailyCap: Math.min(
+    1,
+    Math.max(0.5, num(env("SOLANA_RUNNER_LIVE_PROBE_DAILY_CAP_USD"), 1)),
+  ),
+  probePartialFraction: 0.25,
+  probeMaxHoldMinutes: 20,
   entry: Math.min(3, Math.max(1, num(env("SOLANA_MAX_ENTRY_USD"), 3))),
   total: Math.min(6, Math.max(3, num(env("SOLANA_MAX_TOTAL_EXPOSURE_USD"), 6))),
   max: Math.min(2, Math.max(1, num(env("SOLANA_MAX_POSITIONS"), 2))),
@@ -86,6 +100,9 @@ const fresh = () => {
     liveShadowPositions: [],
     liveShadowFills: [],
     liveShadowRealizedPnlUsd: 0,
+    probePositions: [],
+    probeFills: [],
+    probeSeen: {},
     positions: [],
     fills: [],
     errors: [],
@@ -117,6 +134,9 @@ function load() {
       liveShadowPositions: x.liveShadowPositions || [],
       liveShadowFills: x.liveShadowFills || [],
       liveShadowSeen: x.liveShadowSeen || {},
+      probePositions: x.probePositions || [],
+      probeFills: x.probeFills || [],
+      probeSeen: x.probeSeen || {},
     };
   } catch {
     return fresh();
@@ -300,6 +320,33 @@ function blockers() {
     b.push("24-hour live-strategy shadow soak not completed");
   return b;
 }
+function probeDailySpendUsd() {
+  const day = new Date().toISOString().slice(0, 10);
+  return state.probeFills
+    .filter((f) => f.action === "PROBE_BUY" && String(f.at).startsWith(day))
+    .reduce((total, f) => total + num(f.inputUsd), 0);
+}
+function probeBlockers() {
+  const b = [];
+  if (!cfg.enabled) b.push("executor disabled");
+  if (!cfg.probeLive) b.push("runner live-probe acknowledgement not armed");
+  if (!cfg.discovery) b.push("discovery URL missing");
+  if (!cfg.jupiter) b.push("Jupiter key missing");
+  if (!cfg.helius) b.push("Helius key missing");
+  if (!walletMatches()) b.push("signer wallet identity not verified");
+  if (!state.balances?.checkedAt) b.push("wallet balances not verified");
+  else if (Date.now() - Date.parse(state.balances.checkedAt) > 120000)
+    b.push("wallet balances stale");
+  if (num(state.balances?.usdc) < cfg.probeEntry)
+    b.push("USDC balance below runner live-probe amount");
+  if (num(state.balances?.sol) < 0.005)
+    b.push("SOL balance below fee minimum");
+  if (state.probePositions.length)
+    b.push("one runner live probe is already open");
+  if (probeDailySpendUsd() + cfg.probeEntry > cfg.probeDailyCap)
+    b.push("runner live-probe daily cap reached");
+  return b;
+}
 function emailBlockers() {
   const b = [];
   if (!cfg.emailEnabled) b.push("email disabled");
@@ -325,6 +372,18 @@ function publicState() {
     live: cfg.live,
     ready: !blockers().length,
     blockers: blockers(),
+    runnerLiveProbe: {
+      enabled: cfg.probeLive,
+      ready: !probeBlockers().length,
+      blockers: probeBlockers(),
+      entryUsd: cfg.probeEntry,
+      dailyCapUsd: cfg.probeDailyCap,
+      spentTodayUsd: probeDailySpendUsd(),
+      partialExitFraction: cfg.probePartialFraction,
+      maxHoldMinutes: cfg.probeMaxHoldMinutes,
+      open: state.probePositions.length,
+      fills: state.probeFills.slice(0, 20),
+    },
     paperPromotion: liveShadowStats(),
     liveShadowPromotion: liveShadowStats(),
     explorationPaperStats: paperStats(),
@@ -914,6 +973,169 @@ async function superviseLiveShadow() {
     }
   return changed;
 }
+async function recordProbeSell(p, quantity, action, reason) {
+  const requested = Math.max(1, Math.floor(quantity));
+  try {
+    const o = await order(p.mint, USDC, requested),
+      r = await execute(o);
+    if (r.status !== "Success" || num(r.code) !== 0)
+      throw Error(r.error || String(r.code));
+    const proceeds = num(r.totalOutputAmount) / 1e6,
+      at = new Date().toISOString();
+    p.quantity = Math.max(0, p.quantity - requested);
+    p.proceedsUsd = num(p.proceedsUsd) + proceeds;
+    p.lastSellAt = at;
+    p.lastSellSignature = r.signature;
+    state.probeFills.unshift({
+      id: r.signature,
+      action,
+      reason,
+      at,
+      mint: p.mint,
+      symbol: p.symbol,
+      quantity: requested,
+      outputUsd: proceeds,
+      originalInputUsd: p.entryUsd,
+      cumulativeProceedsUsd: p.proceedsUsd,
+      realizedPnlUsd: p.quantity <= 0 ? p.proceedsUsd - p.entryUsd : null,
+      strategy: "SOLANA_MICROCAP_RUNNER_LIVE_PROBE",
+    });
+    if (p.quantity <= 0)
+      state.probePositions = state.probePositions.filter(
+        (x) => x.entrySignature !== p.entrySignature,
+      );
+    return true;
+  } catch (e) {
+    const at = new Date().toISOString();
+    p.sellFailures = num(p.sellFailures) + 1;
+    p.lastSellError = e.message.slice(0, 250);
+    p.lastSellAttemptAt = at;
+    state.probeFills.unshift({
+      id: `probe-sell-failed:${p.mint}:${Date.now()}`,
+      action: "PROBE_SELL_FAILED",
+      reason,
+      at,
+      mint: p.mint,
+      symbol: p.symbol,
+      quantity: requested,
+      error: p.lastSellError,
+      strategy: "SOLANA_MICROCAP_RUNNER_LIVE_PROBE",
+    });
+    return true;
+  }
+}
+async function runnerProbeBuy(c) {
+  const o = await order(USDC, c.mint, Math.round(cfg.probeEntry * 1e6)),
+    r = await execute(o);
+  if (r.status !== "Success" || num(r.code) !== 0)
+    throw Error(`runner probe buy failed: ${r.error || r.code}`);
+  const quantity = num(r.totalOutputAmount),
+    at = new Date().toISOString(),
+    p = {
+      mint: c.mint,
+      symbol: c.symbol || c.mint.slice(0, 6),
+      quantity,
+      originalQuantity: quantity,
+      entryUsd: cfg.probeEntry,
+      proceedsUsd: 0,
+      highTotalUsd: cfg.probeEntry,
+      openedAt: at,
+      entrySignature: r.signature,
+      sellFailures: 0,
+      entryEvidence: {
+        score: c.score,
+        volume24hUsd: c.volume_24h_usd,
+        liquidityUsd: c.liquidity_usd,
+        trades5m: c.trades_5m,
+        uniqueBuyers5m: c.unique_buyers_5m,
+        netBuyPressure: c.net_buy_pressure,
+        priceChange5mPct: c.price_change_5m_pct,
+        priceChange15mPct: c.price_change_15m_pct,
+        returnSinceSeen: c.return_since_seen,
+        retracementFromHigh: c.retracement_from_high,
+        sellPriceImpactBps: c.sell_price_impact_bps,
+        safetyEvidenceStatus: c.safety_evidence_status,
+        poolAddress: c.pool_address,
+        sourceObservedAt: c.source_observed_at,
+        sourceUrl: c.source_url,
+      },
+    };
+  state.probePositions.push(p);
+  state.probeSeen[c.mint] = at;
+  state.probeFills.unshift({
+    id: r.signature,
+    action: "PROBE_BUY",
+    at,
+    mint: c.mint,
+    symbol: p.symbol,
+    inputUsd: cfg.probeEntry,
+    outputUnits: quantity,
+    entryEvidence: p.entryEvidence,
+    strategy: "SOLANA_MICROCAP_RUNNER_LIVE_PROBE",
+  });
+  const partialQuantity = Math.max(
+    1,
+    Math.floor(quantity * cfg.probePartialFraction),
+  );
+  await recordProbeSell(
+    p,
+    partialQuantity,
+    "PROBE_PARTIAL_SELL",
+    "IMMEDIATE_EXITABILITY_TEST",
+  );
+  return true;
+}
+async function superviseRunnerProbes() {
+  let changed = false;
+  for (const p of [...state.probePositions]) {
+    try {
+      const o = await order(p.mint, USDC, Math.floor(p.quantity)),
+        mark = num(o.outAmount || o.outputAmount) / 1e6,
+        total = num(p.proceedsUsd) + mark;
+      if (!mark) throw Error("runner probe sell quote returned no output");
+      p.lastMarkedAt = new Date().toISOString();
+      p.lastMarkUsd = mark;
+      p.highTotalUsd = Math.max(num(p.highTotalUsd, p.entryUsd), total);
+      const ret = total / p.entryUsd - 1,
+        retracement = p.highTotalUsd > 0 ? 1 - total / p.highTotalUsd : 0,
+        reason =
+          ret <= -0.2
+            ? "PROBE_STOP_LOSS"
+            : ret >= 1
+              ? "PROBE_TAKE_PROFIT_100"
+              : p.highTotalUsd >= p.entryUsd * 1.2 && retracement >= 0.15
+                ? "PROBE_TRAILING_ROLLOVER"
+                : Date.now() - Date.parse(p.openedAt) >=
+                    cfg.probeMaxHoldMinutes * 60000
+                  ? "PROBE_MAX_HOLD_20M"
+                  : "";
+      if (reason)
+        changed =
+          (await recordProbeSell(
+            p,
+            p.quantity,
+            "PROBE_FINAL_SELL",
+            reason,
+          )) || changed;
+    } catch (e) {
+      p.lastSellError = e.message.slice(0, 250);
+      p.lastSellAttemptAt = new Date().toISOString();
+      p.sellFailures = num(p.sellFailures) + 1;
+      if (
+        Date.now() - Date.parse(p.openedAt) >=
+        cfg.probeMaxHoldMinutes * 60000
+      )
+        changed =
+          (await recordProbeSell(
+            p,
+            p.quantity,
+            "PROBE_FINAL_SELL",
+            "PROBE_MAX_HOLD_RETRY",
+          )) || changed;
+    }
+  }
+  return changed;
+}
 async function buy(c) {
   const o = await order(USDC, c.mint, Math.round(cfg.entry * 1e6)),
     r = await execute(o);
@@ -1119,9 +1341,17 @@ function reportV3() {
         )
         .join("") || "<li>No current-version positions open.</li>",
     summary = `<div style="margin:14px 0;padding:14px;border:2px solid #7c3aed;background:#faf5ff;border-radius:10px"><h3 style="margin-top:0">NEW evidence-confirmed strategy versions</h3><p><b>Divine V3:</b> ${divine.closed} closed, ${divine.open} open, ${divine.winRatePct.toFixed(1)}% wins, $${divine.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Control V2:</b> ${control.closed} closed, ${control.open} open, ${control.winRatePct.toFixed(1)}% wins, $${control.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Microcap Launch V2:</b> ${micro.closed} closed, ${micro.open} open, ${micro.winRatePct.toFixed(1)}% wins, $${micro.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Runner Capture V1:</b> ${runner.closed} closed, ${runner.open} open, ${runner.winRatePct.toFixed(1)}% wins, $${runner.costStressedPnlUsd.toFixed(4)} stressed P&amp;L.</p><p><b>Microcap entry:</b> at least $100k rolling 24-hour volume, a pool no older than 30 minutes, serious five-minute momentum, persistent buyer/volume acceleration across two scans, verified safety/concentration, and an executable Jupiter sell route.</p><p><b>Runner Capture entry:</b> paper only; at least $100k volume, 20% retained gain, 15% current five-minute momentum, positive fifteen-minute momentum, two-scan persistence, executable sell route, adequate liquidity and no more than 10% retracement from the observed high.</p><p><b>Runner Capture exit:</b> 10% hard stop, gain-dependent 8–15% trailing protection, two-tick 5% rollover confirmation, 500% terminal target, or 30-minute maximum hold.</p><ul>${positions}</ul></div>`;
+  const probeRows = state.probeFills
+    .slice(0, 20)
+    .map(
+      (f) =>
+        `<tr style="background:#fee2e2;color:#7f1d1d"><td>${esc(f.at)}</td><td><b>LIVE RUNNER PROBE</b></td><td>${esc(f.action)}</td><td>${esc(f.symbol || f.mint?.slice(0, 6))}</td><td>${esc(f.reason || "REAL_MONEY_ENTRY")}</td><td>${f.inputUsd == null ? "-" : `${num(f.inputUsd).toFixed(4)}`}</td><td>${f.outputUsd == null ? "-" : `${num(f.outputUsd).toFixed(4)}`}</td><td>${f.realizedPnlUsd == null ? "-" : `${num(f.realizedPnlUsd).toFixed(4)}`}</td><td>${esc(f.id)}</td><td>${esc(f.error || "")}</td></tr>`,
+    )
+    .join("");
+  const probeSummary = `<div style="margin:16px 0;padding:16px;border:3px solid #dc2626;background:#fef2f2;border-radius:10px"><h3 style="margin-top:0">REAL-MONEY RUNNER LIQUIDITY PROBE</h3><p><b>Amount per probe:</b> ${cfg.probeEntry.toFixed(2)}; <b>daily cap:</b> ${cfg.probeDailyCap.toFixed(2)}; <b>open:</b> ${state.probePositions.length}; <b>spent today:</b> ${probeDailySpendUsd().toFixed(2)}</p><p><b>Status:</b> ${esc(probeBlockers().join("; ") || "ARMED AND READY")}</p><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr><th>UTC</th><th>Strategy</th><th>Action</th><th>Token</th><th>Reason</th><th>Input</th><th>Recovered</th><th>P&amp;L</th><th>Transaction signature</th><th>Error</th></tr>${probeRows || '<tr><td colspan="10">No real probe action yet</td></tr>'}</table></div>`;
   return reportV2().replace(
     "<h3>Recent actions</h3>",
-    summary + "<h3>Recent actions</h3>",
+    summary + probeSummary + "<h3>Recent actions</h3>",
   );
 }
 async function email(hasTradeEvent = false) {
@@ -1144,10 +1374,17 @@ async function email(hasTradeEvent = false) {
       body,
     });
   const shadow = liveShadowStats(),
-    newCount = state.paperFills.filter(
+    newCount =
+      state.paperFills.filter(
+        (f) => Date.parse(f.at) > Date.parse(state.email.lastSentAt || 0),
+      ).length +
+      state.probeFills.filter(
+        (f) => Date.parse(f.at) > Date.parse(state.email.lastSentAt || 0),
+      ).length,
+    probeNew = state.probeFills.some(
       (f) => Date.parse(f.at) > Date.parse(state.email.lastSentAt || 0),
-    ).length,
-    subject = `[TRADE] Solana NEW ${newCount} action${newCount === 1 ? "" : "s"} | strict ${shadow.closed} closed | $${shadow.costStressedPnlUsd.toFixed(2)} P&L`,
+    ),
+    subject = `[TRADE] Solana ${probeNew ? "LIVE PROBE" : "NEW"} ${newCount} action${newCount === 1 ? "" : "s"} | strict ${shadow.closed} closed | ${shadow.costStressedPnlUsd.toFixed(2)} P&L`,
     mime = [
       `From: ${cfg.from}`,
       `To: ${cfg.recipients.join(", ")}`,
@@ -1215,6 +1452,7 @@ async function tick() {
   let changed = await supervisePaper();
   await supervisePostExitFollowups();
   changed = (await superviseLiveShadow()) || changed;
+  changed = (await superviseRunnerProbes()) || changed;
   for (const c of candidates.filter((x) => x.paper_qualified === true)) {
     const strategy = c.strategy || "SOLANA_EARLY_CONTROL",
       seenKey = `${strategy}:${c.mint}`,
@@ -1252,6 +1490,22 @@ async function tick() {
     } catch (e) {
       state.balanceError = e.message.slice(0, 250);
     }
+  if (!probeBlockers().length) {
+    const scanAt = data.scanned_at || new Date().toISOString();
+    for (const candidate of candidates.filter(
+      (x) =>
+        x.strategy === "SOLANA_MICROCAP_RUNNER_CAPTURE" &&
+        x.live_probe_qualified === true,
+    )) {
+      if (
+        state.probeSeen[candidate.mint] ||
+        !confirmCandidate(candidate, "RUNNER_LIVE_PROBE", scanAt)
+      )
+        continue;
+      changed = (await runnerProbeBuy(candidate)) || changed;
+      break;
+    }
+  }
   if (!blockers().length) {
     await superviseLive();
     for (const c of candidates.filter((x) => x.qualified === true)) {
