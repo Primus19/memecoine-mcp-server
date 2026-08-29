@@ -1045,7 +1045,13 @@ async function recordProbeSell(p, quantity, action, reason) {
       error: p.lastSellError,
       strategy: "SOLANA_MICROCAP_RUNNER_LIVE_PROBE",
     });
-    return true;
+    // Keep every retry in the audit ledger, but notify only on meaningful
+    // escalation milestones instead of emailing once per minute.
+    return (
+      p.sellFailures === 1 ||
+      p.sellFailures === 5 ||
+      p.sellFailures % 10 === 0
+    );
   }
 }
 async function runnerProbeBuy(c) {
@@ -1399,6 +1405,49 @@ function reportV3() {
     summary + probeSummary + "<h3>Recent actions</h3>",
   );
 }
+function runnerProbeEmailReport() {
+  const lastSent = Date.parse(state.email.lastSentAt || 0),
+    newest =
+      state.probeFills.find((f) => Date.parse(f.at) > lastSent) ||
+      state.probeFills[0],
+    buys = state.probeFills.filter((f) => f.action === "PROBE_BUY"),
+    successfulSells = state.probeFills.filter(
+      (f) => f.action.includes("SELL") && f.action !== "PROBE_SELL_FAILED",
+    ),
+    completed = state.probeFills.filter(
+      (f) => f.action === "PROBE_FINAL_SELL" && f.realizedPnlUsd != null,
+    ),
+    grossEntries = buys.reduce((n, f) => n + num(f.inputUsd), 0),
+    recovered = successfulSells.reduce((n, f) => n + num(f.outputUsd), 0),
+    realizedBeforeFees = completed.reduce(
+      (n, f) => n + num(f.realizedPnlUsd),
+      0,
+    ),
+    open = state.probePositions.find((p) => p.mint === newest?.mint),
+    actionAmount =
+      newest?.inputUsd != null
+        ? `${num(newest.inputUsd).toFixed(6)} spent`
+        : newest?.outputUsd != null
+          ? `${num(newest.outputUsd).toFixed(6)} recovered`
+          : newest?.quantity != null
+            ? `${num(newest.quantity).toFixed(0)} raw units requested`
+            : "Not reported",
+    status = open
+      ? `OPEN — ${Math.max(0, num(open.entryUsd) - num(open.proceedsUsd)).toFixed(6)} unrecovered cost basis; ${num(open.sellFailures)} failed sell attempts`
+      : "CLOSED",
+    result = completed.length
+      ? `${realizedBeforeFees.toFixed(6)} realized before network fees`
+      : "No completed round trip; final profit/loss is not yet known",
+    recent = state.probeFills
+      .filter((f) => f.action !== "PROBE_SELL_FAILED")
+      .slice(0, 6)
+      .map(
+        (f) =>
+          `<tr><td>${esc(f.at)}</td><td>${esc(f.symbol || f.mint?.slice(0, 6))}</td><td>${esc(f.action)}</td><td>${f.inputUsd != null ? `${num(f.inputUsd).toFixed(6)}` : "-"}</td><td>${f.outputUsd != null ? `${num(f.outputUsd).toFixed(6)}` : "-"}</td></tr>`,
+      )
+      .join("");
+  return `<div style="font-family:Arial,sans-serif;color:#172033;max-width:760px;margin:auto"><div style="background:#0f3d56;color:white;padding:20px;border-radius:14px 14px 0 0"><span style="background:#f97316;color:white;border-radius:999px;padding:5px 10px;font-weight:800">NEW ACTION</span><h2 style="margin:12px 0 4px">Runner Probe — ${esc(newest?.symbol || "Unknown token")}</h2><div>${esc(newest?.action || "STATUS")}</div></div><div style="border:1px solid #cbd5e1;padding:18px;border-radius:0 0 14px 14px"><div style="background:#fff7ed;border-left:5px solid #f97316;padding:12px;margin-bottom:14px"><b>Why this report was sent</b><br>${esc(newest?.reason || newest?.error || "Live runner-probe state changed.")}</div><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%;background:#f8fafc"><tr><td><b>Action amount</b><br>${esc(actionAmount)}</td><td><b>Position status</b><br>${esc(status)}</td></tr><tr><td><b>Completed result</b><br>${esc(result)}</td><td><b>Current daily risk used</b><br>${probeDailyRiskUsd().toFixed(6)} / ${cfg.probeDailyCap.toFixed(2)}</td></tr></table>${newest?.error ? `<div style="margin-top:12px;padding:10px;background:#fee2e2;color:#991b1b"><b>Execution problem:</b> ${esc(newest.error)}</div>` : ""}<p><b>Service totals:</b> ${buys.length} buys, ${successfulSells.length} successful sales, ${completed.length} completed round trips, ${state.probePositions.length} open; ${grossEntries.toFixed(6)} gross entries and ${recovered.toFixed(6)} recovered. Network fees are not included unless explicitly recorded.</p><h3>Successful actions</h3><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>UTC</th><th>Token</th><th>Action</th><th>Spent</th><th>Recovered</th></tr>${recent || '<tr><td colspan="5">No successful action recorded</td></tr>'}</table><p style="color:#64748b;font-size:12px">Failed retries remain available in the audit ledger but are summarized rather than emailed every minute.</p></div></div>`;
+}
 async function email(hasTradeEvent = false) {
   if (hasTradeEvent)
     state.email = {
@@ -1437,7 +1486,7 @@ async function email(hasTradeEvent = false) {
       "MIME-Version: 1.0",
       "Content-Type: text/html; charset=UTF-8",
       "",
-      reportV3(),
+      probeNew ? runnerProbeEmailReport() : reportV3(),
     ].join("\r\n");
   await json("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
     method: "POST",
