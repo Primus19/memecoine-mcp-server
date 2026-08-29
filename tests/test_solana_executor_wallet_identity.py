@@ -43,7 +43,9 @@ def test_strategy_action_reporting_is_separate_and_trade_triggered():
     assert 'strategyPerformance:strategyPerformance()' in SOURCE
     assert '"/report.json"' in SOURCE
     assert '"/report"' in SOURCE
-    assert 'if(!hasTradeEvent||emailBlockers().length)return false' in SOURCE
+    assert 'if(hasTradeEvent)state.email={...state.email,pendingTradeEvent:true' in SOURCE
+    assert 'if(!state.email.pendingTradeEvent||emailBlockers().length)return false' in SOURCE
+    assert 'pendingTradeEvent:false' in SOURCE
     assert 'mode:"TRADE_EVENTS_ONLY"' in SOURCE
     assert "NEW ACTION" in SOURCE
     assert "REASON FOR ENTRY / ACTION" in SOURCE
