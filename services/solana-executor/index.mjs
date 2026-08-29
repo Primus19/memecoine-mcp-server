@@ -34,6 +34,14 @@ const cfg = {
     Math.max(0.5, num(env("SOLANA_RUNNER_LIVE_PROBE_DAILY_CAP_USD"), 1)),
   ),
   probePartialFraction: 0.25,
+  probeMaxSellImpactBps: Math.min(
+    150,
+    Math.max(25, num(env("SOLANA_RUNNER_MAX_SELL_IMPACT_BPS"), 150)),
+  ),
+  probeRoundTripMaxLossBps: Math.min(
+    500,
+    Math.max(50, num(env("SOLANA_RUNNER_PREFLIGHT_MAX_LOSS_BPS"), 300)),
+  ),
   probeMaxOpen: 2,
   probeMaxQuarantined: 4,
   probeMaxOpenExposureUsd: 2,
@@ -350,6 +358,34 @@ function probeOpenExposureUsd() {
     0,
   );
 }
+function probePerformance() {
+  const buys = state.probeFills.filter((f) => f.action === "PROBE_BUY"),
+    sells = state.probeFills.filter(
+      (f) => f.action.includes("SELL") && f.action !== "PROBE_SELL_FAILED",
+    ),
+    closes = state.probeFills.filter(
+      (f) => f.action === "PROBE_FINAL_SELL" && f.realizedPnlUsd != null,
+    ),
+    grossEntriesUsd = buys.reduce((n, f) => n + num(f.inputUsd), 0),
+    recoveredUsd = sells.reduce((n, f) => n + num(f.outputUsd), 0),
+    realizedPnlUsd = closes.reduce((n, f) => n + num(f.realizedPnlUsd), 0),
+    unresolvedCostBasisUsd = probeOpenExposureUsd();
+  return {
+    buys: buys.length,
+    successfulSales: sells.length,
+    completedRoundTrips: closes.length,
+    wins: closes.filter((f) => num(f.realizedPnlUsd) > 0).length,
+    losses: closes.filter((f) => num(f.realizedPnlUsd) < 0).length,
+    grossEntriesUsd,
+    recoveredUsd,
+    realizedPnlUsdBeforeNetworkFees: realizedPnlUsd,
+    openPositions: state.probePositions.length,
+    quarantinedPositions: state.probePositions.filter(probeIsQuarantined).length,
+    unresolvedCostBasisUsd,
+    networkFeeStatus: "NOT_CAPTURED_SEPARATELY",
+    netPnlAfterNetworkFeesUsd: null,
+  };
+}
 function probeIsQuarantined(p) {
   return (
     num(p.sellFailures) >= 3 &&
@@ -386,8 +422,16 @@ function probeBlockers() {
     b.push(`runner live-probe quarantine limit ${cfg.probeMaxQuarantined} reached`);
   if (probeOpenExposureUsd() + cfg.probeEntry > cfg.probeMaxOpenExposureUsd)
     b.push("runner live-probe total open-exposure cap reached");
-  if (probeDailyRealizedLossUsd() >= cfg.probeDailyCap)
-    b.push("runner live-probe daily realized-loss cap reached");
+  const committedDailyRisk =
+      probeDailyRealizedLossUsd() + probeOpenExposureUsd(),
+    remainingDailyLossCapacity = Math.max(
+    0,
+    cfg.probeDailyCap - committedDailyRisk,
+  );
+  if (remainingDailyLossCapacity + 1e-9 < cfg.probeEntry)
+    b.push(
+      `runner live-probe remaining daily loss capacity $${remainingDailyLossCapacity.toFixed(4)} below $${cfg.probeEntry.toFixed(2)} next-entry worst case`,
+    );
   return b;
 }
 function emailBlockers() {
@@ -421,8 +465,17 @@ function publicState() {
       blockers: probeBlockers(),
       entryUsd: cfg.probeEntry,
       dailyCapUsd: cfg.probeDailyCap,
-      dailyCapType: "REALIZED_LOSS_ONLY",
+      dailyCapType: "REALIZED_LOSS_PLUS_NEXT_ENTRY_RESERVATION",
       dailyRiskUsedUsd: probeDailyRealizedLossUsd(),
+      dailyRiskCommittedUsd:
+        probeDailyRealizedLossUsd() + probeOpenExposureUsd(),
+      remainingDailyLossCapacityUsd: Math.max(
+        0,
+        cfg.probeDailyCap -
+          probeDailyRealizedLossUsd() -
+          probeOpenExposureUsd(),
+      ),
+      nextEntryWorstCaseLossUsd: cfg.probeEntry,
       openExposureUsd: probeOpenExposureUsd(),
       maxOpenExposureUsd: cfg.probeMaxOpenExposureUsd,
       spentTodayUsd: probeDailySpendUsd(),
@@ -433,6 +486,7 @@ function publicState() {
       maxHoldMinutes: cfg.probeMaxHoldMinutes,
       open: state.probePositions.length,
       fills: state.probeFills.slice(0, 20),
+      performance: probePerformance(),
     },
     paperPromotion: liveShadowStats(),
     liveShadowPromotion: liveShadowStats(),
@@ -1087,12 +1141,68 @@ async function recordProbeSell(p, quantity, action, reason) {
   }
 }
 async function runnerProbeBuy(c) {
-  const o = await order(USDC, c.mint, Math.round(cfg.probeEntry * 1e6)),
-    r = await execute(o);
+  const at = new Date().toISOString(),
+    impact = num(c.sell_price_impact_bps, 9999),
+    reject = (reason, evidence = {}) => {
+      state.probeSeen[c.mint] = at;
+      state.probeFills.unshift({
+        id: `probe-preflight-rejected:${c.mint}:${Date.now()}`,
+        action: "PROBE_PREFLIGHT_REJECTED",
+        reason,
+        at,
+        mint: c.mint,
+        symbol: c.symbol || c.mint.slice(0, 6),
+        evidence,
+        strategy: "SOLANA_MICROCAP_RUNNER_LIVE_PROBE",
+      });
+      return false;
+    };
+  if (!Number.isFinite(impact) || impact > cfg.probeMaxSellImpactBps)
+    return reject("SELL_IMPACT_ABOVE_LIVE_PROBE_MAXIMUM", {
+      sellPriceImpactBps: impact,
+      maximumSellPriceImpactBps: cfg.probeMaxSellImpactBps,
+    });
+  let o, expectedQuantity, partialQuantity, sellPreflight;
+  try {
+    o = await order(USDC, c.mint, Math.round(cfg.probeEntry * 1e6));
+    expectedQuantity = Math.floor(num(o.outAmount || o.outputAmount));
+    if (!expectedQuantity) return reject("BUY_QUOTE_RETURNED_NO_OUTPUT");
+    partialQuantity = Math.max(
+      1,
+      Math.floor(expectedQuantity * cfg.probePartialFraction),
+    );
+    sellPreflight = await order(c.mint, USDC, partialQuantity);
+  } catch (e) {
+    return reject("ROUND_TRIP_PREFLIGHT_ROUTE_UNAVAILABLE", {
+      error: String(e.message || e).slice(0, 250),
+    });
+  }
+  const expectedPartialRecoveryUsd =
+      num(sellPreflight.outAmount || sellPreflight.outputAmount) / 1e6,
+    proportionalCostUsd = cfg.probeEntry * cfg.probePartialFraction,
+    minimumPartialRecoveryUsd =
+      proportionalCostUsd * (1 - cfg.probeRoundTripMaxLossBps / 10000),
+    estimatedRoundTripLossBps = proportionalCostUsd
+      ? Math.max(
+          0,
+          ((proportionalCostUsd - expectedPartialRecoveryUsd) /
+            proportionalCostUsd) *
+            10000,
+        )
+      : 9999;
+  if (
+    !expectedPartialRecoveryUsd ||
+    expectedPartialRecoveryUsd + 1e-9 < minimumPartialRecoveryUsd
+  )
+    return reject("ROUND_TRIP_PREFLIGHT_RECOVERY_BELOW_MINIMUM", {
+      expectedPartialRecoveryUsd,
+      minimumPartialRecoveryUsd,
+      estimatedRoundTripLossBps,
+    });
+  const r = await execute(o);
   if (r.status !== "Success" || num(r.code) !== 0)
     throw Error(`runner probe buy failed: ${r.error || r.code}`);
   const quantity = num(r.totalOutputAmount),
-    at = new Date().toISOString(),
     p = {
       mint: c.mint,
       symbol: c.symbol || c.mint.slice(0, 6),
@@ -1121,6 +1231,11 @@ async function runnerProbeBuy(c) {
         poolAddress: c.pool_address,
         sourceObservedAt: c.source_observed_at,
         sourceUrl: c.source_url,
+        preflightExpectedOutputUnits: expectedQuantity,
+        preflightPartialQuantity: partialQuantity,
+        preflightExpectedPartialRecoveryUsd: expectedPartialRecoveryUsd,
+        preflightMinimumPartialRecoveryUsd: minimumPartialRecoveryUsd,
+        preflightEstimatedRoundTripLossBps: estimatedRoundTripLossBps,
       },
     };
   state.probePositions.push(p);
@@ -1136,13 +1251,13 @@ async function runnerProbeBuy(c) {
     entryEvidence: p.entryEvidence,
     strategy: "SOLANA_MICROCAP_RUNNER_LIVE_PROBE",
   });
-  const partialQuantity = Math.max(
+  const actualPartialQuantity = Math.max(
     1,
     Math.floor(quantity * cfg.probePartialFraction),
   );
   await recordProbeSell(
     p,
-    partialQuantity,
+    actualPartialQuantity,
     "PROBE_PARTIAL_SELL",
     "IMMEDIATE_EXITABILITY_TEST",
   );
@@ -1435,7 +1550,12 @@ function reportV3() {
         `<tr style="background:#fee2e2;color:#7f1d1d"><td>${esc(f.at)}</td><td><b>LIVE RUNNER PROBE</b></td><td>${esc(f.action)}</td><td>${esc(f.symbol || f.mint?.slice(0, 6))}</td><td>${esc(f.reason || "REAL_MONEY_ENTRY")}</td><td>${f.inputUsd == null ? "-" : `${num(f.inputUsd).toFixed(4)}`}</td><td>${f.outputUsd == null ? "-" : `${num(f.outputUsd).toFixed(4)}`}</td><td>${f.realizedPnlUsd == null ? "-" : `${num(f.realizedPnlUsd).toFixed(4)}`}</td><td>${esc(f.id)}</td><td>${esc(f.error || "")}</td></tr>`,
     )
     .join("");
-  const probeSummary = `<div style="margin:16px 0;padding:16px;border:3px solid #dc2626;background:#fef2f2;border-radius:10px"><h3 style="margin-top:0">REAL-MONEY RUNNER LIQUIDITY PROBE</h3><p><b>Amount per probe:</b> ${cfg.probeEntry.toFixed(2)}; <b>daily realized-loss cap:</b> ${cfg.probeDailyCap.toFixed(2)}; <b>realized loss used:</b> ${probeDailyRealizedLossUsd().toFixed(4)}; <b>open exposure:</b> ${probeOpenExposureUsd().toFixed(4)} / $${cfg.probeMaxOpenExposureUsd.toFixed(2)}; <b>gross entries today:</b> ${probeDailySpendUsd().toFixed(2)}; <b>open:</b> ${state.probePositions.length}; <b>quarantined:</b> ${state.probePositions.filter(probeIsQuarantined).length}</p><p>Unsellable positions move to background quarantine after the maximum hold. They continue receiving exit attempts without occupying an active trading slot.</p><p><b>Status:</b> ${esc(probeBlockers().join("; ") || "ARMED AND READY")}</p><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr><th>UTC</th><th>Strategy</th><th>Action</th><th>Token</th><th>Reason</th><th>Input</th><th>Recovered</th><th>P&amp;L</th><th>Transaction signature</th><th>Error</th></tr>${probeRows || '<tr><td colspan="10">No real probe action yet</td></tr>'}</table></div>`;
+  const probePerf = probePerformance();
+  const remainingLossCapacity = Math.max(
+    0,
+    cfg.probeDailyCap - probeDailyRealizedLossUsd() - probeOpenExposureUsd(),
+  );
+  const probeSummary = `<div style="margin:16px 0;padding:16px;border:3px solid #dc2626;background:#fef2f2;border-radius:10px"><h3 style="margin-top:0">REAL-MONEY RUNNER LIQUIDITY PROBE</h3><p><b>Completed round trips:</b> ${probePerf.completedRoundTrips}; <b>wins/losses:</b> ${probePerf.wins}/${probePerf.losses}; <b>realized P&amp;L before network fees:</b> $${probePerf.realizedPnlUsdBeforeNetworkFees.toFixed(6)}; <b>network fees:</b> ${probePerf.networkFeeStatus}; <b>unresolved cost basis:</b> $${probePerf.unresolvedCostBasisUsd.toFixed(6)}.</p><p><b>Amount per probe:</b> $${cfg.probeEntry.toFixed(2)}; <b>daily loss cap:</b> $${cfg.probeDailyCap.toFixed(2)}; <b>realized loss used:</b> $${probeDailyRealizedLossUsd().toFixed(4)}; <b>remaining loss capacity after open exposure:</b> $${remainingLossCapacity.toFixed(4)}; <b>open exposure:</b> $${probeOpenExposureUsd().toFixed(4)} / $${cfg.probeMaxOpenExposureUsd.toFixed(2)}; <b>gross entries:</b> $${probePerf.grossEntriesUsd.toFixed(4)}; <b>USDC recovered:</b> $${probePerf.recoveredUsd.toFixed(4)}; <b>open:</b> ${state.probePositions.length}; <b>quarantined:</b> ${state.probePositions.filter(probeIsQuarantined).length}</p><p>Every new buy requires an executable sell route, no more than ${cfg.probeMaxSellImpactBps.toFixed(0)} bps sell impact, and a buy→partial-sell preflight retaining at least ${(100 - cfg.probeRoundTripMaxLossBps / 100).toFixed(1)}% of proportional cost. The next entry is blocked unless its full $${cfg.probeEntry.toFixed(2)} worst-case loss fits inside the remaining daily cap after unresolved exposure.</p><p><b>Status:</b> ${esc(probeBlockers().join("; ") || "ARMED AND READY")}</p><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr><th>UTC</th><th>Strategy</th><th>Action</th><th>Token</th><th>Reason</th><th>Input</th><th>Recovered</th><th>P&amp;L</th><th>Transaction signature</th><th>Error</th></tr>${probeRows || '<tr><td colspan="10">No real probe action yet</td></tr>'}</table></div>`;
   return reportV2().replace(
     "<h3>Recent actions</h3>",
     summary + probeSummary + "<h3>Recent actions</h3>",
@@ -1718,7 +1838,8 @@ http
           : req.url === "/report.json"
             ? {
                 generatedAt: new Date().toISOString(),
-                paperOnly: true,
+                paperOnly: false,
+                containsRealMoneyProbe: true,
                 emailMode: "TRADE_EVENTS_ONLY",
                 strategyPerformance: p.strategyPerformance,
                 divineV2Performance: strategyVersionStats(
@@ -1741,6 +1862,8 @@ http
                   "SOLANA_MICROCAP_RUNNER_CAPTURE",
                   "RUNNER_CAPTURE_V1",
                 ),
+                runnerLiveProbePerformance: probePerformance(),
+                runnerLiveProbe: p.runnerLiveProbe,
                 discoveryDiagnostics: p.discoveryDiagnostics,
                 microcapWatchlist: (state.microcapWatchlist || []).slice(
                   0,
