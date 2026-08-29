@@ -62,6 +62,7 @@ def validated_snapshots(payload: dict, now: datetime | None = None) -> list[dict
 FIVE_STREAK_STRATEGY = "FOREX_FIVE_STREAK_EXPERIMENT"
 FIVE_STREAK_FILTERED_V3_STRATEGY = "FOREX_FIVE_STREAK_FILTERED_V3"
 FIVE_STREAK_FILTERED_STRATEGY = "FOREX_FIVE_STREAK_FILTERED_V4_RATCHET"
+BRYNE_LIQUIDITY_V5_STRATEGY = "FOREX_BRYNE_LIQUIDITY_RANGE_V5"
 FIVE_STREAK_DISPLAY_NAME = "Bryne and Lot-Bill Strategy"
 
 
@@ -228,6 +229,103 @@ def five_streak_signals(snapshot: dict) -> list[dict]:
     return [proposal]
 
 
+def bryne_liquidity_signals(snapshot: dict) -> list[dict]:
+    """Range/sweep/order-block implementation from Bryne's follow-up lessons.
+
+    H1 establishes the range and structure. The latest completed H1 candle must
+    retest the last opposing candle after a sweep and confirmed structure break.
+    This deliberately avoids predicting a breakout or entering during the sweep.
+    """
+    if snapshot.get("session_liquid") is not True or snapshot.get("tradable") is not True:
+        raise MultiAssetRejected("Bryne V5 requires a live liquid session")
+    if snapshot.get("market_veto") is True:
+        raise MultiAssetRejected("Bryne V5 economic-event veto is active")
+    spread = float(snapshot.get("spread_bps") or 999)
+    if spread > float(os.getenv("FOREX_BRYNE_V5_MAX_SPREAD_BPS", "3")):
+        raise MultiAssetRejected("Bryne V5 executable spread is too wide")
+    candles = list(snapshot.get("bryne_h1_candles") or [])
+    if len(candles) < 28:
+        raise MultiAssetRejected("Bryne V5 needs at least 28 completed H1 candles")
+    history, sweep, breakout, retest = candles[-28:-3], candles[-3], candles[-2], candles[-1]
+    atr = float(snapshot.get("atr_14") or 0)
+    if atr <= 0:
+        raise MultiAssetRejected("Bryne V5 ATR evidence is unavailable")
+    # Bryne explicitly uses the line/body structure for range levels and the
+    # wick beyond that structure as the liquidity sweep.
+    body_high = lambda c: max(float(c["open"]), float(c["close"]))
+    body_low = lambda c: min(float(c["open"]), float(c["close"]))
+    range_high = max(body_high(c) for c in history)
+    range_low = min(body_low(c) for c in history)
+    width = range_high - range_low
+    if width <= 0 or width > float(os.getenv("FOREX_BRYNE_V5_MAX_RANGE_ATR", "6")) * atr:
+        raise MultiAssetRejected("Bryne V5 did not identify a bounded H1 trading range")
+    touch_tolerance = .25 * atr
+    high_touches = sum(body_high(c) >= range_high - touch_tolerance for c in history)
+    low_touches = sum(body_low(c) <= range_low + touch_tolerance for c in history)
+    if min(high_touches, low_touches) < 2:
+        raise MultiAssetRejected("Bryne V5 range lacks two-sided liquidity touches")
+
+    sweep_buffer = .05 * atr
+    bullish_sweep = (float(sweep["low"]) < range_low - sweep_buffer
+               and float(sweep["close"]) > range_low
+               and float(breakout["close"]) > float(sweep["high"]))
+    bearish_sweep = (float(sweep["high"]) > range_high + sweep_buffer
+               and float(sweep["close"]) < range_high
+               and float(breakout["close"]) < float(sweep["low"]))
+    recent = candles[-10:-2]
+    compression_highs = [body_high(c) for c in recent]
+    compression_lows = [body_low(c) for c in recent]
+    compressing = (max(compression_highs[-3:]) < max(compression_highs[:3])
+                   and min(compression_lows[-3:]) > min(compression_lows[:3]))
+    bullish_compression = compressing and float(breakout["close"]) > max(compression_highs)
+    bearish_compression = compressing and float(breakout["close"]) < min(compression_lows)
+    bullish = bullish_sweep or bullish_compression
+    bearish = bearish_sweep or bearish_compression
+    if bullish == bearish:
+        return []
+    side = "BUY" if bullish else "SELL"
+    opposing = [c for c in candles[-10:-1]
+                if (float(c["close"]) < float(c["open"])) == bullish]
+    if not opposing:
+        raise MultiAssetRejected("Bryne V5 found no opposing order-block candle before displacement")
+    order_block = opposing[-1]
+    order_low, order_high = float(order_block["low"]), float(order_block["high"])
+    retest_price = float(retest["close"])
+    retest_touched = float(retest["low"]) <= order_high and float(retest["high"]) >= order_low
+    if not retest_touched or not order_low <= retest_price <= order_high:
+        raise MultiAssetRejected("Bryne V5 is waiting for an H1 order-block retest")
+    range_mid = (range_high + range_low) / 2
+    if (bullish and retest_price > range_mid) or (bearish and retest_price < range_mid):
+        raise MultiAssetRejected("Bryne V5 retest is outside the value half of the range")
+    entry = float(snapshot.get("ask") if bullish else snapshot.get("bid") or retest_price)
+    stop_buffer = .10 * atr
+    invalidation_low = min(float(sweep["low"]), min(compression_lows))
+    invalidation_high = max(float(sweep["high"]), max(compression_highs))
+    stop = invalidation_low - stop_buffer if bullish else invalidation_high + stop_buffer
+    risk = abs(entry - stop)
+    if risk <= 0 or (bullish and stop >= entry) or (bearish and stop <= entry):
+        raise MultiAssetRejected("Bryne V5 sweep stop is invalid for executable entry")
+    target = entry + 2 * risk if bullish else entry - 2 * risk
+    signal_time = str(retest.get("time") or "")
+    key = f"{BRYNE_LIQUIDITY_V5_STRATEGY}:{snapshot['symbol']}:{signal_time}:{side}"
+    return [{"proposal_id": hashlib.sha256(key.encode()).hexdigest(), "expires_at": utcnow(),
+             "symbol": snapshot["symbol"], "side": side, "reference_price": entry,
+             "quantity": 1.0, "stop_price": stop, "target_price": target,
+             "maximum_loss_usd": 0.0, "score": 1.0, "strategy": BRYNE_LIQUIDITY_V5_STRATEGY,
+             "signal_time": signal_time, "model_version": "bryne-liquidity-range-v5-paper",
+             "entry_spread_bps": round(spread, 4),
+             "experiment": {"timeframe": "H1", "setup_type": ("LIQUIDITY_SWEEP_REVERSAL"
+                            if bullish_sweep or bearish_sweep else "COMPRESSION_BREAKOUT_RETEST"),
+                            "range_basis": "CANDLE_BODIES", "range_high": range_high, "range_low": range_low,
+                            "range_mid": range_mid, "sweep_high": float(sweep["high"]),
+                            "sweep_low": float(sweep["low"]), "order_block_low": order_low,
+                            "order_block_high": order_high, "reward_multiple": 2.0},
+             "entry_reason": (f"Bryne V5 {side}: H1 range with {low_touches} low/{high_touches} high touches; "
+                              f"{'liquidity sweep reversal' if bullish_sweep or bearish_sweep else 'compression breakout'}, "
+                              f"structure confirmation and last-opposing-candle order-block retest in value zone; "
+                              f"stop beyond sweep; target=2R; spread={spread:.2f}bps.")}]
+
+
 class Ledger:
     def __init__(self, path: str):
         self.db = sqlite3.connect(path, check_same_thread=False)
@@ -298,14 +396,14 @@ class Ledger:
             self.db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
     def open_count(self) -> int:
-        return int(self.db.execute("SELECT COUNT(*) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'') NOT IN (?,?)", (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY)).fetchone()[0])
+        return int(self.db.execute("SELECT COUNT(*) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'') NOT IN (?,?,?)", (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY)).fetchone()[0])
 
     def open_risk(self) -> float:
-        row = self.db.execute("SELECT COALESCE(SUM(maximum_loss_usd),0) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'') NOT IN (?,?)", (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY)).fetchone()
+        row = self.db.execute("SELECT COALESCE(SUM(maximum_loss_usd),0) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'') NOT IN (?,?,?)", (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY)).fetchone()
         return float(row[0] or 0)
 
     def open_symbols(self) -> list[str]:
-        return [str(row[0]) for row in self.db.execute("SELECT symbol FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'') NOT IN (?,?)", (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY)).fetchall()]
+        return [str(row[0]) for row in self.db.execute("SELECT symbol FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'') NOT IN (?,?,?)", (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY)).fetchall()]
 
     def has_intent(self, intent_id: str) -> bool:
         return self.db.execute("SELECT 1 FROM intents WHERE id=?", (intent_id,)).fetchone() is not None
@@ -823,7 +921,7 @@ def five_streak_email_actions(outcomes: list[dict], closes: list[dict], intents:
         reason = str(item.get("entry_reason") or intent.get("entry_reason") or
                      "Five qualifying closed M5 candles triggered the paper entry.")
         actions.append({
-            "action_id": f"five-streak:v3:open:{item.get('intent_id')}",
+            "action_id": f"bryne:paper:open:{item.get('intent_id')}",
             "strategy_name": FIVE_STREAK_DISPLAY_NAME,
             "email_action": f"PAPER {side}", "action": "New Bryne and Lot-Bill paper position opened",
             "pair": item.get("symbol"), "execution_time": item.get("signal_time"),
@@ -839,11 +937,11 @@ def five_streak_email_actions(outcomes: list[dict], closes: list[dict], intents:
             "trigger": reason, "entry_reason": reason, "signal_trigger": reason,
             "position_impact": "Paper-only experiment; no broker funds or margin were used.",
             "calendar_state": "Paper experiment; market feed calendar evidence retained.",
-            "executor_state": "PAPER ONLY", "risk_summary": "Filtered V4 Ratchet paper risk cap; protected floor or 1.5R target.",
+            "executor_state": "PAPER ONLY", "risk_summary": "Bryne V5 paper risk cap; sweep stop and 2R target.",
             "warnings": ["Bryne and Lot-Bill Strategy is paper-only."],
         })
     for item in closes:
-        if item.get("strategy") not in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY}:
+        if item.get("strategy") not in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY}:
             continue
         intent = by_id.get(str(item.get("intent_id") or ""), {})
         close_price = item.get("fill_price")
@@ -851,7 +949,7 @@ def five_streak_email_actions(outcomes: list[dict], closes: list[dict], intents:
                         else "; the historical close price was not retained")
         exit_reason = f"Paper exit: {item.get('reason')}{price_detail}."
         actions.append({
-            "action_id": f"five-streak:v3:close:{item.get('intent_id')}:{item.get('reason')}",
+            "action_id": f"bryne:paper:close:{item.get('intent_id')}:{item.get('reason')}",
             "strategy_name": FIVE_STREAK_DISPLAY_NAME,
             "email_action": "PAPER CLOSED", "action": "Bryne and Lot-Bill paper position closed",
             "pair": item.get("symbol"), "execution_time": item.get("closed_at") or utcnow(),
@@ -1141,6 +1239,10 @@ class Executor:
             """SELECT * FROM intents WHERE strategy IN (?,?) AND
             (status='PAPER_OPEN' OR (closed_at IS NOT NULL AND closed_at>=datetime('now','-5 hours')))""",
             (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY)).fetchall()]
+        checkpoint_rows.extend(dict(row) for row in self.ledger.db.execute(
+            """SELECT * FROM intents WHERE strategy=? AND
+            (status='PAPER_OPEN' OR (closed_at IS NOT NULL AND closed_at>=datetime('now','-5 hours')))""",
+            (BRYNE_LIQUIDITY_V5_STRATEGY,)).fetchall())
         for position in checkpoint_rows:
             snapshot = marks.get(position["symbol"], {})
             # A long can be sold at bid; a short must be bought back at ask.
@@ -1158,7 +1260,7 @@ class Executor:
             if position.get("status") != "PAPER_OPEN":
                 continue
             side = position["side"]; stop = float(position["stop_price"]); target = float(position["target_price"])
-            current_pnl = five_streak_position_pnl(position, price) if position.get("strategy") in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY} else 0.0
+            current_pnl = five_streak_position_pnl(position, price) if position.get("strategy") in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY} else 0.0
             with self.ledger.db:
                 self.ledger.db.execute("""UPDATE intents SET
                     max_favorable_pnl_usd=MAX(COALESCE(max_favorable_pnl_usd,0),?),
@@ -1178,7 +1280,7 @@ class Executor:
                 reason = f"PROFIT_PROTECTION_{floor_r:.2f}R"
             if reason:
                 direction = 1 if side == "BUY" else -1
-                if position.get("strategy") in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY}:
+                if position.get("strategy") in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY}:
                     pnl = five_streak_position_pnl(position, price)
                 else:
                     pnl = (price - float(position["entry_price"])) * float(position["quantity"]) * direction
@@ -1237,6 +1339,39 @@ class Executor:
                                  "target": proposal["target_price"], "maximum_loss_usd": per_trade_risk})
         return outcomes
 
+    def process_bryne_liquidity_paper(self, snapshots: list[dict], nav: float) -> list[dict]:
+        outcomes = []
+        per_trade_risk = max(.01, nav * min(.0025, max(.0005, float(os.getenv(
+            "FOREX_BRYNE_V5_RISK_PCT", ".0025")))))
+        for snapshot in snapshots:
+            try:
+                signals = bryne_liquidity_signals(snapshot)
+            except Exception as exc:
+                outcomes.append({"symbol": snapshot.get("symbol"), "status": "REJECTED", "reason": str(exc)[:300]})
+                continue
+            if not signals:
+                outcomes.append({"symbol": snapshot.get("symbol"), "status": "NO_SIGNAL",
+                                 "reason": "no confirmed H1 range sweep and structure-break retest"})
+            for proposal in signals:
+                if self.ledger.has_intent(proposal["proposal_id"]):
+                    continue
+                open_same = self.ledger.db.execute(
+                    "SELECT 1 FROM intents WHERE strategy=? AND symbol=? AND status='PAPER_OPEN' LIMIT 1",
+                    (BRYNE_LIQUIDITY_V5_STRATEGY, proposal["symbol"])).fetchone()
+                if open_same:
+                    outcomes.append({"symbol": proposal["symbol"], "status": "OPEN_POSITION_REJECTED",
+                                     "reason": "Bryne V5 already has an open position for this pair"})
+                    continue
+                proposal["maximum_loss_usd"] = per_trade_risk
+                self.ledger.add_intent(proposal, "PAPER_ONLY", "PAPER_OPEN")
+                self.ledger.event("BRYNE_LIQUIDITY_V5_PAPER_FILL", proposal)
+                outcomes.append({"symbol": proposal["symbol"], "side": proposal["side"],
+                                 "status": "PAPER_FILL", "signal_time": proposal["signal_time"],
+                                 "intent_id": proposal["proposal_id"], "entry_reason": proposal["entry_reason"],
+                                 "entry": proposal["reference_price"], "stop": proposal["stop_price"],
+                                 "target": proposal["target_price"], "maximum_loss_usd": per_trade_risk})
+        return outcomes
+
     def scan(self) -> None:
         if not 0 <= self.engine.policy.minimum_score <= 100:
             raise BrokerError(f"FOREX_MIN_SCORE must be between 0 and 100; got {self.engine.policy.minimum_score:g}")
@@ -1245,6 +1380,8 @@ class Executor:
         snapshots = validated_snapshots(payload)
         closes = self.supervise_paper(snapshots)
         five_streak_outcomes = self.process_five_streak_paper(
+            snapshots, float(reconciliation["summary"]["nav"]))
+        bryne_liquidity_outcomes = self.process_bryne_liquidity_paper(
             snapshots, float(reconciliation["summary"]["nav"]))
         outcomes = []
         for snapshot in snapshots:
@@ -1344,31 +1481,30 @@ class Executor:
                   "trade_checkpoints": self.ledger.trade_checkpoints(),
                   "live_trade_checkpoints": self.ledger.live_trade_checkpoints(),
                   "five_streak": {"name": FIVE_STREAK_DISPLAY_NAME, "mode": "PAPER_ONLY",
-                                  "version": "Filtered V4 Ratchet", "timeframe": "M5",
+                                  "version": "Liquidity Range V5", "timeframe": "H1 structure / executable quote entry",
                                   "enabled": five_streak_enabled(),
-                                  "exit_policy": "stop or 1.5R target only; no arbitrary time exit",
-                                  "cost_model": "closed M5 signal; executable bid/ask entry and exit",
-                                  "outcomes": five_streak_outcomes,
-                                  "performance": {**self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY),
+                                  "exit_policy": "stop beyond the liquidity sweep or 2R target; no arbitrary time exit",
+                                  "cost_model": "completed H1 structure; executable bid/ask entry and exit",
+                                  "outcomes": bryne_liquidity_outcomes,
+                                  "performance": {**self.ledger.strategy_stats(BRYNE_LIQUIDITY_V5_STRATEGY),
                                       "unrealized_pnl_usd": round(sum(
                                           five_streak_position_pnl(position, next((float(s.get("price") or 0)
                                               for s in snapshots if s.get("symbol") == position.get("symbol")), 0))
                                           for position in self.ledger.paper_positions()
-                                          if position.get("strategy") == FIVE_STREAK_FILTERED_STRATEGY), 8)},
-                                  "trades": self.ledger.strategy_intents(FIVE_STREAK_FILTERED_STRATEGY),
+                                          if position.get("strategy") == BRYNE_LIQUIDITY_V5_STRATEGY), 8)},
+                                  "trades": self.ledger.strategy_intents(BRYNE_LIQUIDITY_V5_STRATEGY),
                                   "promotion_checkpoint": {
-                                      "scope": "Filtered V4 Ratchet prospective closes only",
-                                      "required_additional_profitable_closes": 2,
-                                      "profitable_closes_observed": self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["wins"],
-                                      "closed_observations": self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["closed"],
-                                      "net_pnl_usd": self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["net_pnl_usd"],
-                                      "eligible_for_live_review": (
-                                          self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["wins"] >= 2
-                                          and self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["closed"] >= 2
-                                          and self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["net_pnl_usd"] > 0
-                                          and (self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY)["expectancy_usd"] or 0) > 0),
+                                      "scope": "Liquidity Range V5 prospective closes only",
+                                      "required_closed_observations": 30,
+                                      "profitable_closes_observed": self.ledger.strategy_stats(BRYNE_LIQUIDITY_V5_STRATEGY)["wins"],
+                                      "closed_observations": self.ledger.strategy_stats(BRYNE_LIQUIDITY_V5_STRATEGY)["closed"],
+                                      "net_pnl_usd": self.ledger.strategy_stats(BRYNE_LIQUIDITY_V5_STRATEGY)["net_pnl_usd"],
+                                      "eligible_for_live_review": False,
                                       "automatic_live_promotion": False,
                                   },
+                                  "v4_ratchet_archived": {"new_entries_enabled": False,
+                                      "performance": self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY),
+                                      "trades": self.ledger.strategy_intents(FIVE_STREAK_FILTERED_STRATEGY)},
                                   "filtered_v3_archived": {"new_entries_enabled": False,
                                       "performance": self.ledger.strategy_stats(FIVE_STREAK_FILTERED_V3_STRATEGY),
                                       "trades": self.ledger.strategy_intents(FIVE_STREAK_FILTERED_V3_STRATEGY)},
@@ -1411,7 +1547,7 @@ class Executor:
             reconciliation["open_trades"], reconciliation["pending_orders"],
             report["risk_configuration"], snapshots, report["intents"], outcomes)
         trade_actions.extend(five_streak_email_actions(
-            five_streak_outcomes, closes, report["intents"], reconciliation["summary"]))
+            bryne_liquidity_outcomes, closes, report["intents"], reconciliation["summary"]))
         # Versioned handoff: include the latest closed paper result on every
         # scan. The emailer's persisted action IDs make this a one-time,
         # restart-safe backfill and prevent repeated historical reports.
@@ -1424,7 +1560,7 @@ class Executor:
                 "fill_price": latest_five_closed.get("close_price"),
                 "reason": latest_five_closed.get("close_reason"),
                 "realized_pnl_usd": latest_five_closed.get("realized_pnl_usd"),
-                "strategy": FIVE_STREAK_FILTERED_STRATEGY,
+                "strategy": BRYNE_LIQUIDITY_V5_STRATEGY,
                 "closed_at": latest_five_closed.get("closed_at"),
             }], report["intents"], reconciliation["summary"]))
         delivery = self.emailer.status()
