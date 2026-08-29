@@ -764,17 +764,10 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
          "runner creator concentration too high"),
     )
     failures.extend(reason for failed, reason in checks if failed)
-    # A live liquidity probe deliberately permits the exit quote to be absent or
-    # above the normal trading threshold. Its purpose is to measure a tiny real
-    # round trip, while every momentum, activity, liquidity and contract-safety
-    # requirement remains mandatory.
-    live_probe_failures = [
-        reason for reason in failures
-        if reason not in {
-            "sell simulation failed",
-            "runner executable sell impact above maximum",
-        }
-    ]
+    # Real-money probes must satisfy the same sellability constraints as paper
+    # entries. A missing route or excessive executable impact is evidence that
+    # the position may not be recoverable, not a condition to test with funds.
+    live_probe_failures = list(failures)
     score = round(clamp(momentum_5m, 0, 100) * .35 +
                   clamp(return_since_seen * 100, 0, 100) * .30 +
                   clamp(pressure * 100, 0, 100) * .20 +
