@@ -11,7 +11,8 @@ from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServe
                                 BrokerError, Executor, broker_client_id, closed_trade_pnl, live_armed, practice_armed, safe_quantity,
                                 FIVE_STREAK_STRATEGY,
                                 five_streak_email_actions, five_streak_profit_floor_r,
-                                five_streak_signals, live_profit_protection_shadow, recoverable_managed_trade,
+                                five_streak_signals, bryne_liquidity_signals,
+                                live_profit_protection_shadow, recoverable_managed_trade,
                                 historical_managed_trade_outcomes,
                                 transaction_managed_intent_id, validated_snapshots)
 
@@ -32,6 +33,44 @@ class Adapter:
 
 
 class ForexExecutorTests(unittest.TestCase):
+    def test_bryne_v5_enters_only_after_sweep_break_and_order_block_retest(self):
+        history = []
+        for index in range(25):
+            opened, closed = ((101, 100) if index % 5 == 0 else
+                              (109, 110) if index % 6 == 0 else (103, 104))
+            history.append({"time": f"h{index}", "open": opened, "high": max(opened, closed) + .1,
+                            "low": min(opened, closed) - .1, "close": closed})
+        candles = history + [
+            {"time":"sweep", "open":102, "high":103, "low":99.5, "close":101},
+            {"time":"break", "open":101, "high":105, "low":100.8, "close":104},
+            {"time":"retest", "open":104, "high":104.2, "low":101.5, "close":102},
+        ]
+        signals = bryne_liquidity_signals({
+            "symbol":"EUR_USD", "session_liquid":True, "tradable":True, "market_veto":False,
+            "spread_bps":1.2, "atr_14":2, "ask":102.01, "bid":101.99,
+            "bryne_h1_candles":candles,
+        })
+        self.assertEqual(1, len(signals))
+        self.assertEqual("BUY", signals[0]["side"])
+        self.assertEqual("FOREX_BRYNE_LIQUIDITY_RANGE_V5", signals[0]["strategy"])
+        self.assertAlmostEqual(2, (signals[0]["target_price"] - signals[0]["reference_price"]) /
+                               (signals[0]["reference_price"] - signals[0]["stop_price"]))
+        self.assertIn("liquidity sweep", signals[0]["entry_reason"])
+
+    def test_bryne_v5_does_not_predict_breakout_before_confirmation(self):
+        candles = []
+        for i in range(28):
+            opened, closed = ((101, 100) if i % 5 == 0 else
+                              (109, 110) if i % 6 == 0 else (103, 104))
+            candles.append({"time":str(i), "open":opened, "high":max(opened, closed) + .1,
+                            "low":min(opened, closed) - .1, "close":closed})
+        signals = bryne_liquidity_signals({
+            "symbol":"EUR_USD", "session_liquid":True, "tradable":True, "market_veto":False,
+            "spread_bps":1.2, "atr_14":2, "ask":104.01, "bid":103.99,
+            "bryne_h1_candles":candles,
+        })
+        self.assertEqual([], signals)
+
     def test_live_checkpoint_retains_executable_audit_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             ledger = Ledger(directory + "/forex.sqlite3")
@@ -380,7 +419,7 @@ class ForexExecutorTests(unittest.TestCase):
         self.assertEqual("PAPER BUY",actions[0]["email_action"])
         self.assertEqual("Bryne and Lot-Bill Strategy",actions[0]["strategy_name"])
         self.assertEqual("PAPER_OPEN",actions[0]["status"])
-        self.assertTrue(actions[0]["action_id"].startswith("five-streak:v3:open:"))
+        self.assertTrue(actions[0]["action_id"].startswith("bryne:paper:open:"))
         self.assertIn("Five consecutive bullish",actions[0]["entry_reason"])
         self.assertIn("paper-only",actions[0]["warnings"][0].lower())
 
