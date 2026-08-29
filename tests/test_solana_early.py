@@ -302,22 +302,26 @@ class SolanaEarlyTests(unittest.TestCase):
         result = score_microcap_launch_candidate(candidate(), self.ledger, MicrocapLaunchPolicy())
         self.assertFalse(result["qualified"])
         source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
-        self.assertIn('candidates.filter(x=>x.qualified===true)', source)
-        self.assertIn('candidates.filter(x=>x.paper_qualified===true)', source)
+        compact = "".join(source.split())
+        self.assertIn('candidates.filter((x)=>x.qualified===true)', compact)
+        self.assertIn('candidates.filter((x)=>x.paper_qualified===true)', compact)
 
     def test_microcap_executor_retains_fast_exit_and_named_reporting(self):
         source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+        compact = "".join(source.split())
         for expected in ("MICROCAP_DOWNTREND", "MICROCAP_PROFIT_PROTECTION",
-                         "MAX_HOLD_20M", 'stop=isMicrocap?.08', 'target=isMicrocap?.20',
+                         "MAX_HOLD_20M", 'stop=isMicrocap?0.08', 'target=isMicrocap?0.2',
                          'strategyName(f.strategy)', "microcapLaunchV2Performance"):
-            self.assertIn(expected, source)
+            self.assertTrue(expected in source or "".join(expected.split()) in compact)
 
     def test_microcap_action_reports_are_named_colored_and_retried(self):
         source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+        compact = "".join(source.split())
         for expected in ("Microcap Launch V2", "ORANGE • Microcap Launch V2",
                          "pendingTradeEvent:true", "state.email.pendingTradeEvent",
-                         "pendingTradeEvent:false"):
-            self.assertIn(expected, source)
+                         "pendingTradeEvent:false", "microcapWatchlist",
+                         "microcapWatchlistSummary", "watchedWallets", "walletEvidence"):
+            self.assertTrue(expected in source or "".join(expected.split()) in compact)
 
     def test_strategy_diagnostics_counts_rejection_reasons(self):
         rows = [

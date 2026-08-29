@@ -32,6 +32,23 @@ class Adapter:
 
 
 class ForexExecutorTests(unittest.TestCase):
+    def test_live_checkpoint_retains_executable_audit_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(directory + "/forex.sqlite3")
+            inserted = ledger.record_live_checkpoint({
+                "trade_id": "37", "instrument": "NZD_USD", "current_price": .59165,
+                "unrealized_pnl_usd": .0973, "current_spread_bps": 10.14,
+                "financing_usd": -.0001, "current_price_observed_at": "2026-08-29T12:00:00Z",
+            }, 15)
+            self.assertTrue(inserted)
+            row = ledger.live_trade_checkpoints()[0]
+            self.assertEqual("37", row["trade_id"])
+            self.assertEqual(15, row["checkpoint_minutes"])
+            self.assertAlmostEqual(.0973, row["pnl_usd"])
+            self.assertFalse(ledger.record_live_checkpoint({
+                "trade_id": "37", "instrument": "NZD_USD", "current_price": .59160,
+            }, 15))
+
     def test_five_streak_profit_floor_ratchets_without_moving_backward(self):
         self.assertEqual(0, five_streak_profit_floor_r(.49))
         self.assertEqual(.20, five_streak_profit_floor_r(.50))
