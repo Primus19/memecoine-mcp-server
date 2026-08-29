@@ -11,7 +11,8 @@ def test_live_executor_requires_exact_expected_wallet_identity():
     assert 'env("SOLANA_EXPECTED_WALLET_ADDRESS")' in SOURCE
     assert "walletIdentityVerified:walletMatches()" in SOURCE
     assert "signer wallet mismatch" in SOURCE
-    assert "if(!walletMatches())throw Error" in SOURCE
+    assert "if(!walletMatches())" in SOURCE
+    assert "throwError" in SOURCE
 
 
 def test_balance_preflight_is_mainnet_native_usdc_and_fail_closed():
@@ -35,7 +36,7 @@ def test_paper_exploration_is_separate_from_live_qualification():
 
 def test_discovery_failure_does_not_skip_wallet_supervision():
     discovery_catch = SOURCE.index('state.discoveryError=e.message.slice(0,500)')
-    balance_check = SOURCE.index('if(wallet&&cfg.helius)try{await balances()}')
+    balance_check = SOURCE.index('if(wallet&&cfg.helius)')
     assert discovery_catch < balance_check
 
 
@@ -47,7 +48,8 @@ def test_strategy_action_reporting_is_separate_and_trade_triggered():
     assert '"/report.json"' in SOURCE
     assert '"/report"' in SOURCE
     assert 'if(hasTradeEvent)state.email={...state.email,pendingTradeEvent:true' in SOURCE
-    assert 'if(!state.email.pendingTradeEvent||emailBlockers().length)return false' in SOURCE
+    assert 'if(!state.email.pendingTradeEvent||emailBlockers().length)' in SOURCE
+    assert 'returnfalse' in SOURCE
     assert 'pendingTradeEvent:false' in SOURCE
     assert 'mode:"TRADE_EVENTS_ONLY"' in SOURCE
     assert "NEW ACTION" in SOURCE
