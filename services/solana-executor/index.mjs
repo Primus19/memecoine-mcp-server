@@ -30,8 +30,8 @@ const cfg = {
     Math.max(0.1, num(env("SOLANA_RUNNER_LIVE_PROBE_USD"), 0.5)),
   ),
   probeDailyCap: Math.min(
-    1,
-    Math.max(0.5, num(env("SOLANA_RUNNER_LIVE_PROBE_DAILY_CAP_USD"), 1)),
+    5,
+    Math.max(5, num(env("SOLANA_RUNNER_LIVE_PROBE_DAILY_CAP_USD"), 5)),
   ),
   probePartialFraction: 0.25,
   probeMaxSellImpactBps: Math.min(

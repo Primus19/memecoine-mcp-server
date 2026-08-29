@@ -436,7 +436,7 @@ class SolanaEarlyTests(unittest.TestCase):
                          "target=isRunner?5.0", "stop=isRunner?0.1",
                          "SOLANA_RUNNER_LIVE_PROBE_ENABLED",
                          "I_ACCEPT_THE_0_50_USD_RUNNER_LIQUIDITY_PROBE",
-                         "probeEntry:Math.min(0.5", "probeDailyCap:Math.min(1",
+                         "probeEntry:Math.min(0.5", "probeDailyCap:Math.min(5",
                          "IMMEDIATE_EXITABILITY_TEST", "PROBE_PARTIAL_SELL",
                          "PROBE_FINAL_SELL", "runnerProbeBuy(candidate)",
                          'x.live_probe_qualified===true',
