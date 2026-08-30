@@ -1280,6 +1280,8 @@ async function runnerProbeBuy(c) {
         hardRiskFailures: c.hard_risk_failures || [],
         conditionalRiskWarnings: c.conditional_risk_warnings || [],
         conditionalEntryApplied: c.conditional_entry_applied === true,
+        exceptionalEntryApplied: c.exceptional_entry_applied === true,
+        exceptionalEntryThresholds: c.exceptional_entry_thresholds || {},
         safetyEvidenceStatus: c.safety_evidence_status,
         poolAddress: c.pool_address,
         sourceObservedAt: c.source_observed_at,
