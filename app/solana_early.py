@@ -118,6 +118,7 @@ class MicrocapLaunchPolicy:
 
     enabled: bool = True
     minimum_volume_24h_usd: float = 100_000.0
+    maximum_market_cap_usd: float = 1_000_000.0
     watch_minimum_volume_24h_usd: float = 5_000.0
     minimum_liquidity_usd: float = 10_000.0
     maximum_age_minutes: float = 30.0
@@ -139,6 +140,10 @@ class MicrocapLaunchPolicy:
             # $100k is a non-overridable evidence floor. The scanner may retain
             # earlier pools, but the paper executor cannot enter them yet.
             minimum_volume_24h_usd=max(100_000.0, float(os.getenv("SOLANA_MICROCAP_MIN_VOLUME_24H_USD", "100000"))),
+            maximum_market_cap_usd=min(
+                1_000_000.0,
+                max(100_000.0, float(os.getenv("SOLANA_MICROCAP_MAX_MARKET_CAP_USD", "1000000"))),
+            ),
             watch_minimum_volume_24h_usd=max(5_000.0, float(os.getenv("SOLANA_MICROCAP_WATCH_MIN_VOLUME_24H_USD", "5000"))),
             minimum_liquidity_usd=max(7_500.0, float(os.getenv("SOLANA_MICROCAP_MIN_LIQUIDITY_USD", "10000"))),
             maximum_age_minutes=min(60.0, max(5.0, float(os.getenv("SOLANA_MICROCAP_MAX_AGE_MINUTES", "30")))),
@@ -151,6 +156,7 @@ class RunnerCapturePolicy:
 
     enabled: bool = True
     minimum_volume_24h_usd: float = 100_000.0
+    maximum_market_cap_usd: float = 1_000_000.0
     minimum_liquidity_usd: float = 10_000.0
     maximum_age_minutes: float = 60.0
     minimum_trades_5m: int = 20
@@ -170,6 +176,10 @@ class RunnerCapturePolicy:
             enabled=os.getenv("SOLANA_RUNNER_CAPTURE_ENABLED", "true").lower() == "true",
             minimum_volume_24h_usd=max(
                 100_000.0, float(os.getenv("SOLANA_RUNNER_MIN_VOLUME_24H_USD", "100000"))
+            ),
+            maximum_market_cap_usd=min(
+                1_000_000.0,
+                max(100_000.0, float(os.getenv("SOLANA_RUNNER_MAX_MARKET_CAP_USD", "1000000"))),
             ),
             minimum_liquidity_usd=max(
                 7_500.0, float(os.getenv("SOLANA_RUNNER_MIN_LIQUIDITY_USD", "10000"))
@@ -646,6 +656,7 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
     """Find sustained early runs while failing closed on safety and sellability."""
     age = _number(candidate.get("token_age_minutes"), 9999)
     volume_24h = _number(candidate.get("volume_24h_usd"), 0)
+    market_cap = _number(candidate.get("market_cap_usd"), 0)
     liquidity = _number(candidate.get("liquidity_usd"), 0)
     trades = int(_number(candidate.get("trades_5m"), 0))
     buyers = int(_number(candidate.get("unique_buyers_5m"), 0))
@@ -669,6 +680,9 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
         (not 1 <= age <= policy.maximum_age_minutes, "microcap token age outside launch window"),
         (volume_24h < policy.minimum_volume_24h_usd,
          f"microcap 24h volume below ${policy.minimum_volume_24h_usd / 1000:.0f}k execution minimum"),
+        (market_cap <= 0, "microcap market cap unavailable"),
+        (market_cap > policy.maximum_market_cap_usd,
+         f"microcap market cap above ${policy.maximum_market_cap_usd / 1_000_000:.1f}m ceiling"),
         (liquidity < policy.minimum_liquidity_usd, "microcap liquidity below minimum"),
         (trades < policy.minimum_trades_5m, "microcap recent trades below minimum"),
         (buyers < policy.minimum_unique_buyers_5m, "microcap unique buyers below minimum"),
@@ -699,6 +713,7 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
         "paper_qualified": not failures, "paper_failures": list(dict.fromkeys(failures)),
         "failures": ["paper-only challenger"], "score": score,
         "token_age_minutes": round(age, 4), "volume_24h_usd": round(volume_24h, 2),
+        "market_cap_usd": round(market_cap, 2),
         "liquidity_usd": round(liquidity, 2), "trades_5m": trades, "unique_buyers_5m": buyers,
         "buyer_acceleration": round(buyer_accel, 4), "volume_acceleration": round(volume_accel, 4),
         "net_buy_pressure": round(pressure, 4), "price_change_5m_pct": round(momentum_5m, 4),
@@ -714,8 +729,9 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
                            volume_24h >= policy.watch_minimum_volume_24h_usd and
                            liquidity >= 7_500 and buyers >= 10 and pressure > 0 and
                            (momentum_5m >= 3 or buyer_accel >= 1.2 or volume_accel >= 1.2)),
-        "entry_reason": (f"Microcap Launch V2 rolling-confirmation entry: {age:.1f}-minute pool; "
-                         f"${volume_24h:,.0f} 24h volume; {momentum_5m:.2f}% five-minute momentum; "
+        "entry_reason": (f"Microcap Launch V3 $1M-cap rolling-confirmation entry: {age:.1f}-minute pool; "
+                         f"${market_cap:,.0f} market cap; ${volume_24h:,.0f} 24h volume; "
+                         f"{momentum_5m:.2f}% five-minute momentum; "
                          f"{pressure:.2f} buy pressure; {buyer_accel:.2f}x buyer and "
                          f"{volume_accel:.2f}x volume acceleration; executable sell impact {impact:.0f} bps."),
     }
@@ -728,6 +744,7 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
     history = ledger.watched_candidate(watch_strategy, str(candidate.get("mint") or ""))
     age = _number(candidate.get("token_age_minutes"), 9999)
     volume_24h = _number(candidate.get("volume_24h_usd"), 0)
+    market_cap = _number(candidate.get("market_cap_usd"), 0)
     liquidity = _number(candidate.get("liquidity_usd"), 0)
     trades = int(_number(candidate.get("trades_5m"), 0))
     buyers = int(_number(candidate.get("unique_buyers_5m"), 0))
@@ -746,6 +763,9 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
         (not 1 <= age <= policy.maximum_age_minutes, "runner token age outside test window"),
         (volume_24h < policy.minimum_volume_24h_usd,
          f"runner 24h volume below ${policy.minimum_volume_24h_usd / 1000:.0f}k minimum"),
+        (market_cap <= 0, "runner market cap unavailable"),
+        (market_cap > policy.maximum_market_cap_usd,
+         f"runner market cap above ${policy.maximum_market_cap_usd / 1_000_000:.1f}m ceiling"),
         (liquidity < policy.minimum_liquidity_usd, "runner liquidity below minimum"),
         (trades < policy.minimum_trades_5m, "runner recent trades below minimum"),
         (buyers < policy.minimum_unique_buyers_5m, "runner unique buyers below minimum"),
@@ -779,6 +799,7 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
         "mint": str(candidate.get("mint") or ""),
         "symbol": str(candidate.get("symbol") or ""),
         "price_usd": _number(candidate.get("price_usd")),
+        "market_cap_usd": round(market_cap, 2),
         "decimals": int(candidate.get("decimals") or 0),
         "strategy": "SOLANA_MICROCAP_RUNNER_CAPTURE",
         "strategy_version": "RUNNER_CAPTURE_V1",
