@@ -286,10 +286,29 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertEqual("MICROCAP_LAUNCH_V2", result["strategy_version"])
         self.assertIn("$125,000 24h volume", result["entry_reason"])
 
-    def test_microcap_launch_accepts_volume_upward_without_small_ceiling(self):
+    def test_microcap_launch_accepts_volume_upward_within_one_million_cap(self):
         result = score_microcap_launch_candidate(candidate(volume_24h_usd=250000), self.ledger,
                                                  MicrocapLaunchPolicy())
         self.assertTrue(result["paper_qualified"])
+
+    def test_microcap_and_runner_enforce_one_million_market_cap_ceiling(self):
+        too_large = candidate(market_cap_usd=1_000_001)
+        micro = score_microcap_launch_candidate(too_large, self.ledger, MicrocapLaunchPolicy())
+        self.assertFalse(micro["paper_qualified"])
+        self.assertIn("microcap market cap above $1.0m ceiling", micro["paper_failures"])
+
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool-cap", price_usd=.001, volume_24h_usd=25000,
+                          observed_at="2026-08-29T12:00:00+00:00")
+        current = candidate(pool="pool-cap", price_usd=.0013, volume_24h_usd=150000,
+                            market_cap_usd=1_000_001, price_change_5m_pct=60,
+                            price_change_15m_pct=75, transaction_buy_pressure=.65,
+                            observed_at="2026-08-29T12:06:00+00:00")
+        self.ledger.upsert_watch_candidate(first, strategy)
+        self.ledger.upsert_watch_candidate(current, strategy)
+        runner = score_runner_capture_candidate(current, self.ledger, RunnerCapturePolicy())
+        self.assertFalse(runner["live_probe_qualified"])
+        self.assertIn("runner market cap above $1.0m ceiling", runner["live_probe_failures"])
 
     def test_microcap_launch_rejects_weak_run_and_low_volume(self):
         result = score_microcap_launch_candidate(
@@ -472,7 +491,8 @@ class SolanaEarlyTests(unittest.TestCase):
         for expected in ("Microcap Launch V2", "ORANGE • Microcap Launch V2",
                          "pendingTradeEvent:true", "state.email.pendingTradeEvent",
                          "pendingTradeEvent:false", "microcapWatchlist",
-                         "microcapWatchlistSummary", "watchedWallets", "walletEvidence"):
+                         "microcapWatchlistSummary", "watchedWallets", "walletEvidence",
+                         "reportableProbeAction", "NO_NEW_TRADE_ACTION"):
             self.assertTrue(expected in source or "".join(expected.split()) in compact)
 
     def test_strategy_diagnostics_counts_rejection_reasons(self):
