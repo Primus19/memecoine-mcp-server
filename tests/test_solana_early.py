@@ -521,6 +521,55 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertFalse(unsellable["live_probe_qualified"])
         self.assertFalse(unsellable["exceptional_entry_applied"])
 
+    def test_runner_allows_lower_momentum_for_large_liquid_coin(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool-liquid", price_usd=.001,
+                          observed_at="2026-08-30T17:30:00+00:00")
+        current = candidate(
+            pool="pool-liquid", price_usd=.00106, market_cap_usd=12_287_340,
+            volume_24h_usd=141_807, liquidity_usd=301_273,
+            token_age_minutes=25, price_change_5m_pct=2.463,
+            price_change_15m_pct=5.556, transaction_buy_pressure=.375,
+            sell_price_impact_bps=73.26,
+            observed_at="2026-08-30T17:36:00+00:00",
+        )
+        self.ledger.upsert_watch_candidate(first, strategy)
+        self.ledger.upsert_watch_candidate(current, strategy)
+
+        result = score_runner_capture_candidate(current, self.ledger,
+                                                RunnerCapturePolicy())
+
+        self.assertTrue(result["live_probe_qualified"])
+        self.assertTrue(result["liquid_momentum_entry_applied"])
+        self.assertEqual("LIQUID_MOMENTUM", result["risk_tier"])
+        self.assertNotIn("runner has not gained 20% since first observation",
+                         result["live_probe_failures"])
+
+    def test_liquid_momentum_keeps_exitability_and_trend_hard(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool-liquid-risk", price_usd=.001,
+                          observed_at="2026-08-30T17:30:00+00:00")
+        self.ledger.upsert_watch_candidate(first, strategy)
+        base = candidate(
+            pool="pool-liquid-risk", price_usd=.00106,
+            market_cap_usd=8_000_000, volume_24h_usd=200_000,
+            liquidity_usd=250_000, token_age_minutes=25,
+            price_change_5m_pct=2.5, price_change_15m_pct=5,
+            transaction_buy_pressure=.4, sell_price_impact_bps=75,
+            observed_at="2026-08-30T17:36:00+00:00",
+        )
+        unsellable = score_runner_capture_candidate(
+            dict(base, sell_simulation_ok=False, sell_price_impact_bps=9999),
+            self.ledger, RunnerCapturePolicy())
+        self.assertFalse(unsellable["live_probe_qualified"])
+        self.assertFalse(unsellable["liquid_momentum_entry_applied"])
+
+        weak = score_runner_capture_candidate(
+            dict(base, price_change_15m_pct=1), self.ledger,
+            RunnerCapturePolicy())
+        self.assertFalse(weak["live_probe_qualified"])
+        self.assertFalse(weak["liquid_momentum_entry_applied"])
+
     def test_microcap_launch_keeps_sellability_and_safety_mandatory(self):
         result = score_microcap_launch_candidate(
             candidate(sell_simulation_ok=False, safety_evidence_status="UNAVAILABLE"),

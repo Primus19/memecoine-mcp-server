@@ -178,6 +178,15 @@ class RunnerCapturePolicy:
     exceptional_minimum_net_buy_pressure: float = 0.05
     exceptional_maximum_retracement: float = 0.05
     exceptional_maximum_sell_impact_bps: float = 100.0
+    liquid_minimum_market_cap_usd: float = 5_000_000.0
+    liquid_minimum_volume_24h_usd: float = 100_000.0
+    liquid_minimum_liquidity_usd: float = 200_000.0
+    liquid_minimum_price_change_5m_pct: float = 2.0
+    liquid_maximum_price_change_5m_pct: float = 8.0
+    liquid_minimum_price_change_15m_pct: float = 4.0
+    liquid_minimum_net_buy_pressure: float = 0.30
+    liquid_maximum_retracement: float = 0.05
+    liquid_maximum_sell_impact_bps: float = 100.0
 
     @classmethod
     def from_env(cls) -> "RunnerCapturePolicy":
@@ -834,10 +843,41 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
         hard_failures = exceptional_remaining_failures
         conditional_failures = []
 
+    # Established, deeply liquid coins do not need microcap-style explosive
+    # acceleration to offer a short executable move. Admit a separate capped
+    # probe only when capitalization, volume, liquidity, multi-horizon
+    # momentum, buy pressure and exit quality all agree. This tier may waive
+    # only the 20% retained-run requirement and the preferred explosive 5m
+    # threshold; safety, route, activity, age and retracement remain hard.
+    liquid_metrics = (
+        market_cap >= policy.liquid_minimum_market_cap_usd and
+        volume_24h >= policy.liquid_minimum_volume_24h_usd and
+        liquidity >= policy.liquid_minimum_liquidity_usd and
+        policy.liquid_minimum_price_change_5m_pct <= momentum_5m <=
+        policy.liquid_maximum_price_change_5m_pct and
+        momentum_15m >= policy.liquid_minimum_price_change_15m_pct and
+        pressure >= policy.liquid_minimum_net_buy_pressure and
+        retracement <= policy.liquid_maximum_retracement and
+        impact <= policy.liquid_maximum_sell_impact_bps
+    )
+    liquid_waivers = {
+        "runner has not gained 20% since first observation",
+        "runner five-minute momentum below conditional minimum",
+    }
+    liquid_remaining_failures = [
+        reason for reason in hard_failures if reason not in liquid_waivers
+    ]
+    liquid_entry = (not exceptional_entry and liquid_metrics and
+                    not liquid_remaining_failures)
+    if liquid_entry:
+        hard_failures = liquid_remaining_failures
+        conditional_failures = []
+
     # A timing shortfall is not equivalent to an execution or safety failure.
     # If it is the only warning, admit a tightly capped real-money probe. The
     # executor still requires a fresh full-size round-trip quote before buying.
-    conditional_entry = (not exceptional_entry and not hard_failures and
+    conditional_entry = (not exceptional_entry and not liquid_entry and
+                         not hard_failures and
                          bool(conditional_failures))
     failures = hard_failures + ([] if conditional_entry else conditional_failures)
     # Real-money probes must satisfy the same sellability constraints as paper
@@ -866,12 +906,25 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
         "live_probe_qualified": not live_probe_failures,
         "live_probe_failures": list(dict.fromkeys(live_probe_failures)),
         "risk_tier": ("EXCEPTIONAL_RUNNER" if exceptional_entry else
+                      "LIQUID_MOMENTUM" if liquid_entry else
                       "CONDITIONAL_LOW_RISK" if conditional_entry else
                       "STANDARD" if not live_probe_failures else "BLOCKED"),
         "hard_risk_failures": list(dict.fromkeys(hard_failures)),
         "conditional_risk_warnings": list(dict.fromkeys(conditional_failures)),
         "conditional_entry_applied": conditional_entry,
         "exceptional_entry_applied": exceptional_entry,
+        "liquid_momentum_entry_applied": liquid_entry,
+        "liquid_momentum_thresholds": {
+            "minimum_market_cap_usd": policy.liquid_minimum_market_cap_usd,
+            "minimum_volume_24h_usd": policy.liquid_minimum_volume_24h_usd,
+            "minimum_liquidity_usd": policy.liquid_minimum_liquidity_usd,
+            "minimum_price_change_5m_pct": policy.liquid_minimum_price_change_5m_pct,
+            "maximum_price_change_5m_pct": policy.liquid_maximum_price_change_5m_pct,
+            "minimum_price_change_15m_pct": policy.liquid_minimum_price_change_15m_pct,
+            "minimum_net_buy_pressure": policy.liquid_minimum_net_buy_pressure,
+            "maximum_retracement": policy.liquid_maximum_retracement,
+            "maximum_sell_impact_bps": policy.liquid_maximum_sell_impact_bps,
+        },
         "exceptional_entry_thresholds": {
             "minimum_market_cap_usd": policy.exceptional_minimum_market_cap_usd,
             "minimum_volume_24h_usd": policy.exceptional_minimum_volume_24h_usd,
@@ -1392,6 +1445,21 @@ def main() -> None:
                                      runner_policy.minimum_return_since_seen,
                                  "runner_minimum_market_cap_usd":
                                      runner_policy.minimum_market_cap_usd,
+                                 "liquid_momentum_enabled": True,
+                                 "liquid_momentum_minimum_market_cap_usd":
+                                     runner_policy.liquid_minimum_market_cap_usd,
+                                 "liquid_momentum_minimum_volume_24h_usd":
+                                     runner_policy.liquid_minimum_volume_24h_usd,
+                                 "liquid_momentum_minimum_liquidity_usd":
+                                     runner_policy.liquid_minimum_liquidity_usd,
+                                 "liquid_momentum_5m_range_pct": [
+                                     runner_policy.liquid_minimum_price_change_5m_pct,
+                                     runner_policy.liquid_maximum_price_change_5m_pct,
+                                 ],
+                                 "liquid_momentum_minimum_15m_pct":
+                                     runner_policy.liquid_minimum_price_change_15m_pct,
+                                 "liquid_momentum_maximum_sell_impact_bps":
+                                     runner_policy.liquid_maximum_sell_impact_bps,
                                  "checkpoints_minutes": [5, 15, 30, 60],
                              },
                              watched_wallets=[value.strip() for value in

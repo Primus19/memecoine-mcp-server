@@ -39,6 +39,9 @@ const cfg = {
   // profit and abandon a deteriorating round trip quickly.
   probeProfitExitPct: 0.05,
   probeStopLossPct: 0.08,
+  liquidMomentumProfitExitPct: 0.03,
+  liquidMomentumStopLossPct: 0.02,
+  liquidMomentumMaxHoldMinutes: 15,
   probePostBuyRecoveryFloorPct: 0.97,
   probeMaxSellImpactBps: Math.min(
     150,
@@ -490,6 +493,12 @@ function publicState() {
       maxQuarantinedPositions: cfg.probeMaxQuarantined,
       quarantined: state.probePositions.filter(probeIsQuarantined).length,
       maxHoldMinutes: cfg.probeMaxHoldMinutes,
+      liquidMomentum: {
+        enabled: true,
+        profitExitPct: cfg.liquidMomentumProfitExitPct,
+        stopLossPct: cfg.liquidMomentumStopLossPct,
+        maxHoldMinutes: cfg.liquidMomentumMaxHoldMinutes,
+      },
       open: state.probePositions.length,
       fills: state.probeFills.slice(0, 20),
       performance: probePerformance(),
@@ -1282,6 +1291,9 @@ async function runnerProbeBuy(c) {
         conditionalEntryApplied: c.conditional_entry_applied === true,
         exceptionalEntryApplied: c.exceptional_entry_applied === true,
         exceptionalEntryThresholds: c.exceptional_entry_thresholds || {},
+        liquidMomentumEntryApplied:
+          c.liquid_momentum_entry_applied === true,
+        liquidMomentumThresholds: c.liquid_momentum_thresholds || {},
         safetyEvidenceStatus: c.safety_evidence_status,
         poolAddress: c.pool_address,
         sourceObservedAt: c.source_observed_at,
@@ -1353,21 +1365,37 @@ async function superviseRunnerProbes() {
       p.highTotalUsd = Math.max(num(p.highTotalUsd, p.entryUsd), total);
       const ret = total / p.entryUsd - 1,
         retracement = p.highTotalUsd > 0 ? 1 - total / p.highTotalUsd : 0,
+        liquidMomentum = p.entryEvidence?.riskTier === "LIQUID_MOMENTUM",
+        profitExitPct = liquidMomentum
+          ? cfg.liquidMomentumProfitExitPct
+          : cfg.probeProfitExitPct,
+        stopLossPct = liquidMomentum
+          ? cfg.liquidMomentumStopLossPct
+          : cfg.probeStopLossPct,
+        maxHoldMinutes = liquidMomentum
+          ? cfg.liquidMomentumMaxHoldMinutes
+          : cfg.probeMaxHoldMinutes,
         reason =
           num(p.sellFailures) >= 2
             ? "PROBE_EXIT_ROUTE_RECOVERED"
-            : ret <= -cfg.probeStopLossPct
-            ? "PROBE_STOP_LOSS"
-            : ret >= cfg.probeProfitExitPct
-              ? "PROBE_TAKE_PROFIT_5PCT"
+            : ret <= -stopLossPct
+            ? liquidMomentum
+              ? "LIQUID_MOMENTUM_STOP_LOSS_2PCT"
+              : "PROBE_STOP_LOSS"
+            : ret >= profitExitPct
+              ? liquidMomentum
+                ? "LIQUID_MOMENTUM_TAKE_PROFIT_3PCT"
+                : "PROBE_TAKE_PROFIT_5PCT"
               : p.highTotalUsd >= p.entryUsd * 1.03 &&
                   total <= p.entryUsd * 1.005
                 ? "PROBE_BREAKEVEN_PROTECTION"
                 : p.highTotalUsd >= p.entryUsd * 1.08 && retracement >= 0.05
                 ? "PROBE_TRAILING_ROLLOVER"
                 : Date.now() - Date.parse(p.openedAt) >=
-                    cfg.probeMaxHoldMinutes * 60000
-                  ? "PROBE_MAX_HOLD_5M"
+                    maxHoldMinutes * 60000
+                  ? liquidMomentum
+                    ? "LIQUID_MOMENTUM_MAX_HOLD_15M"
+                    : "PROBE_MAX_HOLD_5M"
                   : "";
       if (reason)
         changed = (await liquidateProbe(p, reason)) || changed;
