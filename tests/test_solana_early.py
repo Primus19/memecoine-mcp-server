@@ -27,7 +27,7 @@ def candidate(**changes):
         "non_transferable": False, "creator_selling": False, "sell_simulation_ok": True,
         "top10_holder_fraction": .20, "creator_fraction": .02,
         "social_velocity_ratio": 3, "creator_history_score": 3, "buyer_wallets": [],
-        "market_cap_usd": 5000, "trades_5m": 120, "volume_24h_usd": 125000,
+        "market_cap_usd": 1_250_000, "trades_5m": 120, "volume_24h_usd": 125000,
         "safety_evidence_status": "VERIFIED", "price_change_5m_pct": 10,
         "price_change_15m_pct": 15,
     }
@@ -230,7 +230,8 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertIn('timeout=5.0', source)
 
     def test_pumpfun_ev_is_separate_and_paper_only(self):
-        result = score_pumpfun_ev_candidate(candidate(), self.ledger, self.policy, PumpfunEvPolicy())
+        result = score_pumpfun_ev_candidate(candidate(market_cap_usd=5000), self.ledger,
+                                            self.policy, PumpfunEvPolicy())
         self.assertEqual("SOLANA_PUMPFUN_EV_EXPERIMENT", result["strategy"])
         self.assertFalse(result["live_eligible"])
         self.assertFalse(result["qualified"])
@@ -286,29 +287,29 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertEqual("MICROCAP_LAUNCH_V2", result["strategy_version"])
         self.assertIn("$125,000 24h volume", result["entry_reason"])
 
-    def test_microcap_launch_accepts_volume_upward_within_one_million_cap(self):
+    def test_microcap_launch_accepts_volume_upward_above_one_million_cap(self):
         result = score_microcap_launch_candidate(candidate(volume_24h_usd=250000), self.ledger,
                                                  MicrocapLaunchPolicy())
         self.assertTrue(result["paper_qualified"])
 
-    def test_microcap_and_runner_enforce_one_million_market_cap_ceiling(self):
-        too_large = candidate(market_cap_usd=1_000_001)
-        micro = score_microcap_launch_candidate(too_large, self.ledger, MicrocapLaunchPolicy())
+    def test_microcap_and_runner_enforce_one_million_market_cap_minimum(self):
+        too_small = candidate(market_cap_usd=999_999)
+        micro = score_microcap_launch_candidate(too_small, self.ledger, MicrocapLaunchPolicy())
         self.assertFalse(micro["paper_qualified"])
-        self.assertIn("microcap market cap above $1.0m ceiling", micro["paper_failures"])
+        self.assertIn("microcap market cap below $1.0m minimum", micro["paper_failures"])
 
         strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
         first = candidate(pool="pool-cap", price_usd=.001, volume_24h_usd=25000,
                           observed_at="2026-08-29T12:00:00+00:00")
         current = candidate(pool="pool-cap", price_usd=.0013, volume_24h_usd=150000,
-                            market_cap_usd=1_000_001, price_change_5m_pct=60,
+                            market_cap_usd=999_999, price_change_5m_pct=60,
                             price_change_15m_pct=75, transaction_buy_pressure=.65,
                             observed_at="2026-08-29T12:06:00+00:00")
         self.ledger.upsert_watch_candidate(first, strategy)
         self.ledger.upsert_watch_candidate(current, strategy)
         runner = score_runner_capture_candidate(current, self.ledger, RunnerCapturePolicy())
         self.assertFalse(runner["live_probe_qualified"])
-        self.assertIn("runner market cap above $1.0m ceiling", runner["live_probe_failures"])
+        self.assertIn("runner market cap below $1.0m minimum", runner["live_probe_failures"])
 
     def test_microcap_launch_rejects_weak_run_and_low_volume(self):
         result = score_microcap_launch_candidate(
