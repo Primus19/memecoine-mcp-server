@@ -421,6 +421,57 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertFalse(unsafe["live_probe_qualified"])
         self.assertIn("mint_authority_active", unsafe["live_probe_failures"])
 
+    def test_runner_allows_only_low_risk_momentum_shortfall(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool-anthropic", price_usd=.001,
+                          observed_at="2026-08-30T14:20:00+00:00")
+        current = candidate(
+            pool="pool-anthropic", price_usd=.00135, market_cap_usd=1_520_497,
+            volume_24h_usd=5_646_537, liquidity_usd=354_217,
+            token_age_minutes=20, price_change_5m_pct=8.599,
+            price_change_15m_pct=20.818, transaction_buy_pressure=.55,
+            sell_price_impact_bps=58.45,
+            observed_at="2026-08-30T14:52:00+00:00",
+        )
+        self.ledger.upsert_watch_candidate(first, strategy)
+        self.ledger.upsert_watch_candidate(current, strategy)
+
+        result = score_runner_capture_candidate(current, self.ledger,
+                                                RunnerCapturePolicy())
+
+        self.assertTrue(result["live_probe_qualified"])
+        self.assertTrue(result["paper_qualified"])
+        self.assertTrue(result["conditional_entry_applied"])
+        self.assertEqual("CONDITIONAL_LOW_RISK", result["risk_tier"])
+        self.assertEqual([], result["hard_risk_failures"])
+        self.assertIn("runner five-minute momentum below preferred explosive range",
+                      result["conditional_risk_warnings"])
+
+    def test_runner_does_not_override_hard_or_very_weak_momentum_failures(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool-risk", price_usd=.001,
+                          observed_at="2026-08-30T14:20:00+00:00")
+        self.ledger.upsert_watch_candidate(first, strategy)
+        weak = candidate(
+            pool="pool-risk", price_usd=.00135, market_cap_usd=1_520_497,
+            volume_24h_usd=5_646_537, liquidity_usd=354_217,
+            token_age_minutes=20, price_change_5m_pct=3,
+            price_change_15m_pct=20, sell_price_impact_bps=58,
+            observed_at="2026-08-30T14:52:00+00:00",
+        )
+        weak_result = score_runner_capture_candidate(weak, self.ledger,
+                                                     RunnerCapturePolicy())
+        self.assertFalse(weak_result["live_probe_qualified"])
+        self.assertIn("runner five-minute momentum below conditional minimum",
+                      weak_result["hard_risk_failures"])
+
+        unsellable = score_runner_capture_candidate(
+            dict(weak, price_change_5m_pct=8, sell_simulation_ok=False,
+                 sell_price_impact_bps=9999),
+            self.ledger, RunnerCapturePolicy())
+        self.assertFalse(unsellable["live_probe_qualified"])
+        self.assertIn("sell simulation failed", unsellable["hard_risk_failures"])
+
     def test_microcap_launch_keeps_sellability_and_safety_mandatory(self):
         result = score_microcap_launch_candidate(
             candidate(sell_simulation_ok=False, safety_evidence_status="UNAVAILABLE"),
