@@ -163,6 +163,7 @@ class RunnerCapturePolicy:
     minimum_unique_buyers_5m: int = 12
     minimum_net_buy_pressure: float = 0.15
     minimum_price_change_5m_pct: float = 15.0
+    conditional_minimum_price_change_5m_pct: float = 5.0
     maximum_price_change_5m_pct: float = 200.0
     minimum_return_since_seen: float = 0.20
     maximum_retracement_from_high: float = 0.10
@@ -186,6 +187,13 @@ class RunnerCapturePolicy:
             ),
             maximum_age_minutes=min(
                 90.0, max(10.0, float(os.getenv("SOLANA_RUNNER_MAX_AGE_MINUTES", "60")))
+            ),
+            conditional_minimum_price_change_5m_pct=max(
+                0.0,
+                min(
+                    15.0,
+                    float(os.getenv("SOLANA_RUNNER_CONDITIONAL_MIN_5M_PCT", "5")),
+                ),
             ),
         )
 
@@ -757,6 +765,8 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
     top10 = candidate.get("top10_holder_fraction")
     creator = candidate.get("creator_fraction")
     failures = contract_safety_failures(candidate)
+    hard_failures = list(failures)
+    conditional_failures: list[str] = []
     checks = (
         (not policy.enabled, "runner capture strategy disabled"),
         (history is None, "runner has no retained first-seen history"),
@@ -770,8 +780,6 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
         (trades < policy.minimum_trades_5m, "runner recent trades below minimum"),
         (buyers < policy.minimum_unique_buyers_5m, "runner unique buyers below minimum"),
         (pressure < policy.minimum_net_buy_pressure, "runner net buy pressure below minimum"),
-        (not policy.minimum_price_change_5m_pct <= momentum_5m <= policy.maximum_price_change_5m_pct,
-         "runner five-minute momentum outside explosive range"),
         (momentum_15m <= 0, "runner fifteen-minute momentum is not positive"),
         (return_since_seen < policy.minimum_return_since_seen,
          "runner has not gained 20% since first observation"),
@@ -783,7 +791,19 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
         (creator is not None and _number(creator) > policy.maximum_creator_fraction,
          "runner creator concentration too high"),
     )
-    failures.extend(reason for failed, reason in checks if failed)
+    hard_failures.extend(reason for failed, reason in checks if failed)
+    if momentum_5m > policy.maximum_price_change_5m_pct:
+        hard_failures.append("runner five-minute momentum above chase-risk maximum")
+    elif momentum_5m < policy.conditional_minimum_price_change_5m_pct:
+        hard_failures.append("runner five-minute momentum below conditional minimum")
+    elif momentum_5m < policy.minimum_price_change_5m_pct:
+        conditional_failures.append("runner five-minute momentum below preferred explosive range")
+
+    # A timing shortfall is not equivalent to an execution or safety failure.
+    # If it is the only warning, admit a tightly capped real-money probe. The
+    # executor still requires a fresh full-size round-trip quote before buying.
+    conditional_entry = not hard_failures and bool(conditional_failures)
+    failures = hard_failures + ([] if conditional_entry else conditional_failures)
     # Real-money probes must satisfy the same sellability constraints as paper
     # entries. A missing route or excessive executable impact is evidence that
     # the position may not be recoverable, not a condition to test with funds.
@@ -809,6 +829,11 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
         "live_eligible": False,
         "live_probe_qualified": not live_probe_failures,
         "live_probe_failures": list(dict.fromkeys(live_probe_failures)),
+        "risk_tier": ("CONDITIONAL_LOW_RISK" if conditional_entry else
+                      "STANDARD" if not live_probe_failures else "BLOCKED"),
+        "hard_risk_failures": list(dict.fromkeys(hard_failures)),
+        "conditional_risk_warnings": list(dict.fromkeys(conditional_failures)),
+        "conditional_entry_applied": conditional_entry,
         "paper_qualified": not failures,
         "paper_failures": list(dict.fromkeys(failures)),
         "failures": ["normal live trading disabled; separately capped liquidity probe only"],
