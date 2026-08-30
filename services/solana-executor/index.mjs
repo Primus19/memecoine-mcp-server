@@ -1266,6 +1266,7 @@ async function runnerProbeBuy(c) {
       entryEvidence: {
         score: c.score,
         volume24hUsd: c.volume_24h_usd,
+        marketCapUsd: c.market_cap_usd,
         liquidityUsd: c.liquidity_usd,
         trades5m: c.trades_5m,
         uniqueBuyers5m: c.unique_buyers_5m,
@@ -1667,6 +1668,13 @@ function runnerProbeEmailReport() {
       .join("");
   return `<div style="font-family:Arial,sans-serif;color:#172033;max-width:760px;margin:auto"><div style="background:#0f3d56;color:white;padding:20px;border-radius:14px 14px 0 0"><span style="background:${newest?.action === "PROBE_SELL_FAILED" ? "#dc2626" : "#f97316"};color:white;border-radius:999px;padding:5px 10px;font-weight:800">${newest?.action === "PROBE_SELL_FAILED" ? "EXECUTION ALERT" : "NEW ACTION"}</span><h2 style="margin:12px 0 4px">Runner Probe — ${esc(newest?.symbol || "Unknown token")}</h2><div>${esc(actionLabel)}</div></div><div style="border:1px solid #cbd5e1;padding:18px;border-radius:0 0 14px 14px"><div style="background:#fff7ed;border-left:5px solid #f97316;padding:12px;margin-bottom:14px"><b>Why this report was sent</b><br>${esc(reasonText)}</div><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%;background:#f8fafc"><tr><td><b>Action amount</b><br>${esc(actionAmount)}</td><td><b>Position status</b><br>${esc(status)}</td></tr><tr><td><b>Completed result</b><br>${esc(result)}</td><td><b>Risk controls</b><br>Realized loss today: $${probeDailyRealizedLossUsd().toFixed(6)} / $${cfg.probeDailyCap.toFixed(2)}<br>Open exposure: $${probeOpenExposureUsd().toFixed(6)} / $${cfg.probeMaxOpenExposureUsd.toFixed(2)}</td></tr></table>${newest?.error ? `<div style="margin-top:12px;padding:10px;background:#fee2e2;color:#991b1b"><b>Execution problem:</b> No executable Jupiter sell route is currently available. The position is quarantined after the maximum hold and remains under background exit supervision without occupying the active trading lane.</div>` : ""}<p><b>Service totals:</b> ${buys.length} buys; ${successfulSells.length} successful sales; ${completed.length} completed round trips; ${state.probePositions.length} open position${state.probePositions.length === 1 ? "" : "s"}; ${state.probePositions.filter(probeIsQuarantined).length} quarantined. Gross entries: $${grossEntries.toFixed(6)}. USDC recovered: $${recovered.toFixed(6)}. Network fees are not included unless explicitly recorded.</p><h3>Successful actions</h3><table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>UTC</th><th>Token</th><th>Action</th><th>Spent</th><th>Recovered</th></tr>${recent || '<tr><td colspan="5">No successful action recorded</td></tr>'}</table><p style="color:#64748b;font-size:12px">Every failed retry remains in the audit ledger. After the first, fifth and tenth failures, reminder emails are limited to once per hour.</p></div></div>`;
 }
+const reportableProbeAction = (f) =>
+  [
+    "PROBE_BUY",
+    "PROBE_PARTIAL_SELL",
+    "PROBE_PROFIT_PARTIAL_SELL",
+    "PROBE_FINAL_SELL",
+  ].includes(f?.action);
 async function email(hasTradeEvent = false) {
   if (hasTradeEvent)
     state.email = {
@@ -1675,6 +1683,25 @@ async function email(hasTradeEvent = false) {
       pendingSince: state.email.pendingSince || new Date().toISOString(),
     };
   if (!state.email.pendingTradeEvent || emailBlockers().length) return false;
+  const lastSentAt = Date.parse(state.email.lastSentAt || 0),
+    newPaperActions = state.paperFills.filter(
+      (f) => Date.parse(f.at) > lastSentAt && ["BUY", "SELL"].includes(f.action),
+    ),
+    newProbeActions = state.probeFills.filter(
+      (f) => Date.parse(f.at) > lastSentAt && reportableProbeAction(f),
+    );
+  // Preflight rejections and failed quote retries remain in the audit ledger,
+  // but they are not trades and must not generate or inflate trade emails.
+  if (!newPaperActions.length && !newProbeActions.length) {
+    state.email = {
+      ...state.email,
+      pendingTradeEvent: false,
+      pendingSince: "",
+      lastAttemptAt: new Date().toISOString(),
+      lastAttemptStatus: "NO_NEW_TRADE_ACTION",
+    };
+    return false;
+  }
   const body = new URLSearchParams({
       client_id: cfg.client,
       client_secret: cfg.clientSecret,
@@ -1687,16 +1714,8 @@ async function email(hasTradeEvent = false) {
       body,
     });
   const shadow = liveShadowStats(),
-    newCount =
-      state.paperFills.filter(
-        (f) => Date.parse(f.at) > Date.parse(state.email.lastSentAt || 0),
-      ).length +
-      state.probeFills.filter(
-        (f) => Date.parse(f.at) > Date.parse(state.email.lastSentAt || 0),
-      ).length,
-    probeNew = state.probeFills.some(
-      (f) => Date.parse(f.at) > Date.parse(state.email.lastSentAt || 0),
-    ),
+    newCount = newPaperActions.length + newProbeActions.length,
+    probeNew = newProbeActions.length > 0,
     subject = `[TRADE] Solana ${probeNew ? "LIVE PROBE" : "NEW"} ${newCount} action${newCount === 1 ? "" : "s"} | strict ${shadow.closed} closed | ${shadow.costStressedPnlUsd.toFixed(2)} P&L`,
     mime = [
       `From: ${cfg.from}`,
