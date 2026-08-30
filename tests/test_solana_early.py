@@ -472,6 +472,55 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertFalse(unsellable["live_probe_qualified"])
         self.assertIn("sell simulation failed", unsellable["hard_risk_failures"])
 
+    def test_runner_allows_hshare_profile_as_exceptional_probe(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool-hshare", price_usd=.001,
+                          observed_at="2026-08-30T15:37:30+00:00")
+        current = candidate(
+            pool="pool-hshare", price_usd=.002660481, market_cap_usd=290_562.40,
+            volume_24h_usd=937_513.37, liquidity_usd=37_687.58,
+            token_age_minutes=31.5, price_change_5m_pct=5.413,
+            price_change_15m_pct=42.241, transaction_buy_pressure=.0826,
+            sell_price_impact_bps=81.15,
+            observed_at="2026-08-30T16:07:06+00:00",
+        )
+        self.ledger.upsert_watch_candidate(first, strategy)
+        self.ledger.upsert_watch_candidate(current, strategy)
+
+        result = score_runner_capture_candidate(current, self.ledger,
+                                                RunnerCapturePolicy())
+
+        self.assertTrue(result["live_probe_qualified"])
+        self.assertTrue(result["paper_qualified"])
+        self.assertTrue(result["exceptional_entry_applied"])
+        self.assertEqual("EXCEPTIONAL_RUNNER", result["risk_tier"])
+        self.assertEqual([], result["hard_risk_failures"])
+
+    def test_exceptional_runner_never_waives_sellability_or_safety(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool-exception", price_usd=.001,
+                          observed_at="2026-08-30T15:37:30+00:00")
+        self.ledger.upsert_watch_candidate(first, strategy)
+        base = candidate(
+            pool="pool-exception", price_usd=.002, market_cap_usd=300_000,
+            volume_24h_usd=1_000_000, liquidity_usd=40_000,
+            token_age_minutes=30, price_change_5m_pct=8,
+            price_change_15m_pct=40, transaction_buy_pressure=.08,
+            sell_price_impact_bps=80,
+            observed_at="2026-08-30T16:07:06+00:00",
+        )
+        unsafe = score_runner_capture_candidate(
+            dict(base, mint_authority_active=True), self.ledger,
+            RunnerCapturePolicy())
+        self.assertFalse(unsafe["live_probe_qualified"])
+        self.assertFalse(unsafe["exceptional_entry_applied"])
+
+        unsellable = score_runner_capture_candidate(
+            dict(base, sell_simulation_ok=False, sell_price_impact_bps=9999),
+            self.ledger, RunnerCapturePolicy())
+        self.assertFalse(unsellable["live_probe_qualified"])
+        self.assertFalse(unsellable["exceptional_entry_applied"])
+
     def test_microcap_launch_keeps_sellability_and_safety_mandatory(self):
         result = score_microcap_launch_candidate(
             candidate(sell_simulation_ok=False, safety_evidence_status="UNAVAILABLE"),
