@@ -170,6 +170,14 @@ class RunnerCapturePolicy:
     maximum_sell_price_impact_bps: float = 150.0
     maximum_top10_holder_fraction: float = 0.80
     maximum_creator_fraction: float = 0.30
+    exceptional_minimum_market_cap_usd: float = 250_000.0
+    exceptional_minimum_volume_24h_usd: float = 750_000.0
+    exceptional_minimum_liquidity_usd: float = 30_000.0
+    exceptional_minimum_return_since_seen: float = 1.0
+    exceptional_minimum_price_change_15m_pct: float = 30.0
+    exceptional_minimum_net_buy_pressure: float = 0.05
+    exceptional_maximum_retracement: float = 0.05
+    exceptional_maximum_sell_impact_bps: float = 100.0
 
     @classmethod
     def from_env(cls) -> "RunnerCapturePolicy":
@@ -799,10 +807,38 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
     elif momentum_5m < policy.minimum_price_change_5m_pct:
         conditional_failures.append("runner five-minute momentum below preferred explosive range")
 
+    # A rare sub-$1m runner may receive the same $0.50 liquidity probe when
+    # multiple independent strength and execution measures compensate for the
+    # capitalization warning. This is deliberately narrow: it does not waive
+    # contract safety, route availability, age, activity, or exitability.
+    exceptional_metrics = (
+        policy.exceptional_minimum_market_cap_usd <= market_cap < policy.minimum_market_cap_usd and
+        volume_24h >= policy.exceptional_minimum_volume_24h_usd and
+        liquidity >= policy.exceptional_minimum_liquidity_usd and
+        return_since_seen >= policy.exceptional_minimum_return_since_seen and
+        momentum_5m >= policy.conditional_minimum_price_change_5m_pct and
+        momentum_15m >= policy.exceptional_minimum_price_change_15m_pct and
+        pressure >= policy.exceptional_minimum_net_buy_pressure and
+        retracement <= policy.exceptional_maximum_retracement and
+        impact <= policy.exceptional_maximum_sell_impact_bps
+    )
+    exceptional_waivers = {
+        f"runner market cap below ${policy.minimum_market_cap_usd / 1_000_000:.1f}m minimum",
+        "runner net buy pressure below minimum",
+    }
+    exceptional_remaining_failures = [
+        reason for reason in hard_failures if reason not in exceptional_waivers
+    ]
+    exceptional_entry = exceptional_metrics and not exceptional_remaining_failures
+    if exceptional_entry:
+        hard_failures = exceptional_remaining_failures
+        conditional_failures = []
+
     # A timing shortfall is not equivalent to an execution or safety failure.
     # If it is the only warning, admit a tightly capped real-money probe. The
     # executor still requires a fresh full-size round-trip quote before buying.
-    conditional_entry = not hard_failures and bool(conditional_failures)
+    conditional_entry = (not exceptional_entry and not hard_failures and
+                         bool(conditional_failures))
     failures = hard_failures + ([] if conditional_entry else conditional_failures)
     # Real-money probes must satisfy the same sellability constraints as paper
     # entries. A missing route or excessive executable impact is evidence that
@@ -829,11 +865,23 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
         "live_eligible": False,
         "live_probe_qualified": not live_probe_failures,
         "live_probe_failures": list(dict.fromkeys(live_probe_failures)),
-        "risk_tier": ("CONDITIONAL_LOW_RISK" if conditional_entry else
+        "risk_tier": ("EXCEPTIONAL_RUNNER" if exceptional_entry else
+                      "CONDITIONAL_LOW_RISK" if conditional_entry else
                       "STANDARD" if not live_probe_failures else "BLOCKED"),
         "hard_risk_failures": list(dict.fromkeys(hard_failures)),
         "conditional_risk_warnings": list(dict.fromkeys(conditional_failures)),
         "conditional_entry_applied": conditional_entry,
+        "exceptional_entry_applied": exceptional_entry,
+        "exceptional_entry_thresholds": {
+            "minimum_market_cap_usd": policy.exceptional_minimum_market_cap_usd,
+            "minimum_volume_24h_usd": policy.exceptional_minimum_volume_24h_usd,
+            "minimum_liquidity_usd": policy.exceptional_minimum_liquidity_usd,
+            "minimum_return_since_seen": policy.exceptional_minimum_return_since_seen,
+            "minimum_price_change_15m_pct": policy.exceptional_minimum_price_change_15m_pct,
+            "minimum_net_buy_pressure": policy.exceptional_minimum_net_buy_pressure,
+            "maximum_retracement": policy.exceptional_maximum_retracement,
+            "maximum_sell_impact_bps": policy.exceptional_maximum_sell_impact_bps,
+        },
         "paper_qualified": not failures,
         "paper_failures": list(dict.fromkeys(failures)),
         "failures": ["normal live trading disabled; separately capped liquidity probe only"],
