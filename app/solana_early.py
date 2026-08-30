@@ -118,7 +118,7 @@ class MicrocapLaunchPolicy:
 
     enabled: bool = True
     minimum_volume_24h_usd: float = 100_000.0
-    maximum_market_cap_usd: float = 1_000_000.0
+    minimum_market_cap_usd: float = 1_000_000.0
     watch_minimum_volume_24h_usd: float = 5_000.0
     minimum_liquidity_usd: float = 10_000.0
     maximum_age_minutes: float = 30.0
@@ -140,9 +140,9 @@ class MicrocapLaunchPolicy:
             # $100k is a non-overridable evidence floor. The scanner may retain
             # earlier pools, but the paper executor cannot enter them yet.
             minimum_volume_24h_usd=max(100_000.0, float(os.getenv("SOLANA_MICROCAP_MIN_VOLUME_24H_USD", "100000"))),
-            maximum_market_cap_usd=min(
+            minimum_market_cap_usd=max(
                 1_000_000.0,
-                max(100_000.0, float(os.getenv("SOLANA_MICROCAP_MAX_MARKET_CAP_USD", "1000000"))),
+                float(os.getenv("SOLANA_MICROCAP_MIN_MARKET_CAP_USD", "1000000")),
             ),
             watch_minimum_volume_24h_usd=max(5_000.0, float(os.getenv("SOLANA_MICROCAP_WATCH_MIN_VOLUME_24H_USD", "5000"))),
             minimum_liquidity_usd=max(7_500.0, float(os.getenv("SOLANA_MICROCAP_MIN_LIQUIDITY_USD", "10000"))),
@@ -156,7 +156,7 @@ class RunnerCapturePolicy:
 
     enabled: bool = True
     minimum_volume_24h_usd: float = 100_000.0
-    maximum_market_cap_usd: float = 1_000_000.0
+    minimum_market_cap_usd: float = 1_000_000.0
     minimum_liquidity_usd: float = 10_000.0
     maximum_age_minutes: float = 60.0
     minimum_trades_5m: int = 20
@@ -177,9 +177,9 @@ class RunnerCapturePolicy:
             minimum_volume_24h_usd=max(
                 100_000.0, float(os.getenv("SOLANA_RUNNER_MIN_VOLUME_24H_USD", "100000"))
             ),
-            maximum_market_cap_usd=min(
+            minimum_market_cap_usd=max(
                 1_000_000.0,
-                max(100_000.0, float(os.getenv("SOLANA_RUNNER_MAX_MARKET_CAP_USD", "1000000"))),
+                float(os.getenv("SOLANA_RUNNER_MIN_MARKET_CAP_USD", "1000000")),
             ),
             minimum_liquidity_usd=max(
                 7_500.0, float(os.getenv("SOLANA_RUNNER_MIN_LIQUIDITY_USD", "10000"))
@@ -681,8 +681,8 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
         (volume_24h < policy.minimum_volume_24h_usd,
          f"microcap 24h volume below ${policy.minimum_volume_24h_usd / 1000:.0f}k execution minimum"),
         (market_cap <= 0, "microcap market cap unavailable"),
-        (market_cap > policy.maximum_market_cap_usd,
-         f"microcap market cap above ${policy.maximum_market_cap_usd / 1_000_000:.1f}m ceiling"),
+        (0 < market_cap < policy.minimum_market_cap_usd,
+         f"microcap market cap below ${policy.minimum_market_cap_usd / 1_000_000:.1f}m minimum"),
         (liquidity < policy.minimum_liquidity_usd, "microcap liquidity below minimum"),
         (trades < policy.minimum_trades_5m, "microcap recent trades below minimum"),
         (buyers < policy.minimum_unique_buyers_5m, "microcap unique buyers below minimum"),
@@ -729,7 +729,7 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
                            volume_24h >= policy.watch_minimum_volume_24h_usd and
                            liquidity >= 7_500 and buyers >= 10 and pressure > 0 and
                            (momentum_5m >= 3 or buyer_accel >= 1.2 or volume_accel >= 1.2)),
-        "entry_reason": (f"Microcap Launch V3 $1M-cap rolling-confirmation entry: {age:.1f}-minute pool; "
+        "entry_reason": (f"Microcap Launch V3 $1M+ rolling-confirmation entry: {age:.1f}-minute pool; "
                          f"${market_cap:,.0f} market cap; ${volume_24h:,.0f} 24h volume; "
                          f"{momentum_5m:.2f}% five-minute momentum; "
                          f"{pressure:.2f} buy pressure; {buyer_accel:.2f}x buyer and "
@@ -764,8 +764,8 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
         (volume_24h < policy.minimum_volume_24h_usd,
          f"runner 24h volume below ${policy.minimum_volume_24h_usd / 1000:.0f}k minimum"),
         (market_cap <= 0, "runner market cap unavailable"),
-        (market_cap > policy.maximum_market_cap_usd,
-         f"runner market cap above ${policy.maximum_market_cap_usd / 1_000_000:.1f}m ceiling"),
+        (0 < market_cap < policy.minimum_market_cap_usd,
+         f"runner market cap below ${policy.minimum_market_cap_usd / 1_000_000:.1f}m minimum"),
         (liquidity < policy.minimum_liquidity_usd, "runner liquidity below minimum"),
         (trades < policy.minimum_trades_5m, "runner recent trades below minimum"),
         (buyers < policy.minimum_unique_buyers_5m, "runner unique buyers below minimum"),
@@ -1312,13 +1312,13 @@ def main() -> None:
                              microcap_watchlist_summary={
                                  "tracked": len(watchlist),
                                  "execution_volume_floor_usd": microcap_policy.minimum_volume_24h_usd,
-                                 "maximum_market_cap_usd": microcap_policy.maximum_market_cap_usd,
+                                 "minimum_market_cap_usd": microcap_policy.minimum_market_cap_usd,
                                  "watch_volume_floor_usd": microcap_policy.watch_minimum_volume_24h_usd,
                                  "runner_capture_enabled": runner_policy.enabled,
                                  "runner_minimum_return_since_seen":
                                      runner_policy.minimum_return_since_seen,
-                                 "runner_maximum_market_cap_usd":
-                                     runner_policy.maximum_market_cap_usd,
+                                 "runner_minimum_market_cap_usd":
+                                     runner_policy.minimum_market_cap_usd,
                                  "checkpoints_minutes": [5, 15, 30, 60],
                              },
                              watched_wallets=[value.strip() for value in
