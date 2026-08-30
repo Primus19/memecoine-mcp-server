@@ -34,6 +34,12 @@ const cfg = {
     Math.max(5, num(env("SOLANA_RUNNER_LIVE_PROBE_DAILY_CAP_USD"), 5)),
   ),
   probePartialFraction: 0.25,
+  // These pools can lose their route in under a minute. The probe is an
+  // execution experiment, not a lottery ticket: take a modest executable
+  // profit and abandon a deteriorating round trip quickly.
+  probeProfitExitPct: 0.05,
+  probeStopLossPct: 0.08,
+  probePostBuyRecoveryFloorPct: 0.97,
   probeMaxSellImpactBps: Math.min(
     150,
     Math.max(25, num(env("SOLANA_RUNNER_MAX_SELL_IMPACT_BPS"), 150)),
@@ -45,7 +51,7 @@ const cfg = {
   probeMaxOpen: 2,
   probeMaxQuarantined: 4,
   probeMaxOpenExposureUsd: 2,
-  probeMaxHoldMinutes: 20,
+  probeMaxHoldMinutes: 5,
   entry: Math.min(3, Math.max(1, num(env("SOLANA_MAX_ENTRY_USD"), 3))),
   total: Math.min(6, Math.max(3, num(env("SOLANA_MAX_TOTAL_EXPOSURE_USD"), 6))),
   max: Math.min(2, Math.max(1, num(env("SOLANA_MAX_POSITIONS"), 2))),
@@ -1140,6 +1146,38 @@ async function recordProbeSell(p, quantity, action, reason) {
     return shouldNotify;
   }
 }
+async function liquidateProbe(p, reason) {
+  let changed = false;
+  // A full-size route can disappear while smaller routes still exist. Try the
+  // whole balance first, then progressively smaller chunks. Successful chunks
+  // are followed by another full-balance attempt so exposure is not stranded.
+  const fractions = [1, 0.5, 0.25, 0.1];
+  for (const fraction of fractions) {
+    if (p.quantity <= 0) break;
+    const before = p.quantity,
+      requested = Math.max(1, Math.floor(before * fraction)),
+      notified = await recordProbeSell(
+        p,
+        requested,
+        "PROBE_FINAL_SELL",
+        reason,
+      );
+    changed = notified || changed || p.quantity < before;
+    if (p.quantity < before && p.quantity > 0) {
+      const remainderBefore = p.quantity,
+        remainderNotified = await recordProbeSell(
+          p,
+          p.quantity,
+          "PROBE_FINAL_SELL",
+          reason,
+        );
+      changed =
+        remainderNotified || changed || p.quantity < remainderBefore;
+      if (p.quantity <= 0) break;
+    }
+  }
+  return changed;
+}
 async function runnerProbeBuy(c) {
   const at = new Date().toISOString(),
     impact = num(c.sell_price_impact_bps, 9999),
@@ -1162,7 +1200,7 @@ async function runnerProbeBuy(c) {
       sellPriceImpactBps: impact,
       maximumSellPriceImpactBps: cfg.probeMaxSellImpactBps,
     });
-  let o, expectedQuantity, partialQuantity, sellPreflight;
+  let o, expectedQuantity, partialQuantity, sellPreflight, fullSellPreflight;
   try {
     o = await order(USDC, c.mint, Math.round(cfg.probeEntry * 1e6));
     expectedQuantity = Math.floor(num(o.outAmount || o.outputAmount));
@@ -1171,7 +1209,10 @@ async function runnerProbeBuy(c) {
       1,
       Math.floor(expectedQuantity * cfg.probePartialFraction),
     );
+    // Keep Jupiter requests sequential so the global pacing guard remains
+    // effective and the second quote reflects the newest route state.
     sellPreflight = await order(c.mint, USDC, partialQuantity);
+    fullSellPreflight = await order(c.mint, USDC, expectedQuantity);
   } catch (e) {
     return reject("ROUND_TRIP_PREFLIGHT_ROUTE_UNAVAILABLE", {
       error: String(e.message || e).slice(0, 250),
@@ -1179,6 +1220,8 @@ async function runnerProbeBuy(c) {
   }
   const expectedPartialRecoveryUsd =
       num(sellPreflight.outAmount || sellPreflight.outputAmount) / 1e6,
+    expectedFullRecoveryUsd =
+      num(fullSellPreflight.outAmount || fullSellPreflight.outputAmount) / 1e6,
     proportionalCostUsd = cfg.probeEntry * cfg.probePartialFraction,
     minimumPartialRecoveryUsd =
       proportionalCostUsd * (1 - cfg.probeRoundTripMaxLossBps / 10000),
@@ -1192,11 +1235,16 @@ async function runnerProbeBuy(c) {
       : 9999;
   if (
     !expectedPartialRecoveryUsd ||
-    expectedPartialRecoveryUsd + 1e-9 < minimumPartialRecoveryUsd
+    expectedPartialRecoveryUsd + 1e-9 < minimumPartialRecoveryUsd ||
+    expectedFullRecoveryUsd + 1e-9 <
+      cfg.probeEntry * cfg.probePostBuyRecoveryFloorPct
   )
     return reject("ROUND_TRIP_PREFLIGHT_RECOVERY_BELOW_MINIMUM", {
       expectedPartialRecoveryUsd,
+      expectedFullRecoveryUsd,
       minimumPartialRecoveryUsd,
+      minimumFullRecoveryUsd:
+        cfg.probeEntry * cfg.probePostBuyRecoveryFloorPct,
       estimatedRoundTripLossBps,
     });
   const r = await execute(o);
@@ -1234,6 +1282,7 @@ async function runnerProbeBuy(c) {
         preflightExpectedOutputUnits: expectedQuantity,
         preflightPartialQuantity: partialQuantity,
         preflightExpectedPartialRecoveryUsd: expectedPartialRecoveryUsd,
+        preflightExpectedFullRecoveryUsd: expectedFullRecoveryUsd,
         preflightMinimumPartialRecoveryUsd: minimumPartialRecoveryUsd,
         preflightEstimatedRoundTripLossBps: estimatedRoundTripLossBps,
       },
@@ -1261,6 +1310,24 @@ async function runnerProbeBuy(c) {
     "PROBE_PARTIAL_SELL",
     "IMMEDIATE_EXITABILITY_TEST",
   );
+  // Reprice the actual tokens received, not the optimistic pre-buy quantity.
+  // If the executed buy changed the route enough that 97% of cost is no
+  // longer recoverable, flatten immediately instead of waiting for a stop.
+  if (p.quantity > 0) {
+    try {
+      const actualExit = await order(p.mint, USDC, Math.floor(p.quantity)),
+        recoverable =
+          num(p.proceedsUsd) +
+          num(actualExit.outAmount || actualExit.outputAmount) / 1e6;
+      p.postBuyRecoverableUsd = recoverable;
+      p.postBuyRecoveryCheckedAt = new Date().toISOString();
+      if (recoverable < p.entryUsd * cfg.probePostBuyRecoveryFloorPct)
+        await liquidateProbe(p, "POST_BUY_RECOVERY_FLOOR");
+    } catch (e) {
+      p.postBuyRecoveryError = String(e.message || e).slice(0, 250);
+      await liquidateProbe(p, "POST_BUY_ROUTE_DIVERGENCE");
+    }
+  }
   return true;
 }
 async function superviseRunnerProbes() {
@@ -1277,48 +1344,26 @@ async function superviseRunnerProbes() {
       p.lastMarkedAt = new Date().toISOString();
       p.lastMarkUsd = mark;
       p.highTotalUsd = Math.max(num(p.highTotalUsd, p.entryUsd), total);
-      if (!p.profitPartialSoldAt && total >= p.entryUsd * 1.08) {
-        const quantityBefore = p.quantity;
-        changed =
-          (await recordProbeSell(
-            p,
-            Math.min(
-              p.quantity,
-              Math.max(
-                1,
-                Math.floor(p.originalQuantity * cfg.probePartialFraction),
-              ),
-            ),
-            "PROBE_PROFIT_PARTIAL_SELL",
-            "PROBE_PROFIT_CAPTURE_8PCT",
-          )) || changed;
-        if (p.quantity < quantityBefore)
-          p.profitPartialSoldAt = new Date().toISOString();
-        continue;
-      }
       const ret = total / p.entryUsd - 1,
         retracement = p.highTotalUsd > 0 ? 1 - total / p.highTotalUsd : 0,
         reason =
           num(p.sellFailures) >= 2
             ? "PROBE_EXIT_ROUTE_RECOVERED"
-            : ret <= -0.2
+            : ret <= -cfg.probeStopLossPct
             ? "PROBE_STOP_LOSS"
-            : ret >= 1
-              ? "PROBE_TAKE_PROFIT_100"
-              : p.highTotalUsd >= p.entryUsd * 1.2 && retracement >= 0.15
+            : ret >= cfg.probeProfitExitPct
+              ? "PROBE_TAKE_PROFIT_5PCT"
+              : p.highTotalUsd >= p.entryUsd * 1.03 &&
+                  total <= p.entryUsd * 1.005
+                ? "PROBE_BREAKEVEN_PROTECTION"
+                : p.highTotalUsd >= p.entryUsd * 1.08 && retracement >= 0.05
                 ? "PROBE_TRAILING_ROLLOVER"
                 : Date.now() - Date.parse(p.openedAt) >=
                     cfg.probeMaxHoldMinutes * 60000
-                  ? "PROBE_MAX_HOLD_20M"
+                  ? "PROBE_MAX_HOLD_5M"
                   : "";
       if (reason)
-        changed =
-          (await recordProbeSell(
-            p,
-            p.quantity,
-            "PROBE_FINAL_SELL",
-            reason,
-          )) || changed;
+        changed = (await liquidateProbe(p, reason)) || changed;
     } catch (e) {
       p.lastSellError = e.message.slice(0, 250);
       p.lastSellAttemptAt = new Date().toISOString();
@@ -1328,12 +1373,7 @@ async function superviseRunnerProbes() {
         cfg.probeMaxHoldMinutes * 60000
       )
         changed =
-          (await recordProbeSell(
-            p,
-            p.quantity,
-            "PROBE_FINAL_SELL",
-            "PROBE_MAX_HOLD_RETRY",
-          )) || changed;
+          (await liquidateProbe(p, "PROBE_MAX_HOLD_RETRY")) || changed;
     }
   }
   return changed;
@@ -1808,7 +1848,7 @@ const fail = (e) => {
 };
 setInterval(
   () => tick().catch(fail),
-  Math.max(60, num(env("SOLANA_EXECUTOR_INTERVAL_SECONDS"), 60)) * 1000,
+  Math.max(15, num(env("SOLANA_EXECUTOR_INTERVAL_SECONDS"), 15)) * 1000,
 );
 http
   .createServer((req, res) => {

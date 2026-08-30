@@ -447,6 +447,23 @@ class SolanaEarlyTests(unittest.TestCase):
                          "containsRealMoneyProbe:true"):
             self.assertTrue(expected in source or "".join(expected.split()) in compact)
 
+    def test_runner_live_probe_reprices_actual_fill_and_exits_fast(self):
+        source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+        compact = "".join(source.split())
+        for expected in (
+            "preflightExpectedFullRecoveryUsd",
+            "probePostBuyRecoveryFloorPct:0.97",
+            "POST_BUY_RECOVERY_FLOOR",
+            "POST_BUY_ROUTE_DIVERGENCE",
+            "PROBE_TAKE_PROFIT_5PCT",
+            "PROBE_BREAKEVEN_PROTECTION",
+            "PROBE_MAX_HOLD_5M",
+            "asyncfunctionliquidateProbe",
+            "constfractions=[1,0.5,0.25,0.1]",
+            'Math.max(15,num(env("SOLANA_EXECUTOR_INTERVAL_SECONDS"),15))',
+        ):
+            self.assertIn(expected, compact)
+
     def test_microcap_action_reports_are_named_colored_and_retried(self):
         source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
         compact = "".join(source.split())
