@@ -1312,10 +1312,13 @@ def main() -> None:
                              microcap_watchlist_summary={
                                  "tracked": len(watchlist),
                                  "execution_volume_floor_usd": microcap_policy.minimum_volume_24h_usd,
+                                 "maximum_market_cap_usd": microcap_policy.maximum_market_cap_usd,
                                  "watch_volume_floor_usd": microcap_policy.watch_minimum_volume_24h_usd,
                                  "runner_capture_enabled": runner_policy.enabled,
                                  "runner_minimum_return_since_seen":
                                      runner_policy.minimum_return_since_seen,
+                                 "runner_maximum_market_cap_usd":
+                                     runner_policy.maximum_market_cap_usd,
                                  "checkpoints_minutes": [5, 15, 30, 60],
                              },
                              watched_wallets=[value.strip() for value in
