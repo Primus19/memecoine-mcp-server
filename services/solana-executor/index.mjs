@@ -1846,9 +1846,34 @@ const fail = (e) => {
   state.errors = state.errors.slice(0, 20);
   save();
 };
+let cycleRunning = false;
+async function scheduledTick() {
+  if (cycleRunning) return;
+  cycleRunning = true;
+  try {
+    await tick();
+  } finally {
+    cycleRunning = false;
+  }
+}
+async function scheduledProbeSupervision() {
+  if (cycleRunning || !cfg.enabled) return;
+  cycleRunning = true;
+  try {
+    const changed = await superviseRunnerProbes();
+    if (changed) await email(true);
+    save();
+  } finally {
+    cycleRunning = false;
+  }
+}
 setInterval(
-  () => tick().catch(fail),
-  Math.max(15, num(env("SOLANA_EXECUTOR_INTERVAL_SECONDS"), 15)) * 1000,
+  () => scheduledTick().catch(fail),
+  Math.max(60, num(env("SOLANA_EXECUTOR_INTERVAL_SECONDS"), 60)) * 1000,
+);
+setInterval(
+  () => scheduledProbeSupervision().catch(fail),
+  15 * 1000,
 );
 http
   .createServer((req, res) => {
