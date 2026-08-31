@@ -395,6 +395,22 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertIn("runner has already retraced more than 10% from its observed high",
                       result["paper_failures"])
 
+    def test_runner_capture_rejects_extreme_late_chase(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="pool-chase", price_usd=.00001,
+                          observed_at="2026-08-29T12:00:00+00:00")
+        current = candidate(pool="pool-chase", price_usd=.001,
+                            market_cap_usd=2_000_000, volume_24h_usd=2_000_000,
+                            liquidity_usd=250_000, price_change_5m_pct=20,
+                            price_change_15m_pct=50, transaction_buy_pressure=.5,
+                            observed_at="2026-08-29T12:10:00+00:00")
+        self.ledger.upsert_watch_candidate(first, strategy)
+        self.ledger.upsert_watch_candidate(current, strategy)
+        result = score_runner_capture_candidate(current, self.ledger, RunnerCapturePolicy())
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("runner retained gain above 800% late-chase ceiling",
+                      result["paper_failures"])
+
     def test_runner_live_probe_requires_sell_route_and_acceptable_impact(self):
         strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
         first = candidate(pool="pool-probe", price_usd=.001, volume_24h_usd=25000,
@@ -601,7 +617,8 @@ class SolanaEarlyTests(unittest.TestCase):
         source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
         compact = "".join(source.split())
         for expected in ("RUNNER_CAPTURE_V1", "RUNNER_TIERED_PROFIT", "RUNNER_DOWNTREND",
-                         "MAX_HOLD_30M", "Runner Capture Experiment",
+                         "MAX_HOLD_30M_NO_LIQUID_CONTINUATION",
+                         "MAX_HOLD_60M_LIQUID_CONTINUATION", "Runner Capture Experiment",
                          "runnerCaptureV1Performance", "CYAN • Runner Capture V1",
                          "target=isRunner?5.0", "stop=isRunner?0.1",
                          "SOLANA_RUNNER_LIVE_PROBE_ENABLED",

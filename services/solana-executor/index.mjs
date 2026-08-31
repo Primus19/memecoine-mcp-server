@@ -789,6 +789,13 @@ async function paperClose(p, reason, o) {
     strategyVersion: fill.strategyVersion,
     entryUsd: p.entryUsd,
     exitUsd: proceeds,
+    closeReason: reason,
+    highUsd: p.highUsd,
+    maximumFavorablePnlUsd: fill.maximumFavorablePnlUsd,
+    realizedPnlUsd: pnl,
+    costStressedPnlUsd: adjusted,
+    holdSeconds: fill.holdSeconds,
+    entryEvidence: p.entryEvidence,
     quantity: p.quantity,
     closedAt: at,
     checkpoints: {},
@@ -828,7 +835,7 @@ async function supervisePaper() {
         isRunner = p.strategyVersion === "RUNNER_CAPTURE_V1",
         ageMs = Date.now() - Date.parse(p.openedAt),
         maxHoldMs = isRunner
-          ? 30 * 60000
+          ? 60 * 60000
           : isMicrocap
             ? 20 * 60000
             : isDivineV3
@@ -932,6 +939,17 @@ async function supervisePaper() {
           ageMs >= 2 * 60000 &&
           num(p.downTicks) >= 2 &&
           mark <= p.highUsd * 0.95,
+        runnerLiquidContinuation =
+          isRunner &&
+          ageMs >= 30 * 60000 &&
+          ageMs < 60 * 60000 &&
+          r >= 0.05 &&
+          num(p.downTicks) < 2 &&
+          mark >= p.highUsd * 0.9 &&
+          num(p.entryEvidence?.liquidityUsd) >= 200000 &&
+          num(p.entryEvidence?.sellPriceImpactBps, 9999) <= 100,
+        runnerStalledAt30 =
+          isRunner && ageMs >= 30 * 60000 && !runnerLiquidContinuation,
         reason =
           r <= -stop
             ? "STOP_LOSS"
@@ -941,6 +959,8 @@ async function supervisePaper() {
                 ? "RUNNER_TIERED_PROFIT"
                 : runnerRollover
                   ? "RUNNER_DOWNTREND"
+                  : runnerStalledAt30
+                    ? "MAX_HOLD_30M_NO_LIQUID_CONTINUATION"
                   : microcapProfitTrail
                     ? "MICROCAP_PROFIT_PROTECTION"
                     : microcapRollover
@@ -962,7 +982,7 @@ async function supervisePaper() {
                                 ? "TRAILING_STOP"
                                 : ageMs >= maxHoldMs
                                   ? isRunner
-                                    ? "MAX_HOLD_30M"
+                                    ? "MAX_HOLD_60M_LIQUID_CONTINUATION"
                                     : isMicrocap
                                       ? "MAX_HOLD_20M"
                                       : isDivineV3

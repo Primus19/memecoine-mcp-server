@@ -166,6 +166,7 @@ class RunnerCapturePolicy:
     conditional_minimum_price_change_5m_pct: float = 5.0
     maximum_price_change_5m_pct: float = 200.0
     minimum_return_since_seen: float = 0.20
+    maximum_return_since_seen: float = 8.0
     maximum_retracement_from_high: float = 0.10
     maximum_sell_price_impact_bps: float = 150.0
     maximum_top10_holder_fraction: float = 0.80
@@ -809,6 +810,8 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
         (momentum_15m <= 0, "runner fifteen-minute momentum is not positive"),
         (return_since_seen < policy.minimum_return_since_seen,
          "runner has not gained 20% since first observation"),
+        (return_since_seen > policy.maximum_return_since_seen,
+         "runner retained gain above 800% late-chase ceiling"),
         (retracement > policy.maximum_retracement_from_high,
          "runner has already retraced more than 10% from its observed high"),
         (impact > policy.maximum_sell_price_impact_bps, "runner executable sell impact above maximum"),

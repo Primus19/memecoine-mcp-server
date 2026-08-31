@@ -1274,8 +1274,11 @@ class Executor:
             maximum_loss = float(position["maximum_loss_usd"])
             maximum_favorable = max(current_pnl, float(position.get("max_favorable_pnl_usd") or 0))
             floor_r = five_streak_profit_floor_r(maximum_favorable / maximum_loss) if maximum_loss > 0 else 0
-            if (not reason and position.get("strategy") == FIVE_STREAK_FILTERED_STRATEGY
-                    and os.getenv("FOREX_FIVE_STREAK_V3_PROFIT_PROTECTION", "true").lower() == "true"
+            profit_protection_strategies = {
+                FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY,
+            }
+            if (not reason and position.get("strategy") in profit_protection_strategies
+                    and os.getenv("FOREX_BRYNE_PROFIT_PROTECTION", "true").lower() == "true"
                     and floor_r > 0 and current_pnl <= floor_r * maximum_loss):
                 reason = f"PROFIT_PROTECTION_{floor_r:.2f}R"
             if reason:
