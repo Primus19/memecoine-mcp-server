@@ -1295,7 +1295,11 @@ class Executor:
         return closes
 
     def process_five_streak_paper(self, snapshots: list[dict], nav: float) -> list[dict]:
-        if not five_streak_enabled():
+        # V4 is archived.  Keep this method as a compatibility boundary for
+        # callers/tests, but never allow it to create another intent.  Existing
+        # V4 positions are still supervised and checkpointed by supervise_paper.
+        return [{"status": "ARCHIVED", "reason": "V4 new entries are permanently disabled"}]
+        if not five_streak_enabled():  # pragma: no cover - archived implementation below
             return []
         outcomes = []
         max_open = max(1, min(8, int(os.getenv("FOREX_FIVE_STREAK_MAX_OPEN", "8"))))
@@ -1379,8 +1383,8 @@ class Executor:
         payload = fetch_json(os.environ["MULTI_ASSET_FEED_URL"])
         snapshots = validated_snapshots(payload)
         closes = self.supervise_paper(snapshots)
-        five_streak_outcomes = self.process_five_streak_paper(
-            snapshots, float(reconciliation["summary"]["nav"]))
+        five_streak_outcomes = [{"status": "ARCHIVED",
+                                 "reason": "V4 new entries are permanently disabled"}]
         bryne_liquidity_outcomes = self.process_bryne_liquidity_paper(
             snapshots, float(reconciliation["summary"]["nav"]))
         outcomes = []
@@ -1502,6 +1506,23 @@ class Executor:
                                       "eligible_for_live_review": False,
                                       "automatic_live_promotion": False,
                                   },
+                                  "profit_protection_shadow": {
+                                      "mode": "OBSERVATION_ONLY",
+                                      "activation_range_r": [0.5, 0.75],
+                                      "required_closed_observations": "30-50",
+                                      "automatic_exit_changes": False,
+                                      "open_positions": [{
+                                          "intent_id": position.get("id"),
+                                          "symbol": position.get("symbol"),
+                                          "maximum_favorable_r": round(
+                                              float(position.get("max_favorable_pnl_usd") or 0) /
+                                              max(float(position.get("maximum_loss_usd") or 0), 1e-12), 6),
+                                          "shadow_floor_r": five_streak_profit_floor_r(
+                                              float(position.get("max_favorable_pnl_usd") or 0) /
+                                              max(float(position.get("maximum_loss_usd") or 0), 1e-12)),
+                                      } for position in self.ledger.paper_positions()
+                                       if position.get("strategy") == BRYNE_LIQUIDITY_V5_STRATEGY],
+                                  },
                                   "v4_ratchet_archived": {"new_entries_enabled": False,
                                       "performance": self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY),
                                       "trades": self.ledger.strategy_intents(FIVE_STREAK_FILTERED_STRATEGY)},
@@ -1548,6 +1569,20 @@ class Executor:
             report["risk_configuration"], snapshots, report["intents"], outcomes)
         trade_actions.extend(five_streak_email_actions(
             bryne_liquidity_outcomes, closes, report["intents"], reconciliation["summary"]))
+        # Entry alerts used to exist only in the in-memory scan outcome.  If
+        # delivery failed on that scan, only the later close could be mailed.
+        # Replay the newest V5 open from the durable intent ledger; the email
+        # action ID makes the backfill idempotent across scans/restarts.
+        latest_five_open = next((item for item in report["five_streak"]["trades"]
+                                 if item.get("status") == "PAPER_OPEN"), None)
+        if latest_five_open:
+            trade_actions.extend(five_streak_email_actions([{
+                "status": "PAPER_FILL", "intent_id": latest_five_open.get("id"),
+                "symbol": latest_five_open.get("symbol"), "side": latest_five_open.get("side"),
+                "signal_time": latest_five_open.get("created_at"),
+                "entry": latest_five_open.get("entry_price"),
+                "entry_reason": latest_five_open.get("entry_reason"),
+            }], [], report["intents"], reconciliation["summary"]))
         # Versioned handoff: include the latest closed paper result on every
         # scan. The emailer's persisted action IDs make this a one-time,
         # restart-safe backfill and prevent repeated historical reports.

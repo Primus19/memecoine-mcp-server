@@ -337,8 +337,9 @@ class SolanaEarlyTests(unittest.TestCase):
         self.ledger.upsert_watch_candidate(first, strategy)
         self.ledger.upsert_watch_candidate(later, strategy)
         row = self.ledger.watchlist_snapshot(strategy)[0]
-        self.assertAlmostEqual(.2, row["checkpoints"]["5"])
-        self.assertAlmostEqual(.2, row["checkpoints"]["15"])
+        self.assertAlmostEqual(.2, row["checkpoints"]["5"]["mark_return"])
+        self.assertAlmostEqual(.2, row["checkpoints"]["15"]["mark_return"])
+        self.assertIn("sell_route_ok", row["checkpoints"]["15"])
         self.assertNotIn("30", row["checkpoints"])
 
     def test_microcap_watchlist_retains_first_and_latest_evidence(self):

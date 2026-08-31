@@ -355,7 +355,7 @@ function probeDailyRealizedLossUsd() {
   return state.probeFills
       .filter(
         (f) =>
-          f.action === "PROBE_FINAL_SELL" &&
+          ["PROBE_FINAL_SELL", "PROBE_ABANDONED"].includes(f.action) &&
           String(f.at).startsWith(day) &&
           f.realizedPnlUsd != null,
       )
@@ -373,12 +373,15 @@ function probePerformance() {
       (f) => f.action.includes("SELL") && f.action !== "PROBE_SELL_FAILED",
     ),
     closes = state.probeFills.filter(
-      (f) => f.action === "PROBE_FINAL_SELL" && f.realizedPnlUsd != null,
+      (f) => ["PROBE_FINAL_SELL", "PROBE_ABANDONED"].includes(f.action) &&
+        f.realizedPnlUsd != null,
     ),
     grossEntriesUsd = buys.reduce((n, f) => n + num(f.inputUsd), 0),
     recoveredUsd = sells.reduce((n, f) => n + num(f.outputUsd), 0),
     realizedPnlUsd = closes.reduce((n, f) => n + num(f.realizedPnlUsd), 0),
-    unresolvedCostBasisUsd = probeOpenExposureUsd();
+    unresolvedCostBasisUsd = probeOpenExposureUsd(),
+    networkFeeLamports = state.probeFills.reduce(
+      (n, f) => n + num(f.networkFeeLamports), 0);
   return {
     buys: buys.length,
     successfulSales: sells.length,
@@ -391,7 +394,9 @@ function probePerformance() {
     openPositions: state.probePositions.length,
     quarantinedPositions: state.probePositions.filter(probeIsQuarantined).length,
     unresolvedCostBasisUsd,
-    networkFeeStatus: "NOT_CAPTURED_SEPARATELY",
+    networkFeeLamports,
+    networkFeeSol: networkFeeLamports / 1e9,
+    networkFeeStatus: networkFeeLamports > 0 ? "CAPTURED_ON_CHAIN" : "NO_CAPTURED_FEES",
     netPnlAfterNetworkFeesUsd: null,
   };
 }
@@ -402,11 +407,35 @@ function probeIsQuarantined(p) {
   );
 }
 function probeRetryDue(p) {
-  if (!probeIsQuarantined(p)) return true;
-  const ageMs = Date.now() - Date.parse(p.openedAt),
-    retryMs = ageMs < 60 * 60000 ? 5 * 60000 : 15 * 60000,
-    lastAttempt = Date.parse(p.lastSellAttemptAt || 0);
-  return !lastAttempt || Date.now() - lastAttempt >= retryMs;
+  return !probeIsQuarantined(p);
+}
+function abandonQuarantinedProbes() {
+  let changed = false;
+  for (const p of [...state.probePositions]) {
+    if (!probeIsQuarantined(p)) continue;
+    const at = new Date().toISOString(),
+      loss = num(p.proceedsUsd) - num(p.entryUsd);
+    state.probeFills.unshift({
+      id: `probe-abandoned:${p.entrySignature}`,
+      action: "PROBE_ABANDONED",
+      reason: "PERMANENTLY_UNSELLABLE_POSITION_ARCHIVED",
+      at,
+      mint: p.mint,
+      symbol: p.symbol,
+      quantityAbandoned: p.quantity,
+      originalInputUsd: p.entryUsd,
+      cumulativeProceedsUsd: num(p.proceedsUsd),
+      realizedPnlUsd: loss,
+      sellFailures: num(p.sellFailures),
+      lastSellError: p.lastSellError,
+      strategy: "SOLANA_MICROCAP_RUNNER_LIVE_PROBE",
+    });
+    state.probePositions = state.probePositions.filter(
+      (item) => item.entrySignature !== p.entrySignature,
+    );
+    changed = true;
+  }
+  return changed;
 }
 function probeBlockers() {
   const b = [],
@@ -624,6 +653,20 @@ async function execute(o) {
       lastValidBlockHeight: o.lastValidBlockHeight,
     }),
   });
+}
+async function transactionFeeLamports(signature) {
+  if (!signature || !cfg.helius) return null;
+  try {
+    const payload = await json(`https://mainnet.helius-rpc.com/?api-key=${cfg.helius}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getTransaction",
+        params: [signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 }] }),
+    });
+    return payload?.result?.meta?.fee ?? null;
+  } catch {
+    return null;
+  }
 }
 async function paperBuy(c) {
   const o = await order(USDC, c.mint, Math.round(cfg.paperEntry * 1e6)),
@@ -1105,6 +1148,7 @@ async function recordProbeSell(p, quantity, action, reason) {
     p.proceedsUsd = num(p.proceedsUsd) + proceeds;
     p.lastSellAt = at;
     p.lastSellSignature = r.signature;
+    const networkFeeLamports = await transactionFeeLamports(r.signature);
     state.probeFills.unshift({
       id: r.signature,
       action,
@@ -1117,6 +1161,7 @@ async function recordProbeSell(p, quantity, action, reason) {
       originalInputUsd: p.entryUsd,
       cumulativeProceedsUsd: p.proceedsUsd,
       realizedPnlUsd: p.quantity <= 0 ? p.proceedsUsd - p.entryUsd : null,
+      networkFeeLamports,
       strategy: "SOLANA_MICROCAP_RUNNER_LIVE_PROBE",
     });
     if (p.quantity <= 0)
@@ -1186,6 +1231,13 @@ async function liquidateProbe(p, reason) {
     }
   }
   return changed;
+}
+async function recoverQuarantinedProbe(p, reason) {
+  const fractions = [1, 0.5, 0.25, 0.1],
+    index = num(p.retryChunkIndex) % fractions.length,
+    requested = Math.max(1, Math.floor(p.quantity * fractions[index]));
+  p.retryChunkIndex = (index + 1) % fractions.length;
+  return recordProbeSell(p, requested, "PROBE_FINAL_SELL", reason);
 }
 async function runnerProbeBuy(c) {
   const at = new Date().toISOString(),
@@ -1308,6 +1360,7 @@ async function runnerProbeBuy(c) {
     };
   state.probePositions.push(p);
   state.probeSeen[c.mint] = at;
+  const networkFeeLamports = await transactionFeeLamports(r.signature);
   state.probeFills.unshift({
     id: r.signature,
     action: "PROBE_BUY",
@@ -1316,6 +1369,7 @@ async function runnerProbeBuy(c) {
     symbol: p.symbol,
     inputUsd: cfg.probeEntry,
     outputUnits: quantity,
+    networkFeeLamports,
     entryEvidence: p.entryEvidence,
     strategy: "SOLANA_MICROCAP_RUNNER_LIVE_PROBE",
   });
@@ -1350,7 +1404,7 @@ async function runnerProbeBuy(c) {
   return true;
 }
 async function superviseRunnerProbes() {
-  let changed = false;
+  let changed = abandonQuarantinedProbes();
   for (const p of [...state.probePositions]) {
     // Keep background recovery active without hammering a dead route every
     // minute: five-minute retries initially, then fifteen-minute retries.
@@ -1408,7 +1462,7 @@ async function superviseRunnerProbes() {
         cfg.probeMaxHoldMinutes * 60000
       )
         changed =
-          (await liquidateProbe(p, "PROBE_MAX_HOLD_RETRY")) || changed;
+          (await recoverQuarantinedProbe(p, "PROBE_MAX_HOLD_RETRY")) || changed;
     }
   }
   return changed;

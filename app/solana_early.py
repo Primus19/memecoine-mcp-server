@@ -267,9 +267,18 @@ class Ledger:
             retained_payload = {"first_candidate": first_candidate, "latest_candidate": candidate}
             elapsed = max(0, (datetime.fromisoformat(now.replace("Z", "+00:00")) -
                               datetime.fromisoformat(first.replace("Z", "+00:00"))).total_seconds() / 60)
-            for minute in (5, 15, 30, 60):
+            for minute in (5, 15, 30, 60, 120, 240):
                 if elapsed >= minute and str(minute) not in checkpoints:
-                    checkpoints[str(minute)] = round(price / initial - 1, 6)
+                    checkpoints[str(minute)] = {
+                        "observed_at": now,
+                        "mark_return": round(price / initial - 1, 6),
+                        "price_usd": price,
+                        "sell_route_ok": bool(candidate.get("sell_simulation_ok")),
+                        "sell_price_impact_bps": candidate.get("sell_price_impact_bps"),
+                        "liquidity_usd": candidate.get("liquidity_usd"),
+                        "volume_24h_usd": candidate.get("volume_24h_usd"),
+                        "market_cap_usd": candidate.get("market_cap_usd"),
+                    }
             self.db.execute("""INSERT INTO candidate_watchlist VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(strategy,mint) DO UPDATE SET pool=excluded.pool,last_seen_at=excluded.last_seen_at,
                 latest_price=excluded.latest_price,max_price=excluded.max_price,payload=excluded.payload,
@@ -279,7 +288,7 @@ class Ledger:
                  json.dumps(checkpoints, sort_keys=True), status))
         return row is None
 
-    def watched_pools(self, strategy: str, maximum_age_minutes: int = 60,
+    def watched_pools(self, strategy: str, maximum_age_minutes: int = 300,
                       limit: int = 100) -> list[str]:
         cutoff = datetime.fromtimestamp(time.time() - maximum_age_minutes * 60, UTC).isoformat()
         with self.lock:
@@ -1127,16 +1136,37 @@ def solana_rpc_mint_safety(mint: str) -> dict[str, Any]:
     }
     if owner == TOKEN_2022_PROGRAM_ID and not isinstance(extensions, list):
         raise RuntimeError("Token-2022 extensions were not parsed")
+    # Holder concentration is independently verifiable even when GoPlus is
+    # unavailable.  Creator attribution is not inferable from token accounts,
+    # so it deliberately remains unknown rather than being fabricated.
+    def rpc(method: str, params: list[Any]) -> dict[str, Any]:
+        req = urllib.request.Request(url, data=json.dumps({"jsonrpc": "2.0", "id": 2,
+            "method": method, "params": params}).encode(), method="POST",
+            headers={"Accept": "application/json", "Content-Type": "application/json",
+                     "User-Agent": "primus-solana-early/1.2"})
+        with urllib.request.urlopen(req, timeout=6.0) as response:
+            return json.loads(response.read().decode())
+    top10 = None
+    try:
+        largest = ((rpc("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}])
+                    .get("result") or {}).get("value") or [])[:10]
+        supply = (((rpc("getTokenSupply", [mint, {"commitment": "confirmed"}])
+                    .get("result") or {}).get("value") or {}).get("uiAmountString"))
+        total = float(supply or 0)
+        if total > 0:
+            top10 = sum(float(item.get("uiAmountString") or 0) for item in largest) / total
+    except Exception:
+        top10 = None
     return {
         "mint_authority_active": info.get("mintAuthority") is not None,
         "freeze_authority_active": info.get("freezeAuthority") is not None,
         "transfer_hook_active": any("transferhook" in value for value in extension_types),
         "non_transferable": any("nontransferable" in value for value in extension_types),
-        "top10_holder_fraction": None,
+        "top10_holder_fraction": top10,
         "creator_fraction": None,
         "creator_selling": None,
         "safety_evidence_status": "ONCHAIN_VERIFIED",
-        "safety_evidence_source": "SOLANA_RPC_MINT_ACCOUNT",
+        "safety_evidence_source": "SOLANA_RPC_MINT_AND_LARGEST_ACCOUNTS",
     }
 
 
