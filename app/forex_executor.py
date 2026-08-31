@@ -1510,7 +1510,9 @@ class Executor:
                                       "automatic_live_promotion": False,
                                   },
                                   "profit_protection_shadow": {
-                                      "mode": "OBSERVATION_ONLY",
+                                      "mode": "ACTIVE_V5_PAPER_EXIT_LIVE_SHADOW_ONLY",
+                                      "v5_paper_exit_enforced": True,
+                                      "live_order_changes_enabled": False,
                                       "activation_range_r": [0.5, 0.75],
                                       "required_closed_observations": "30-50",
                                       "automatic_exit_changes": False,
