@@ -832,6 +832,22 @@ def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
          "runner creator concentration too high"),
     )
     hard_failures.extend(reason for failed, reason in checks if failed)
+    # Prospective evidence from Solumi and Dancedog shows that a large retained
+    # gain combined with weak current buying pressure is exhaustion, not
+    # confirmation. Keep tracking it, but do not create a paper/live position.
+    if (market_cap >= policy.minimum_market_cap_usd and
+            return_since_seen > 1.0 and pressure < 0.50):
+        hard_failures.append("runner late acceleration has weak buy pressure")
+    # STONK exposed a corrupt/incompatible 15-minute field (+1293% while the
+    # retained path was near +10%). Extreme inputs must be quarantined as data
+    # defects instead of being interpreted as stronger momentum.
+    if momentum_15m > 300:
+        hard_failures.append("runner fifteen-minute momentum outlier requires validation")
+    # The profitable AAPL control had $360k liquidity; the catastrophic late
+    # runners were materially shallower. A $1m market cap does not substitute
+    # for executable depth.
+    if market_cap >= policy.minimum_market_cap_usd and liquidity < 200_000:
+        hard_failures.append("runner $1m+ liquidity below $200k intelligence floor")
     if momentum_5m > policy.maximum_price_change_5m_pct:
         hard_failures.append("runner five-minute momentum above chase-risk maximum")
     elif momentum_5m < policy.conditional_minimum_price_change_5m_pct:
