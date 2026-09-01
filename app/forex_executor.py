@@ -809,10 +809,15 @@ def confirmed_trade_actions(transactions: list[dict], summary: dict, open_trades
                        if item.get("broker_trade_id")}
     outcome_by_symbol = {str(item.get("symbol")): item for item in outcomes}
     calendar_verified = all(item.get("calendar_verified") is True for item in snapshots) if snapshots else False
-    blackout = any(int(item.get("economic_event_within_minutes") or 0) > 0 for item in snapshots)
+    blackout_symbols = {
+        str(item.get("symbol") or item.get("instrument") or "")
+        for item in snapshots
+        if int(item.get("economic_event_within_minutes") or 0) > 0
+    }
 
     def base(tx: dict, pair: str, action_id: str) -> dict:
         outcome = outcome_by_symbol.get(pair, {})
+        pair_blackout = pair in blackout_symbols
         score = outcome.get("score")
         signal = (
             f"Signal score {score:.2f} versus "
@@ -837,7 +842,9 @@ def confirmed_trade_actions(transactions: list[dict], summary: dict, open_trades
             "signal_trigger": signal,
             "calendar_state": (
                 f"Verified: {'yes' if calendar_verified else 'no'}; "
-                f"active/upcoming blackout evidence: {'yes' if blackout else 'no'}"
+                f"blackout for {pair or 'this pair'}: {'yes' if pair_blackout else 'no'}; "
+                f"other scanned pairs with blackout: "
+                f"{', '.join(sorted(blackout_symbols - {pair})) or 'none'}"
             ),
             "executor_state": "LIVE_ARMED and ready; broker fill confirmed",
             "risk_summary": (
@@ -847,8 +854,8 @@ def confirmed_trade_actions(transactions: list[dict], summary: dict, open_trades
                 f"{float(risk.get('drawdown_pct') or 0) * 100:.2f}% drawdown"
             ),
             "warnings": ([outcome.get("reason")] if outcome.get("reason") else []) +
-                        (["Economic-calendar blackout is active for at least one scanned pair."]
-                         if blackout else []),
+                        ([f"Economic-calendar blackout applies to {pair}."]
+                         if pair_blackout else []),
         }
 
     for tx in transactions:

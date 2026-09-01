@@ -39,6 +39,7 @@ class IntelligenceLedgerTests(unittest.TestCase):
         self.assertEqual(0, second["checkpoints_added"])
         report = self.ledger.report()
         self.assertEqual(1, report["totals"]["observations"])
+        self.assertEqual(2, report["totals"]["checkpoints"])
         self.assertEqual(2, self.ledger.db.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0])
 
     def test_historical_services_and_promotion_gates_are_reported(self):

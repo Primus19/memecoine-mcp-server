@@ -360,7 +360,9 @@ class IntelligenceLedger:
                 COUNT(DISTINCT strategy) strategies,
                 SUM(CASE WHEN cohort LIKE '%SHADOW%' THEN 1 ELSE 0 END) shadow_observations,
                 SUM(CASE WHEN cohort='NEAR_MISS_SHADOW' THEN 1 ELSE 0 END) near_misses,
-                SUM(CASE WHEN cohort='HARD_REJECT_CONTROL' THEN 1 ELSE 0 END) hard_reject_controls
+                SUM(CASE WHEN cohort='HARD_REJECT_CONTROL' THEN 1 ELSE 0 END) hard_reject_controls,
+                (SELECT COUNT(*) FROM checkpoints) checkpoints,
+                (SELECT COUNT(*) FROM learnings) learnings
                 FROM observations""").fetchone())
             strategy_rows = [dict(row) for row in self.db.execute("""SELECT strategy,
                 COUNT(*) observations,

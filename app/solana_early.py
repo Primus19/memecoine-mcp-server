@@ -27,7 +27,8 @@ TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 STATE: dict[str, Any] = {"ok": False, "scanned_at": "", "scan_started_at": "",
                          "scan_status": "NOT_STARTED", "candidates": [], "error": "not scanned",
-                         "feed": "", "wallet_events": 0, "strategy_diagnostics": {}}
+                         "feed": "", "wallet_events": 0, "strategy_diagnostics": {},
+                         "last_completed_scan": None}
 
 
 def utcnow() -> str:
@@ -1612,7 +1613,15 @@ def main() -> None:
                                        "SOLANA_MICROCAP_RUNNER_CAPTURE",
                                    )}
             with LOCK:
-                STATE.update(ok=True, scanned_at=utcnow(), scan_status="COMPLETE",
+                completed_at = utcnow()
+                completed_snapshot = {
+                    "scanned_at": completed_at,
+                    "candidates": results[:240],
+                    "feed": feed,
+                    "strategy_diagnostics": diagnostics,
+                    "strategy_watchlists": strategy_watchlists,
+                }
+                STATE.update(ok=True, scanned_at=completed_at, scan_status="COMPLETE",
                              # Four strategy evaluations are emitted per pool.
                              # Keep all bounded results so a valid Runner Probe
                              # candidate cannot be truncated by other cohorts.
@@ -1624,6 +1633,7 @@ def main() -> None:
                                             "with_checkpoints": sum(bool(item.get("checkpoints")) for item in items)}
                                  for strategy, items in strategy_watchlists.items()
                              },
+                             last_completed_scan=completed_snapshot,
                              microcap_watchlist=watchlist,
                              microcap_watchlist_summary={
                                  "tracked": len(watchlist),

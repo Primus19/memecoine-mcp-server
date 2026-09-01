@@ -227,6 +227,7 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertIn('SOLANA_EARLY_MAX_CANDIDATES", "40"', source)
         self.assertIn('SOLANA_MICROCAP_WATCH_REFRESH_LIMIT", "20"', source)
         self.assertIn('scan_status="IN_PROGRESS"', source)
+        self.assertIn('last_completed_scan=completed_snapshot', source)
         self.assertIn('timeout=5.0', source)
 
     def test_pumpfun_ev_is_separate_and_paper_only(self):

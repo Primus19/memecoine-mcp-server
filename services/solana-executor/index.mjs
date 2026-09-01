@@ -408,6 +408,10 @@ function probePerformance() {
     networkFeeStatus: !feeRecordsComplete ? "FEES_BACKFILL_PENDING" : networkFeeLamports > 0
       ? feesComplete ? "CAPTURED_ON_CHAIN_AND_VALUED_USD" : "CAPTURED_ON_CHAIN_USD_PARTIAL"
       : "NO_CAPTURED_FEES",
+    // Always expose the result after fees that are actually known. Keep the
+    // exact all-fee result nullable until every historical transaction has a
+    // valued fee so reports cannot mistake a partial backfill for completeness.
+    netPnlAfterKnownNetworkFeesUsd: realizedPnlUsd - networkFeeUsd,
     netPnlAfterNetworkFeesUsd: feesComplete ? realizedPnlUsd - networkFeeUsd : null,
   };
 }
