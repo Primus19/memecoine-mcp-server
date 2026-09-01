@@ -29,6 +29,8 @@ def test_dashboard_renders_confirmed_and_paper_state():
     assert "cannot issue, modify, or close trades" in body
     assert "Market Scanner" in body
     assert "Model Performance" in body
+    assert "Intelligence Ledger" in body
+    assert "Evidence-backed tips and hypotheses" in body
     assert "setInterval(refresh,15*1000)" in body
     assert 'window.__INITIAL__={"generated_at"' in body
     assert "fetch('/dashboard/data'" in body

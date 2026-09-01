@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from .intelligence import classify_cohort
+
 UTC = timezone.utc
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 LOCK = threading.RLock()
@@ -1303,11 +1305,19 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
 
     # A promising pool can disappear from the newest-pools pages before it
     # reaches executable evidence. Refresh retained pools directly for an hour.
-    strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
     # Twenty direct pool refreshes plus three discovery pages remain inside the
     # public 30-request/minute GeckoTerminal allowance.
     refresh_limit = max(10, min(20, int(os.getenv("SOLANA_MICROCAP_WATCH_REFRESH_LIMIT", "20"))))
-    for pool in ledger.watched_pools(strategy, limit=refresh_limit):
+    strategies = (
+        "SOLANA_EARLY_CONTROL",
+        "SOLANA_PUMPFUN_EV_EXPERIMENT",
+        "SOLANA_MICROCAP_LAUNCH_MOMENTUM",
+        "SOLANA_MICROCAP_RUNNER_CAPTURE",
+    )
+    retained_pools: list[str] = []
+    for strategy in strategies:
+        retained_pools.extend(ledger.watched_pools(strategy, limit=refresh_limit))
+    for pool in list(dict.fromkeys(retained_pools))[:refresh_limit]:
         if pool in seen_pools:
             continue
         try:
@@ -1501,7 +1511,8 @@ class Handler(BaseHTTPRequestHandler):
                      "scan_status": value.get("scan_status", "UNKNOWN"),
                      "feed": value.get("feed", ""), "wallet_events": value.get("wallet_events", 0),
                      "strategy_diagnostics": value.get("strategy_diagnostics", {}),
-                     "microcap_watchlist_summary": value.get("microcap_watchlist_summary", {})}
+                     "microcap_watchlist_summary": value.get("microcap_watchlist_summary", {}),
+                     "intelligence_watchlist_summary": value.get("intelligence_watchlist_summary", {})}
         body = json.dumps(value).encode()
         self.send_response(200 if self.path == "/health" or value.get("ok", True) else 503)
         self.send_header("Content-Type", "application/json")
@@ -1536,29 +1547,58 @@ def main() -> None:
             candidates, feed = fetch_candidates(ledger)
             for candidate in candidates:
                 outcome = score_candidate(candidate, ledger, policy)
+                outcome_evidence = {**candidate, **outcome}
                 ledger.store_signal(candidate, outcome["score"], "QUALIFIED" if outcome["qualified"] else "REJECTED")
+                if classify_cohort(outcome_evidence)[0] in {
+                    "PRODUCTION_QUALIFIED", "PAPER_QUALIFIED", "NEAR_MISS_SHADOW", "RESEARCH_SHADOW"
+                }:
+                    ledger.upsert_watch_candidate(outcome_evidence, outcome["strategy"],
+                                                  classify_cohort(outcome_evidence)[0])
                 results.append(outcome)
                 pumpfun = score_pumpfun_ev_candidate(candidate, ledger, policy, pumpfun_policy)
+                pumpfun_evidence = {**candidate, **pumpfun}
                 pumpfun_payload = {**candidate, "strategy": pumpfun["strategy"], "ev_rank": pumpfun["ev_rank"]}
                 ledger.store_signal(pumpfun_payload, pumpfun["ev_rank"],
                                     "PAPER_QUALIFIED" if pumpfun["paper_qualified"] else "REJECTED")
+                if classify_cohort(pumpfun_evidence)[0] in {
+                    "PAPER_QUALIFIED", "NEAR_MISS_SHADOW", "RESEARCH_SHADOW"
+                }:
+                    ledger.upsert_watch_candidate(pumpfun_evidence, pumpfun["strategy"],
+                                                  classify_cohort(pumpfun_evidence)[0])
                 results.append(pumpfun)
                 microcap = score_microcap_launch_candidate(candidate, ledger, microcap_policy)
+                microcap_evidence = {**candidate, **microcap}
                 if microcap["watch_eligible"] or ledger.is_watched(microcap["strategy"], microcap["mint"]):
                     ledger.upsert_watch_candidate(
-                        candidate, microcap["strategy"],
+                        microcap_evidence, microcap["strategy"],
                         "QUALIFIED" if microcap["paper_qualified"] else "WATCHING")
+                elif classify_cohort(microcap_evidence)[0] in {"NEAR_MISS_SHADOW", "RESEARCH_SHADOW"}:
+                    ledger.upsert_watch_candidate(microcap_evidence, microcap["strategy"],
+                                                  classify_cohort(microcap_evidence)[0])
                 ledger.store_signal({**candidate, "strategy": microcap["strategy"]}, microcap["score"],
                                     "PAPER_QUALIFIED" if microcap["paper_qualified"] else "REJECTED")
                 results.append(microcap)
                 runner = score_runner_capture_candidate(candidate, ledger, runner_policy)
+                runner_evidence = {**candidate, **runner}
                 ledger.store_signal({**candidate, "strategy": runner["strategy"]}, runner["score"],
                                     "PAPER_QUALIFIED" if runner["paper_qualified"] else "REJECTED")
+                if classify_cohort(runner_evidence)[0] in {
+                    "PAPER_QUALIFIED", "NEAR_MISS_SHADOW", "RESEARCH_SHADOW"
+                }:
+                    ledger.upsert_watch_candidate(runner_evidence, runner["strategy"],
+                                                  classify_cohort(runner_evidence)[0])
                 results.append(runner)
             results.sort(key=lambda item: (item.get("paper_qualified", False),
                                            item.get("ev_rank", item["score"])), reverse=True)
             diagnostics = strategy_diagnostics(results)
             watchlist = ledger.watchlist_snapshot("SOLANA_MICROCAP_LAUNCH_MOMENTUM")
+            strategy_watchlists = {strategy: ledger.watchlist_snapshot(strategy)
+                                   for strategy in (
+                                       "SOLANA_EARLY_CONTROL",
+                                       "SOLANA_PUMPFUN_EV_EXPERIMENT",
+                                       "SOLANA_MICROCAP_LAUNCH_MOMENTUM",
+                                       "SOLANA_MICROCAP_RUNNER_CAPTURE",
+                                   )}
             with LOCK:
                 STATE.update(ok=True, scanned_at=utcnow(), scan_status="COMPLETE",
                              # Four strategy evaluations are emitted per pool.
@@ -1566,6 +1606,12 @@ def main() -> None:
                              # candidate cannot be truncated by other cohorts.
                              candidates=results[:240], error="", feed=feed,
                              strategy_diagnostics=diagnostics,
+                             strategy_watchlists=strategy_watchlists,
+                             intelligence_watchlist_summary={
+                                 strategy: {"tracked": len(items),
+                                            "with_checkpoints": sum(bool(item.get("checkpoints")) for item in items)}
+                                 for strategy, items in strategy_watchlists.items()
+                             },
                              microcap_watchlist=watchlist,
                              microcap_watchlist_summary={
                                  "tracked": len(watchlist),

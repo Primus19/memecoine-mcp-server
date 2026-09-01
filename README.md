@@ -353,6 +353,26 @@ the optional `MULTI_ASSET_FEED_BEARER_TOKEN` secret.
 
 The executor also publishes `/report` as an email-client-safe HTML Forex
 dashboard and `/report.json` as the exact machine-readable report snapshot.
+
+## Cross-strategy intelligence ledger
+
+The unified dashboard continuously consolidates Forex Control, every Bryne and
+Lot-Bill version, Coinbase meme trading, Solana Early, Divine, Microcap and
+Runner evidence into `/app/data/trading_intelligence.sqlite3`. The append-only
+ledger preserves the source payload and provenance hash, normalized trades and
+decisions, failed-rule severity, fees, MFE/MAE, and executable 5/15/30/60/120/240
+minute checkpoints. It separates production-qualified, paper-qualified,
+near-miss shadow, research shadow and hard-rejection control cohorts so inactive
+strategies can be evaluated without weakening immutable safety or sellability
+rules.
+
+Authenticated users can inspect the Intelligence Ledger dashboard tab or
+`/intelligence.json`. Learnings are saved with their evidence IDs, sample size,
+cost-stressed expectancy and adoption threshold. The ledger never changes live
+risk or promotes a strategy automatically: exit mechanisms require 30–50
+independent closes, while entry-model or risk promotion requires at least 100
+independent cost-stressed trades with positive expectancy.
+
 For reliable production delivery, the executor can send the generated HTML
 itself instead of relying on a connected-chat Gmail action. Delivery is opt-in,
 uses the existing SQLite ledger to suppress duplicates across restarts, retries
