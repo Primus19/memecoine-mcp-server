@@ -156,10 +156,12 @@ function compactProbeAudit(rows, previous = {}) {
   for (const row of rows || []) {
     if (row.action === "PROBE_SELL_FAILED") {
       const key = `${row.mint || "unknown"}:PROBE_SELL_FAILED`, current = summary[key] || {};
+      const times = [current.firstAt, current.lastAt, row.at]
+        .filter(Boolean).sort((a, b) => Date.parse(a) - Date.parse(b));
       summary[key] = {
         mint: row.mint || current.mint || "", symbol: row.symbol || current.symbol || "",
         action: "PROBE_SELL_FAILED", count: num(current.count) + 1,
-        firstAt: current.firstAt || row.at || "", lastAt: row.at || current.lastAt || "",
+        firstAt: times[0] || "", lastAt: times[times.length - 1] || "",
         lastError: row.error || current.lastError || "",
       };
       continue;
