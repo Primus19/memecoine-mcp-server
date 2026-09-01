@@ -135,6 +135,7 @@ const fresh = () => {
     liveShadowRealizedPnlUsd: 0,
     probePositions: [],
     probeFills: [],
+    probeOperationalSummary: {},
     probeSeen: {},
     positions: [],
     fills: [],
@@ -150,9 +151,31 @@ const fresh = () => {
     email: { sentCount: 0, pendingTradeEvent: false },
   };
 };
+function compactProbeAudit(rows, previous = {}) {
+  const summary = { ...previous }, kept = [], rejected = [];
+  for (const row of rows || []) {
+    if (row.action === "PROBE_SELL_FAILED") {
+      const key = `${row.mint || "unknown"}:PROBE_SELL_FAILED`, current = summary[key] || {};
+      summary[key] = {
+        mint: row.mint || current.mint || "", symbol: row.symbol || current.symbol || "",
+        action: "PROBE_SELL_FAILED", count: num(current.count) + 1,
+        firstAt: current.firstAt || row.at || "", lastAt: row.at || current.lastAt || "",
+        lastError: row.error || current.lastError || "",
+      };
+      continue;
+    }
+    if (row.action === "PROBE_PREFLIGHT_REJECTED") rejected.push(row);
+    else kept.push(row);
+  }
+  // Preflight rejections are research evidence, but repeated raw rows do not
+  // need unbounded live-state retention. Trade and settlement actions do.
+  return { rows: [...kept, ...rejected.slice(0, 250)].sort((a, b) =>
+      Date.parse(b.at || 0) - Date.parse(a.at || 0)), summary };
+}
 function load() {
   try {
     const x = JSON.parse(fs.readFileSync(PATH, "utf8"));
+    const compactedProbe = compactProbeAudit(x.probeFills || [], x.probeOperationalSummary || {});
     return {
       ...fresh(),
       ...x,
@@ -168,7 +191,8 @@ function load() {
       liveShadowFills: x.liveShadowFills || [],
       liveShadowSeen: x.liveShadowSeen || {},
       probePositions: x.probePositions || [],
-      probeFills: x.probeFills || [],
+      probeFills: compactedProbe.rows,
+      probeOperationalSummary: compactedProbe.summary,
       probeSeen: x.probeSeen || {},
     };
   } catch {
@@ -177,6 +201,10 @@ function load() {
 }
 let state = load();
 function save() {
+  const compactedProbe = compactProbeAudit(state.probeFills, state.probeOperationalSummary);
+  state.probeFills = compactedProbe.rows;
+  state.probeOperationalSummary = compactedProbe.summary;
+  state.errors = (state.errors || []).slice(0, 100);
   fs.mkdirSync(PATH.slice(0, PATH.lastIndexOf("/")), { recursive: true });
   fs.writeFileSync(`${PATH}.tmp`, JSON.stringify(state));
   fs.renameSync(`${PATH}.tmp`, PATH);
@@ -554,6 +582,7 @@ function publicState() {
       open: state.probePositions.length,
       fills: state.probeFills.slice(0, 20),
       performance: probePerformance(),
+      operationalHistorySummary: state.probeOperationalSummary || {},
     },
     paperPromotion: liveShadowStats(),
     liveShadowPromotion: liveShadowStats(),
