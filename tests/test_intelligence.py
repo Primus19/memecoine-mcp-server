@@ -91,6 +91,42 @@ class IntelligenceLedgerTests(unittest.TestCase):
         cohorts = {row[0] for row in self.ledger.db.execute("SELECT cohort FROM observations")}
         self.assertIn("NEAR_MISS_SHADOW", cohorts)
 
+    def test_missing_concentration_creates_data_fix_not_live_relaxation(self):
+        for index in range(12):
+            self.ledger.record("discovery", "CRYPTO", "MICROCAP_V2", {
+                "id": f"missing-{index}", "symbol": f"COIN{index}",
+                "failures": ["creator concentration unavailable"],
+            }, event_type="CANDIDATE_DECISION", mode="SHADOW")
+        rec = next(row for row in self.ledger.report()["actionable_recommendations"]
+                   if row["category"] == "DATA_COLLECTION_FIX")
+        self.assertEqual("P0", rec["priority"])
+        self.assertFalse(rec["live_change_allowed"])
+        self.assertIn("95%", rec["adoption_threshold"])
+
+    def test_positive_soft_rule_outcomes_create_shadow_only_experiment(self):
+        for index in range(10):
+            self.ledger.record("discovery", "CRYPTO", "RUNNER_V2", {
+                "id": f"momentum-{index}", "symbol": f"COIN{index}",
+                "failures": ["five-minute momentum below floor"],
+                "checkpoints": {"60": {"executablePnlUsd": .10,
+                                            "sellRouteOk": True}},
+            }, event_type="SHADOW_FORWARD_PATH", mode="SHADOW")
+        rec = next(row for row in self.ledger.report()["actionable_recommendations"]
+                   if row["category"] == "SHADOW_EXPERIMENT")
+        self.assertEqual("momentum_acceleration", rec["experiment"]["rule_family"])
+        self.assertEqual("SHADOW_ONLY", rec["experiment"]["mode"])
+        self.assertFalse(rec["live_change_allowed"])
+
+    def test_negative_expectancy_blocks_promotion(self):
+        self.ledger.record("forex", "FOREX", "FOREX_CONTROL", {
+            "id": "loss", "instrument": "NZD_USD", "realized_pnl_usd": -.1,
+            "cost_stressed_pnl_usd": -.12,
+        }, event_type="BROKER_CLOSE", mode="LIVE")
+        rec = next(row for row in self.ledger.report()["actionable_recommendations"]
+                   if row["category"] == "PROMOTION_BLOCKED")
+        self.assertIn("100 independent", rec["adoption_threshold"])
+        self.assertFalse(rec["live_change_allowed"])
+
 
 if __name__ == "__main__":
     unittest.main()

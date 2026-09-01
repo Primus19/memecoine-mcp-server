@@ -76,9 +76,16 @@ const cfg = {
     2,
     Math.max(1, num(env("SOLANA_PAPER_MAX_PER_STRATEGY"), 2)),
   ),
+  // A paper observation carries no capital risk. Capture transient qualified
+  // candidates on their first completed scan so the intelligence ledger can
+  // measure them; keep real-money Runner probes on a separate two-scan gate.
   paperConfirmationScans: Math.max(
+    1,
+    num(env("SOLANA_PAPER_CONFIRMATION_SCANS"), 1),
+  ),
+  probeConfirmationScans: Math.max(
     2,
-    num(env("SOLANA_PAPER_CONFIRMATION_SCANS"), 2),
+    num(env("SOLANA_RUNNER_PROBE_CONFIRMATION_SCANS"), 2),
   ),
   paperEntryCooldownSeconds: Math.max(
     300,
@@ -121,6 +128,7 @@ const fresh = () => {
     paperRealizedPnlUsd: 0,
     postExitFollowups: [],
     confirmations: {},
+    candidateHandoffs: [],
     lastPaperEntryAt: {},
     liveShadowPositions: [],
     liveShadowFills: [],
@@ -1913,7 +1921,7 @@ async function email(hasTradeEvent = false) {
   };
   return true;
 }
-function confirmCandidate(c, strategy, scanAt) {
+function confirmCandidate(c, strategy, scanAt, requiredScans = 1) {
   const key = `${strategy}:${c.mint}`,
     prior = state.confirmations[key],
     scan = scanAt || new Date().toISOString(),
@@ -1929,7 +1937,7 @@ function confirmCandidate(c, strategy, scanAt) {
     priceChange5mPct: c.price_change_5m_pct,
     netBuyPressure: c.net_buy_pressure,
   };
-  return state.confirmations[key].count >= cfg.paperConfirmationScans;
+  return state.confirmations[key].count >= requiredScans;
 }
 async function tick() {
   if (!cfg.enabled) return;
@@ -1963,7 +1971,11 @@ async function tick() {
     const strategy = c.strategy || "SOLANA_EARLY_CONTROL",
       seenKey = `${strategy}:${c.mint}`,
       scanAt = data.scanned_at || new Date().toISOString();
-    if (state.seen[seenKey] || !confirmCandidate(c, strategy, scanAt)) continue;
+    if (
+      state.seen[seenKey] ||
+      !confirmCandidate(c, strategy, scanAt, cfg.paperConfirmationScans)
+    )
+      continue;
     const strategyOpen = state.paperPositions.filter(
         (p) => (p.strategy || "SOLANA_EARLY_CONTROL") === strategy,
       ).length,
@@ -1977,8 +1989,29 @@ async function tick() {
       state.paperPositions.length < cfg.paperMax &&
       exposure(state.paperPositions) + cfg.paperEntry <= cfg.paperTotal
     ) {
-      changed = (await paperBuy(c)) || changed;
-      state.seen[seenKey] = scanAt;
+      try {
+        changed = (await paperBuy(c)) || changed;
+        state.seen[seenKey] = scanAt;
+        state.candidateHandoffs.unshift({
+          at: new Date().toISOString(),
+          scanAt,
+          strategy,
+          mint: c.mint,
+          symbol: c.symbol,
+          status: "PAPER_ENTRY_CAPTURED",
+        });
+      } catch (e) {
+        state.candidateHandoffs.unshift({
+          at: new Date().toISOString(),
+          scanAt,
+          strategy,
+          mint: c.mint,
+          symbol: c.symbol,
+          status: "PAPER_ENTRY_QUOTE_FAILED",
+          error: e.message.slice(0, 250),
+        });
+      }
+      state.candidateHandoffs = state.candidateHandoffs.slice(0, 100);
     }
   }
   for (const c of candidates.filter((x) => x.qualified === true)) {
@@ -2005,7 +2038,12 @@ async function tick() {
     )) {
       if (
         state.probeSeen[candidate.mint] ||
-        !confirmCandidate(candidate, "RUNNER_LIVE_PROBE", scanAt)
+        !confirmCandidate(
+          candidate,
+          "RUNNER_LIVE_PROBE",
+          scanAt,
+          cfg.probeConfirmationScans,
+        )
       )
         continue;
       changed = (await runnerProbeBuy(candidate)) || changed;

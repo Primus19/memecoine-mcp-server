@@ -634,6 +634,9 @@ class SolanaEarlyTests(unittest.TestCase):
                          "runnerLiveProbePerformance",
                          "containsRealMoneyProbe:true"):
             self.assertTrue(expected in source or "".join(expected.split()) in compact)
+        self.assertIn("probeConfirmationScans", source)
+        self.assertIn("candidateHandoffs", source)
+        self.assertIn("PAPER_ENTRY_QUOTE_FAILED", source)
 
     def test_runner_live_probe_reprices_actual_fill_and_exits_fast(self):
         source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()

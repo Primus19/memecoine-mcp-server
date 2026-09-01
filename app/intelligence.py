@@ -12,15 +12,45 @@ from typing import Any
 
 
 CHECKPOINTS = (5, 15, 30, 60, 120, 240)
+CLOSE_EVENT_TYPES = (
+    "TRADE_OR_DECISION", "TRADE_INTENT", "BROKER_ACTION", "BROKER_CLOSE", "PAPER_TRADE",
+    "ARCHIVED_PAPER_TRADE", "PAPER_CLOSE", "PAPER_OR_LIVE_ACTION", "LIVE_PROBE",
+)
 HARD_RISK_TERMS = (
     "no sell route", "unsellable", "sell impact", "excessive impact",
     "sell simulation failed", "price impact above", "mint authority",
     "freeze authority", "unsafe", "stale", "honeypot",
+    "concentration too high", "holder concentration above",
 )
 SOFT_RISK_TERMS = (
     "momentum", "acceleration", "retracement", "market cap", "volume",
     "buy pressure", "buyer", "age", "timing", "confirmation", "score",
+    "concentration unavailable", "holder evidence unavailable",
+    "creator evidence unavailable", "missing concentration",
 )
+
+RECOMMENDATION_PRIORITY = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+def rule_family(rule: str) -> str:
+    """Normalize threshold-specific rejection text into comparable mechanisms."""
+    low = rule.lower()
+    families = (
+        ("sellability", ("sell route", "sell impact", "price impact", "sell simulation", "unsellable")),
+        ("concentration_data", ("concentration", "holder evidence", "creator evidence", "top-holder")),
+        ("liquidity", ("liquidity",)),
+        ("market_cap", ("market cap", "capitalization")),
+        ("momentum_acceleration", ("momentum", "acceleration")),
+        ("volume", ("volume",)),
+        ("buy_pressure", ("buy pressure", "buyer")),
+        ("retracement", ("retracement",)),
+        ("entry_quality", ("score", "confirmation", "timing")),
+        ("age", ("age", "too old")),
+    )
+    for family, terms in families:
+        if any(term in low for term in terms):
+            return family
+    return "other"
 
 
 def utcnow() -> str:
@@ -246,6 +276,8 @@ class IntelligenceLedger:
                             list(live_probe.get("fills") or [])))
         collections.append(("solana", "CRYPTO", "SOLANA_RUNNER_FOLLOWUP", "POST_EXIT_PATH", "SHADOW",
                             list(solana.get("postExitFollowups") or solana.get("postExitCounterfactuals") or [])))
+        collections.append(("solana", "CRYPTO", "SOLANA_CANDIDATE_HANDOFF", "CANDIDATE_HANDOFF", "SHADOW",
+                            list(solana.get("candidateHandoffs") or [])))
         for item in discovery.get("candidates") or []:
             strategy = str(item.get("strategy") or "SOLANA_DISCOVERY")
             collections.append(("discovery", "CRYPTO", strategy, "CANDIDATE_DECISION", "SHADOW", [item]))
@@ -294,9 +326,12 @@ class IntelligenceLedger:
                 "error": error}
 
     def extract_learnings(self) -> int:
-        rows = [dict(row) for row in self.db.execute("""SELECT evidence_id,strategy,cohort,
-            realized_pnl_usd,cost_stressed_pnl_usd FROM observations
-            WHERE realized_pnl_usd IS NOT NULL""").fetchall()]
+        close_types = ",".join("?" for _ in CLOSE_EVENT_TYPES)
+        rows = [dict(row) for row in self.db.execute(f"""SELECT MIN(evidence_id) evidence_id,
+            strategy,MIN(cohort) cohort,realized_pnl_usd,cost_stressed_pnl_usd
+            FROM observations WHERE realized_pnl_usd IS NOT NULL AND event_type IN ({close_types})
+            GROUP BY strategy,event_type,instrument,COALESCE(observed_at,''),realized_pnl_usd,
+            COALESCE(cost_stressed_pnl_usd,realized_pnl_usd)""", CLOSE_EVENT_TYPES).fetchall()]
         grouped: dict[str, list[dict]] = defaultdict(list)
         for row in rows:
             grouped[row["strategy"]].append(row)
@@ -370,6 +405,155 @@ class IntelligenceLedger:
                 sample, wins, expectancy, stressed, json.dumps(evidence_ids), threshold, body))
         return int(cursor.rowcount == 1)
 
+    @staticmethod
+    def _recommendation_id(payload: dict) -> str:
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(body.encode()).hexdigest()[:16]
+
+    def actionable_recommendations(self) -> list[dict]:
+        """Convert retained evidence into guarded, testable actions.
+
+        Recommendations are advisory and deterministic. They never mutate a
+        strategy, authorize a trade, or bypass a hard execution/safety gate.
+        """
+        recommendations: list[dict] = []
+
+        def add(*, priority: str, category: str, strategy: str, action: str,
+                rationale: str, sample_size: int, confidence: str,
+                evidence_ids: list[str], destinations: list[str], experiment: dict | None,
+                adoption_threshold: str, live_change_allowed: bool = False) -> None:
+            payload = {
+                "priority": priority, "category": category, "strategy": strategy,
+                "action": action, "rationale": rationale, "sample_size": sample_size,
+                "confidence": confidence, "evidence_ids": evidence_ids[-25:],
+                "eligible_destinations": destinations, "experiment": experiment,
+                "adoption_threshold": adoption_threshold,
+                "live_change_allowed": live_change_allowed,
+            }
+            payload["recommendation_id"] = self._recommendation_id(payload)
+            recommendations.append(payload)
+
+        close_types = ",".join("?" for _ in CLOSE_EVENT_TYPES)
+        performance = [dict(row) for row in self.db.execute(f"""WITH independent_closes AS (
+            SELECT MIN(evidence_id) evidence_id,strategy,
+            COALESCE(cost_stressed_pnl_usd,realized_pnl_usd) pnl
+            FROM observations WHERE realized_pnl_usd IS NOT NULL AND event_type IN ({close_types})
+            GROUP BY strategy,event_type,instrument,COALESCE(observed_at,''),realized_pnl_usd,
+            COALESCE(cost_stressed_pnl_usd,realized_pnl_usd))
+            SELECT strategy,COUNT(*) sample_size,AVG(pnl) expectancy,
+            GROUP_CONCAT(evidence_id) evidence_ids FROM independent_closes GROUP BY strategy""",
+            CLOSE_EVENT_TYPES).fetchall()]
+        for row in performance:
+            sample, expectancy = int(row["sample_size"]), float(row["expectancy"] or 0)
+            evidence_ids = str(row["evidence_ids"] or "").split(",")
+            if sample < 100 or expectancy <= 0:
+                add(priority="P0" if expectancy <= 0 else "P2", category="PROMOTION_BLOCKED",
+                    strategy=row["strategy"],
+                    action="Keep this cohort paper/shadow and preserve current risk limits.",
+                    rationale=(f"Cost-stressed expectancy is ${expectancy:.4f} across {sample} closes; "
+                               "the model/risk promotion gate is not met."),
+                    sample_size=sample, confidence="HIGH" if sample >= 30 else "LOW_SAMPLE",
+                    evidence_ids=evidence_ids, destinations=[row["strategy"]], experiment=None,
+                    adoption_threshold="100 independent closes with positive cost-stressed expectancy")
+
+        rules = [dict(row) for row in self.db.execute("""SELECT r.evidence_id,r.rule,r.severity,
+            o.strategy,o.asset_class FROM rule_evidence r JOIN observations o
+            ON o.evidence_id=r.evidence_id""").fetchall()]
+        grouped_rules: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+        for row in rules:
+            grouped_rules[(row["strategy"], rule_family(row["rule"]), row["severity"])].append(row)
+
+        for (strategy, family, severity), values in grouped_rules.items():
+            if family == "concentration_data" and len(values) >= 10:
+                add(priority="P0", category="DATA_COLLECTION_FIX", strategy=strategy,
+                    action="Repair holder/creator concentration enrichment and record source freshness.",
+                    rationale=(f"Concentration evidence was unavailable in {len(values)} retained "
+                               "decisions, preventing an auditable safety decision."),
+                    sample_size=len(values), confidence="HIGH",
+                    evidence_ids=[row["evidence_id"] for row in values], destinations=[strategy],
+                    experiment={"metric": "concentration_coverage_rate", "target": ">=95% fresh coverage"},
+                    adoption_threshold="95% fresh coverage over 100 consecutive candidates")
+            if severity == "HARD" and family == "sellability" and values:
+                add(priority="P0", category="KEEP_HARD_GATE", strategy=strategy,
+                    action="Keep current full-size exit-route and impact checks mandatory.",
+                    rationale=f"{len(values)} observations failed executable sellability.",
+                    sample_size=len(values), confidence="HIGH",
+                    evidence_ids=[row["evidence_id"] for row in values], destinations=[strategy],
+                    experiment={"metric": "prevented_unsellable_entries", "execution": "forward-track only"},
+                    adoption_threshold="Never relax from mark-price performance alone")
+
+        handoff_failures = [dict(row) for row in self.db.execute("""SELECT evidence_id,strategy,
+            instrument,decision FROM observations WHERE event_type='CANDIDATE_HANDOFF'
+            AND decision='PAPER_ENTRY_QUOTE_FAILED'""").fetchall()]
+        if handoff_failures:
+            add(priority="P0", category="PIPELINE_RELIABILITY", strategy="SOLANA_CANDIDATE_HANDOFF",
+                action="Investigate every qualified-candidate quote failure and retain the attempted executable entry.",
+                rationale=(f"{len(handoff_failures)} qualified paper candidates reached the executor but "
+                           "could not produce an executable entry quote."),
+                sample_size=len(handoff_failures), confidence="HIGH",
+                evidence_ids=[row["evidence_id"] for row in handoff_failures],
+                destinations=["MICROCAP", "RUNNER", "DIVINE", "SOLANA_EARLY"],
+                experiment={"metric": "qualified_to_paper_capture_rate", "target": ">=99%",
+                            "failure_policy": "record and continue; never invent a fill"},
+                adoption_threshold="99% handoff accounting over 100 qualified paper candidates")
+
+        checkpoint_rows = [dict(row) for row in self.db.execute("""SELECT r.evidence_id,r.rule,
+            o.strategy,o.asset_class,c.checkpoint_minutes,c.executable_pnl_usd,c.sell_route_ok
+            FROM rule_evidence r JOIN observations o ON o.evidence_id=r.evidence_id
+            JOIN checkpoints c ON c.evidence_id=r.evidence_id
+            WHERE r.severity='SOFT' AND c.executable_pnl_usd IS NOT NULL""").fetchall()]
+        horizon_rank = {60: 0, 30: 1, 15: 2, 120: 3, 240: 4, 5: 5}
+        best: dict[tuple[str, str], dict] = {}
+        for row in checkpoint_rows:
+            key = (row["evidence_id"], rule_family(row["rule"]))
+            if key not in best or horizon_rank.get(row["checkpoint_minutes"], 99) < horizon_rank.get(best[key]["checkpoint_minutes"], 99):
+                best[key] = row
+        outcomes: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+        for row in best.values():
+            outcomes[(row["strategy"], rule_family(row["rule"]), row["asset_class"])].append(row)
+        for (strategy, family, asset_class), values in outcomes.items():
+            sample = len(values)
+            stress = 0.02 if asset_class == "CRYPTO" else 0.01
+            stressed = [float(row["executable_pnl_usd"]) - stress for row in values]
+            expectancy = sum(stressed) / sample
+            win_rate = sum(value > 0 for value in stressed) / sample
+            ready = sample >= 10 and expectancy > 0 and win_rate >= .50
+            add(priority="P1" if ready else "P3",
+                category="SHADOW_EXPERIMENT" if ready else "COLLECT_MORE_EVIDENCE",
+                strategy=strategy,
+                action=(f"Prospectively shadow-test candidates failing only {family}; do not change live rules."
+                        if ready else f"Continue executable forward tracking for the {family} rule family."),
+                rationale=(f"One independent checkpoint per candidate gives n={sample}, "
+                           f"cost-stressed expectancy ${expectancy:.4f}, win rate {win_rate:.1%}."),
+                sample_size=sample, confidence="MEDIUM" if ready else "LOW_SAMPLE",
+                evidence_ids=[row["evidence_id"] for row in values], destinations=[strategy],
+                experiment={"rule_family": family, "mode": "SHADOW_ONLY", "cost_stress_usd": stress,
+                            "primary_metric": "cost_stressed_expectancy_usd",
+                            "control": "production-qualified and hard-rejected cohorts"},
+                adoption_threshold="30-50 independent closes for exit rules; 100 positive cost-stressed closes for entry/model changes")
+
+        givebacks = [dict(row) for row in self.db.execute("""SELECT learning_id,strategy,
+            statement,sample_size,evidence_ids_json FROM learnings WHERE mechanism='PROFIT_GIVEBACK'
+            ORDER BY created_at DESC""").fetchall()]
+        latest_giveback: dict[str, dict] = {}
+        for row in givebacks:
+            latest_giveback.setdefault(row["strategy"], row)
+        for strategy, row in latest_giveback.items():
+            add(priority="P1", category="EXIT_EXPERIMENT", strategy=strategy,
+                action="Shadow-test cost-aware profit retention after meaningful MFE and signal deterioration.",
+                rationale=row["statement"], sample_size=int(row["sample_size"]),
+                confidence="LOW_SAMPLE" if int(row["sample_size"]) < 30 else "MEDIUM",
+                evidence_ids=json.loads(row["evidence_ids_json"]), destinations=[strategy],
+                experiment={"mode": "SHADOW_ONLY", "trigger": [
+                    "positive MFE", "alignment deterioration", "remaining edge below costs",
+                    "configured MFE giveback"],
+                    "compare": ["existing stop/target", "0.5R floor", "0.75R floor", "cost-aware deterioration exit"],
+                    "metrics": ["profit_capture", "expectancy", "drawdown", "false_exit_rate"]},
+                adoption_threshold="30-50 independent closes with better cost-stressed expectancy and no higher drawdown")
+
+        recommendations.sort(key=lambda row: (RECOMMENDATION_PRIORITY.get(row["priority"], 9), row["strategy"], row["category"]))
+        return recommendations
+
     def report(self, limit: int = 100) -> dict:
         with self.lock:
             totals = dict(self.db.execute("""SELECT COUNT(*) observations,
@@ -380,13 +564,22 @@ class IntelligenceLedger:
                 (SELECT COUNT(*) FROM checkpoints) checkpoints,
                 (SELECT COUNT(*) FROM learnings) learnings
                 FROM observations""").fetchone())
-            strategy_rows = [dict(row) for row in self.db.execute("""SELECT strategy,
-                COUNT(*) observations,
-                SUM(CASE WHEN realized_pnl_usd IS NOT NULL THEN 1 ELSE 0 END) closed,
-                SUM(CASE WHEN realized_pnl_usd>0 THEN 1 ELSE 0 END) wins,
+            close_types = ",".join("?" for _ in CLOSE_EVENT_TYPES)
+            strategy_rows = [dict(row) for row in self.db.execute(f"""WITH evidence AS (
+                SELECT strategy,COUNT(*) observations FROM observations GROUP BY strategy),
+                independent_closes AS (SELECT strategy,realized_pnl_usd,
+                COALESCE(cost_stressed_pnl_usd,realized_pnl_usd) stressed
+                FROM observations WHERE realized_pnl_usd IS NOT NULL AND event_type IN ({close_types})
+                GROUP BY strategy,event_type,instrument,COALESCE(observed_at,''),realized_pnl_usd,
+                COALESCE(cost_stressed_pnl_usd,realized_pnl_usd)), stats AS (
+                SELECT strategy,COUNT(*) closed,SUM(realized_pnl_usd>0) wins,
                 ROUND(AVG(realized_pnl_usd),8) expectancy_usd,
-                ROUND(AVG(COALESCE(cost_stressed_pnl_usd,realized_pnl_usd)),8) cost_stressed_expectancy_usd
-                FROM observations GROUP BY strategy ORDER BY closed DESC,observations DESC""").fetchall()]
+                ROUND(AVG(stressed),8) cost_stressed_expectancy_usd
+                FROM independent_closes GROUP BY strategy)
+                SELECT e.strategy,e.observations,COALESCE(s.closed,0) closed,
+                COALESCE(s.wins,0) wins,s.expectancy_usd,s.cost_stressed_expectancy_usd
+                FROM evidence e LEFT JOIN stats s ON s.strategy=e.strategy
+                ORDER BY closed DESC,observations DESC""", CLOSE_EVENT_TYPES).fetchall()]
             learning_rows = [dict(row) for row in self.db.execute("""SELECT l.* FROM learnings l
                 JOIN (SELECT learning_key,MAX(created_at) created_at FROM learnings GROUP BY learning_key) x
                 ON x.learning_key=l.learning_key AND x.created_at=l.created_at
@@ -397,12 +590,22 @@ class IntelligenceLedger:
                 FROM observations ORDER BY recorded_at DESC LIMIT ?""", (limit,)).fetchall()]
             runs = [dict(row) for row in self.db.execute(
                 "SELECT * FROM ingestion_runs ORDER BY started_at DESC LIMIT 10").fetchall()]
+        recommendations = self.actionable_recommendations()
         return {"generated_at": utcnow(), "database": "PERSISTENT_SQLITE_APPEND_ONLY",
                 "checkpoints_minutes": list(CHECKPOINTS), "totals": totals,
                 "strategies": strategy_rows, "learnings": learning_rows,
                 "recent_evidence": recent, "recent_ingestion_runs": runs,
+                "actionable_recommendations": recommendations[:limit],
+                "recommendation_summary": {
+                    "total": len(recommendations),
+                    "p0": sum(row["priority"] == "P0" for row in recommendations),
+                    "p1": sum(row["priority"] == "P1" for row in recommendations),
+                    "live_changes_authorized": sum(bool(row["live_change_allowed"]) for row in recommendations),
+                },
                 "promotion_policy": {
                     "exit_rule": "30-50 independent cost-stressed closed observations",
                     "model_or_risk": "100 independent positive cost-stressed closed observations",
                     "automatic_promotion": False,
+                    "recommendations_are_advisory": True,
+                    "hard_gates_never_relaxed_automatically": True,
                 }}
