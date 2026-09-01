@@ -6,7 +6,7 @@ import os
 import sqlite3
 import threading
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +106,11 @@ class IntelligenceLedger:
     """
 
     def __init__(self, path: str):
+        self.path = path
+        self.raw_retention_days = max(
+            7, int(os.getenv("TRADING_INTELLIGENCE_RAW_RETENTION_DAYS", "30")))
+        self.ingestion_run_retention_days = max(
+            7, int(os.getenv("TRADING_INTELLIGENCE_RUN_RETENTION_DAYS", "30")))
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -160,7 +165,61 @@ class IntelligenceLedger:
               checkpoints_added INTEGER NOT NULL DEFAULT 0,
               learnings_added INTEGER NOT NULL DEFAULT 0,
               error TEXT);
+            CREATE TABLE IF NOT EXISTS maintenance_state(
+              key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+
+    def compact(self, *, force: bool = False) -> dict:
+        """Prune old, non-actionable raw noise without removing audit evidence.
+
+        Confirmed trades, realized outcomes, executable checkpoints, learning
+        references, and hard-risk controls are permanent.  Only old raw scan
+        observations that have none of those properties are eligible.
+        """
+        now = datetime.now(timezone.utc)
+        with self.lock:
+            previous = self.db.execute(
+                "SELECT value FROM maintenance_state WHERE key='last_compacted_at'").fetchone()
+            if not force and previous:
+                try:
+                    if now - datetime.fromisoformat(previous[0]) < timedelta(hours=24):
+                        return {"status": "NOT_DUE", "last_compacted_at": previous[0]}
+                except (TypeError, ValueError):
+                    pass
+            observation_cutoff = (now - timedelta(days=self.raw_retention_days)).isoformat()
+            run_cutoff = (now - timedelta(days=self.ingestion_run_retention_days)).isoformat()
+            before_bytes = os.path.getsize(self.path) if os.path.exists(self.path) else 0
+            with self.db:
+                eligible = [row[0] for row in self.db.execute("""
+                    SELECT o.evidence_id FROM observations o
+                    WHERE o.recorded_at < ?
+                      AND o.realized_pnl_usd IS NULL
+                      AND o.event_type IN ('CANDIDATE_DECISION','TRADE_CHECKPOINT')
+                      AND o.cohort NOT IN ('HARD_REJECT_CONTROL','PRODUCTION_QUALIFIED','PAPER_QUALIFIED')
+                      AND NOT EXISTS (SELECT 1 FROM checkpoints c WHERE c.evidence_id=o.evidence_id)
+                      AND NOT EXISTS (
+                        SELECT 1 FROM learnings l
+                        WHERE instr(l.evidence_ids_json,o.evidence_id)>0)
+                    """, (observation_cutoff,)).fetchall()]
+                if eligible:
+                    marks = ",".join("?" for _ in eligible)
+                    self.db.execute(f"DELETE FROM rule_evidence WHERE evidence_id IN ({marks})", eligible)
+                    self.db.execute(f"DELETE FROM observations WHERE evidence_id IN ({marks})", eligible)
+                run_cursor = self.db.execute("""DELETE FROM ingestion_runs
+                    WHERE started_at < ? AND COALESCE(error,'')=''""", (run_cutoff,))
+                self.db.execute("""INSERT INTO maintenance_state(key,value) VALUES('last_compacted_at',?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (now.isoformat(),))
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            # VACUUM is intentionally outside a transaction. It reclaims pages
+            # after the evidence-safe deletes above and never runs per ingest.
+            self.db.execute("VACUUM")
+            after_bytes = os.path.getsize(self.path) if os.path.exists(self.path) else 0
+        return {"status": "COMPLETED", "completed_at": now.isoformat(),
+                "raw_retention_days": self.raw_retention_days,
+                "observations_removed": len(eligible),
+                "ingestion_runs_removed": max(0, run_cursor.rowcount),
+                "bytes_before": before_bytes, "bytes_after": after_bytes,
+                "bytes_reclaimed": max(0, before_bytes - after_bytes)}
 
     @staticmethod
     def evidence_id(service: str, strategy: str, item: dict, ordinal: int = 0) -> str:
@@ -321,9 +380,10 @@ class IntelligenceLedger:
             self.db.execute("""UPDATE ingestion_runs SET completed_at=?,observations_added=?,
                 checkpoints_added=?,learnings_added=?,error=? WHERE run_id=?""",
                 (utcnow(), observations_added, checkpoints_added, learnings_added, error, run_id))
+        maintenance = self.compact()
         return {"run_id": run_id, "observations_added": observations_added,
                 "checkpoints_added": checkpoints_added, "learnings_added": learnings_added,
-                "error": error}
+                "error": error, "maintenance": maintenance}
 
     def extract_learnings(self) -> int:
         close_types = ",".join("?" for _ in CLOSE_EVENT_TYPES)
@@ -591,7 +651,7 @@ class IntelligenceLedger:
             runs = [dict(row) for row in self.db.execute(
                 "SELECT * FROM ingestion_runs ORDER BY started_at DESC LIMIT 10").fetchall()]
         recommendations = self.actionable_recommendations()
-        return {"generated_at": utcnow(), "database": "PERSISTENT_SQLITE_APPEND_ONLY",
+        return {"generated_at": utcnow(), "database": "PERSISTENT_SQLITE_AUDIT_WITH_BOUNDED_RAW_RETENTION",
                 "checkpoints_minutes": list(CHECKPOINTS), "totals": totals,
                 "strategies": strategy_rows, "learnings": learning_rows,
                 "recent_evidence": recent, "recent_ingestion_runs": runs,
@@ -608,4 +668,9 @@ class IntelligenceLedger:
                     "automatic_promotion": False,
                     "recommendations_are_advisory": True,
                     "hard_gates_never_relaxed_automatically": True,
+                }, "storage_policy": {
+                    "audit_evidence_permanent": True,
+                    "trades_checkpoints_learnings_preserved": True,
+                    "raw_non_actionable_retention_days": self.raw_retention_days,
+                    "ingestion_run_retention_days": self.ingestion_run_retention_days,
                 }}
