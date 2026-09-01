@@ -12,6 +12,7 @@ from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServe
                                 FIVE_STREAK_STRATEGY,
                                 five_streak_email_actions, five_streak_profit_floor_r,
                                 five_streak_signals, bryne_liquidity_signals,
+                                calendar_execution_allowed,
                                 live_profit_protection_shadow, live_profit_exit_decision,
                                 recoverable_managed_trade,
                                 historical_managed_trade_outcomes,
@@ -34,6 +35,16 @@ class Adapter:
 
 
 class ForexExecutorTests(unittest.TestCase):
+    def test_calendar_execution_fails_closed_on_pair_blackout(self):
+        base = {"calendar_verified": True,
+                "economic_event_source": "https://official.example/calendar",
+                "economic_event_within_minutes": 0,
+                "high_impact_calendar_blackout": False}
+        self.assertTrue(calendar_execution_allowed(base))
+        self.assertFalse(calendar_execution_allowed({**base, "economic_event_within_minutes": 30}))
+        self.assertFalse(calendar_execution_allowed({**base, "high_impact_calendar_blackout": True}))
+        self.assertFalse(calendar_execution_allowed({**base, "calendar_verified": False}))
+
     def test_bryne_v5_enters_only_after_sweep_break_and_order_block_retest(self):
         history = []
         for index in range(25):
