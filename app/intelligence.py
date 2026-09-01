@@ -14,7 +14,8 @@ from typing import Any
 CHECKPOINTS = (5, 15, 30, 60, 120, 240)
 HARD_RISK_TERMS = (
     "no sell route", "unsellable", "sell impact", "excessive impact",
-    "mint authority", "freeze authority", "unsafe", "stale", "honeypot",
+    "sell simulation failed", "price impact above", "mint authority",
+    "freeze authority", "unsafe", "stale", "honeypot",
 )
 SOFT_RISK_TERMS = (
     "momentum", "acceleration", "retracement", "market cap", "volume",

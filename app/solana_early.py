@@ -1554,7 +1554,7 @@ def main() -> None:
                 }:
                     ledger.upsert_watch_candidate(outcome_evidence, outcome["strategy"],
                                                   classify_cohort(outcome_evidence)[0])
-                results.append(outcome)
+                results.append(outcome_evidence)
                 pumpfun = score_pumpfun_ev_candidate(candidate, ledger, policy, pumpfun_policy)
                 pumpfun_evidence = {**candidate, **pumpfun}
                 pumpfun_payload = {**candidate, "strategy": pumpfun["strategy"], "ev_rank": pumpfun["ev_rank"]}
@@ -1565,7 +1565,7 @@ def main() -> None:
                 }:
                     ledger.upsert_watch_candidate(pumpfun_evidence, pumpfun["strategy"],
                                                   classify_cohort(pumpfun_evidence)[0])
-                results.append(pumpfun)
+                results.append(pumpfun_evidence)
                 microcap = score_microcap_launch_candidate(candidate, ledger, microcap_policy)
                 microcap_evidence = {**candidate, **microcap}
                 if microcap["watch_eligible"] or ledger.is_watched(microcap["strategy"], microcap["mint"]):
@@ -1577,7 +1577,7 @@ def main() -> None:
                                                   classify_cohort(microcap_evidence)[0])
                 ledger.store_signal({**candidate, "strategy": microcap["strategy"]}, microcap["score"],
                                     "PAPER_QUALIFIED" if microcap["paper_qualified"] else "REJECTED")
-                results.append(microcap)
+                results.append(microcap_evidence)
                 runner = score_runner_capture_candidate(candidate, ledger, runner_policy)
                 runner_evidence = {**candidate, **runner}
                 ledger.store_signal({**candidate, "strategy": runner["strategy"]}, runner["score"],
@@ -1587,9 +1587,21 @@ def main() -> None:
                 }:
                     ledger.upsert_watch_candidate(runner_evidence, runner["strategy"],
                                                   classify_cohort(runner_evidence)[0])
-                results.append(runner)
+                results.append(runner_evidence)
             results.sort(key=lambda item: (item.get("paper_qualified", False),
                                            item.get("ev_rank", item["score"])), reverse=True)
+            # Every strategy needs a contemporaneous losing/rejected control,
+            # even when no candidate is close enough for a shadow trade. Keep
+            # the five highest-ranked decisions per strategy and measure their
+            # forward executable path; status preserves that they were rejected.
+            for strategy in (
+                "SOLANA_EARLY_CONTROL",
+                "SOLANA_PUMPFUN_EV_EXPERIMENT",
+                "SOLANA_MICROCAP_LAUNCH_MOMENTUM",
+                "SOLANA_MICROCAP_RUNNER_CAPTURE",
+            ):
+                for evidence in [item for item in results if item.get("strategy") == strategy][:5]:
+                    ledger.upsert_watch_candidate(evidence, strategy, classify_cohort(evidence)[0])
             diagnostics = strategy_diagnostics(results)
             watchlist = ledger.watchlist_snapshot("SOLANA_MICROCAP_LAUNCH_MOMENTUM")
             strategy_watchlists = {strategy: ledger.watchlist_snapshot(strategy)
