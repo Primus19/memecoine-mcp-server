@@ -362,6 +362,7 @@ class SolanaEarlyTests(unittest.TestCase):
                           observed_at="2026-08-29T12:00:00+00:00")
         current = candidate(
             pool="pool1", price_usd=.0013, volume_24h_usd=150000,
+            liquidity_usd=250000,
             token_age_minutes=18, price_change_5m_pct=60, price_change_15m_pct=75,
             transaction_buy_pressure=.65, observed_at="2026-08-29T12:06:00+00:00",
             top10_holder_fraction=None, creator_fraction=None,
@@ -375,6 +376,43 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertEqual("RUNNER_CAPTURE_V1", result["strategy_version"])
         self.assertEqual("UNAVAILABLE_PAPER_ONLY", result["distribution_evidence_status"])
         self.assertIn("30.0% since first observation", result["entry_reason"])
+
+    def test_runner_rejects_dancedog_like_late_weak_pressure_and_shallow_depth(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="dancedog", price_usd=.001,
+                          observed_at="2026-09-01T19:44:00+00:00")
+        current = candidate(
+            pool="dancedog", price_usd=.00234, market_cap_usd=7_000_000,
+            volume_24h_usd=6_325_336, liquidity_usd=82_822,
+            transaction_buy_pressure=.1938, price_change_5m_pct=10.565,
+            price_change_15m_pct=46.987,
+            observed_at="2026-09-01T20:31:00+00:00",
+        )
+        self.ledger.upsert_watch_candidate(first, strategy)
+        self.ledger.upsert_watch_candidate(current, strategy)
+        result = score_runner_capture_candidate(current, self.ledger, RunnerCapturePolicy())
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("runner late acceleration has weak buy pressure", result["paper_failures"])
+        self.assertIn("runner $1m+ liquidity below $200k intelligence floor",
+                      result["paper_failures"])
+
+    def test_runner_rejects_implausible_momentum_outlier(self):
+        strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
+        first = candidate(pool="stonk", price_usd=.001,
+                          observed_at="2026-09-01T18:10:00+00:00")
+        current = candidate(
+            pool="stonk", price_usd=.00125, market_cap_usd=7_000_000,
+            volume_24h_usd=200_000, liquidity_usd=250_000,
+            transaction_buy_pressure=.86, price_change_5m_pct=3,
+            price_change_15m_pct=1293.8,
+            observed_at="2026-09-01T18:22:00+00:00",
+        )
+        self.ledger.upsert_watch_candidate(first, strategy)
+        self.ledger.upsert_watch_candidate(current, strategy)
+        result = score_runner_capture_candidate(current, self.ledger, RunnerCapturePolicy())
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("runner fifteen-minute momentum outlier requires validation",
+                      result["paper_failures"])
 
     def test_runner_capture_rejects_late_retracement_or_missing_sell_route(self):
         strategy = "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
