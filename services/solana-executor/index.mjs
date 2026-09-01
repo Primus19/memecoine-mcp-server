@@ -76,12 +76,12 @@ const cfg = {
     2,
     Math.max(1, num(env("SOLANA_PAPER_MAX_PER_STRATEGY"), 2)),
   ),
-  // A paper observation carries no capital risk. Capture transient qualified
-  // candidates on their first completed scan so the intelligence ledger can
-  // measure them; keep real-money Runner probes on a separate two-scan gate.
+  // First-scan Runner capture produced three consecutive losses, including a
+  // near-total executable collapse. Rejected candidates are already retained
+  // by discovery, so require persistence before opening even a paper trade.
   paperConfirmationScans: Math.max(
-    1,
-    num(env("SOLANA_PAPER_CONFIRMATION_SCANS"), 1),
+    2,
+    num(env("SOLANA_PAPER_CONFIRMATION_SCANS"), 2),
   ),
   probeConfirmationScans: Math.max(
     2,
@@ -1885,10 +1885,16 @@ async function email(hasTradeEvent = false) {
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body,
     });
-  const shadow = liveShadowStats(),
-    newCount = newPaperActions.length + newProbeActions.length,
+  const newCount = newPaperActions.length + newProbeActions.length,
     probeNew = newProbeActions.length > 0,
-    subject = `[TRADE] Solana ${probeNew ? "LIVE PROBE" : "NEW"} ${newCount} action${newCount === 1 ? "" : "s"} | strict ${shadow.closed} closed | ${shadow.costStressedPnlUsd.toFixed(2)} P&L`,
+    newPaperCloses = newPaperActions.filter((action) => action.action === "SELL"),
+    newPaperPnl = newPaperCloses.reduce(
+      (total, action) => total + num(action.costStressedPnlUsd),
+      0,
+    ),
+    subject = probeNew
+      ? `[TRADE] Solana LIVE PROBE ${newCount} action${newCount === 1 ? "" : "s"}`
+      : `[TRADE] Solana ${newCount} action${newCount === 1 ? "" : "s"} | paper ${newPaperCloses.length} closed | ${newPaperPnl.toFixed(2)} window P&L`,
     mime = [
       `From: ${cfg.from}`,
       `To: ${cfg.recipients.join(", ")}`,
