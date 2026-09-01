@@ -1208,6 +1208,57 @@ def solana_rpc_mint_safety(mint: str) -> dict[str, Any]:
     }
 
 
+def pumpfun_creator_concentration(mint: str) -> dict[str, Any]:
+    """Resolve Pump.fun creator ownership without inventing attribution.
+
+    Pump.fun supplies the creator address. Solana RPC supplies that address's
+    current balance and total mint supply. A missing Pump.fun record remains
+    unknown; an update authority is never mislabeled as the creator.
+    """
+    metadata = json_request(
+        f"https://frontend-api-v3.pump.fun/coins/{urllib.parse.quote(mint)}",
+        {"Accept": "application/json", "User-Agent": "primus-solana-early/1.2"},
+        timeout=5.0,
+    )
+    creator = str((metadata or {}).get("creator") or "").strip()
+    if not creator:
+        raise RuntimeError("Pump.fun did not identify a creator")
+    helius = os.getenv("HELIUS_API_KEY", "").strip()
+    url = (os.getenv("SOLANA_SAFETY_RPC_URL") or os.getenv("SOLANA_RPC_URL") or
+           (f"https://mainnet.helius-rpc.com/?api-key={helius}" if helius else
+            "https://api.mainnet-beta.solana.com")).strip()
+
+    def rpc(method: str, params: list[Any]) -> dict[str, Any]:
+        request = urllib.request.Request(
+            url, data=json.dumps({"jsonrpc": "2.0", "id": 3, "method": method,
+                                  "params": params}).encode(), method="POST",
+            headers={"Accept": "application/json", "Content-Type": "application/json",
+                     "User-Agent": "primus-solana-early/1.2"})
+        with urllib.request.urlopen(request, timeout=6.0) as response:
+            payload = json.loads(response.read().decode())
+        if payload.get("error"):
+            raise RuntimeError(str(payload["error"].get("message") or payload["error"]))
+        return payload
+
+    accounts = ((rpc("getTokenAccountsByOwner", [creator, {"mint": mint},
+                {"encoding": "jsonParsed", "commitment": "confirmed"}])
+                .get("result") or {}).get("value") or [])
+    supply = (((rpc("getTokenSupply", [mint, {"commitment": "confirmed"}])
+                .get("result") or {}).get("value") or {}).get("uiAmountString"))
+    total = float(supply or 0)
+    if total <= 0:
+        raise RuntimeError("Solana RPC returned zero token supply")
+    owned = sum(_number((((item.get("account") or {}).get("data") or {}).get("parsed") or {})
+                        .get("info", {}).get("tokenAmount", {}).get("uiAmountString"))
+                for item in accounts if isinstance(item, dict))
+    return {
+        "creator_address": creator,
+        "creator_fraction": owned / total,
+        "creator_selling": None,
+        "creator_evidence_source": "PUMPFUN_CREATOR_PLUS_SOLANA_RPC_BALANCE",
+    }
+
+
 def jupiter_sell_check(mint: str, decimals: int, price_usd: float) -> tuple[bool, float]:
     key = os.environ["JUPITER_API_KEY"]
     if not price_usd or decimals < 0:
@@ -1312,6 +1363,19 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
                     "safety_evidence_error":
                         f"GoPlus: {exc}; Solana RPC: {rpc_exc}"[:180],
                 }
+        # Resolve creator ownership only for candidates with enough execution
+        # depth to become relevant. This avoids flooding Pump.fun/RPC providers
+        # for obviously ineligible dust pools while repairing the evidence gap
+        # for genuine near-misses.
+        market_cap = _number(attributes.get("market_cap_usd") or attributes.get("fdv_usd"))
+        liquidity = _number(attributes.get("reserve_in_usd"))
+        volume_24h = _number(volume.get("h24"))
+        if (safety.get("creator_fraction") is None and market_cap >= 250_000 and
+                volume_24h >= 100_000 and liquidity >= 10_000):
+            try:
+                safety.update(pumpfun_creator_concentration(mint))
+            except Exception as creator_exc:
+                safety["creator_evidence_error"] = str(creator_exc)[:180]
         try:
             sell_ok, sell_impact = jupiter_sell_check(
                 mint, int(base_token.get("decimals") or 0),
@@ -1326,9 +1390,9 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
             "price_usd": _number(attributes.get("base_token_price_usd")),
             "decimals": int(base_token.get("decimals") or 0),
             "observed_at": utcnow(), "token_age_minutes": age,
-            "liquidity_usd": _number(attributes.get("reserve_in_usd")),
-            "volume_24h_usd": _number(volume.get("h24")),
-            "market_cap_usd": _number(attributes.get("market_cap_usd") or attributes.get("fdv_usd")),
+            "liquidity_usd": liquidity,
+            "volume_24h_usd": volume_24h,
+            "market_cap_usd": market_cap,
             "trades_5m": buys5 + sells5,
             "unique_buyers_5m": buyers5,
             "unique_buyers_previous_5m": max(0, (buyers15 - buyers5) // 2),

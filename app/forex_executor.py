@@ -294,6 +294,16 @@ def bryne_liquidity_signals(snapshot: dict) -> list[dict]:
     retest_touched = float(retest["low"]) <= order_high and float(retest["high"]) >= order_low
     if not retest_touched or not order_low <= retest_price <= order_high:
         raise MultiAssetRejected("Bryne V5 is waiting for an H1 order-block retest")
+    breakout_body = abs(float(breakout["close"]) - float(breakout["open"]))
+    if breakout_body < float(os.getenv("FOREX_BRYNE_V5_MIN_DISPLACEMENT_ATR", ".35")) * atr:
+        raise MultiAssetRejected("Bryne V5 structure break lacks displacement")
+    order_mid = (order_low + order_high) / 2
+    # A retest candle may enter the block with an opposing body; what matters
+    # is that it closes back away from the invalidation side of the block.
+    retest_rejection = ((bullish and retest_price > order_mid) or
+                        (bearish and retest_price < order_mid))
+    if not retest_rejection:
+        raise MultiAssetRejected("Bryne V5 order-block retest lacks directional rejection")
     range_mid = (range_high + range_low) / 2
     if (bullish and retest_price > range_mid) or (bearish and retest_price < range_mid):
         raise MultiAssetRejected("Bryne V5 retest is outside the value half of the range")
@@ -305,6 +315,10 @@ def bryne_liquidity_signals(snapshot: dict) -> list[dict]:
     risk = abs(entry - stop)
     if risk <= 0 or (bullish and stop >= entry) or (bearish and stop <= entry):
         raise MultiAssetRejected("Bryne V5 sweep stop is invalid for executable entry")
+    adverse_entry_drift_r = ((entry - retest_price) / risk if bullish else
+                             (retest_price - entry) / risk)
+    if adverse_entry_drift_r > float(os.getenv("FOREX_BRYNE_V5_MAX_ENTRY_DRIFT_R", ".20")):
+        raise MultiAssetRejected("Bryne V5 executable entry drifted more than 0.20R beyond retest")
     target = entry + 2 * risk if bullish else entry - 2 * risk
     signal_time = str(retest.get("time") or "")
     key = f"{BRYNE_LIQUIDITY_V5_STRATEGY}:{snapshot['symbol']}:{signal_time}:{side}"
@@ -320,6 +334,7 @@ def bryne_liquidity_signals(snapshot: dict) -> list[dict]:
                             "range_mid": range_mid, "sweep_high": float(sweep["high"]),
                             "sweep_low": float(sweep["low"]), "order_block_low": order_low,
                             "order_block_high": order_high, "reward_multiple": 2.0},
+             "entry_drift_r": round(adverse_entry_drift_r, 4),
              "entry_reason": (f"Bryne V5 {side}: H1 range with {low_touches} low/{high_touches} high touches; "
                               f"{'liquidity sweep reversal' if bullish_sweep or bearish_sweep else 'compression breakout'}, "
                               f"structure confirmation and last-opposing-candle order-block retest in value zone; "

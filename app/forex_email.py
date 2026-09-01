@@ -258,7 +258,7 @@ class ForexReportEmailer:
         return message
 
     @classmethod
-    def _send_gmail_api(cls, config: dict, content: dict) -> None:
+    def _send_gmail_api(cls, config: dict, content: dict) -> dict:
         token_body = urllib.parse.urlencode({
             "client_id": config["client_id"],
             "client_secret": config["client_secret"],
@@ -294,7 +294,10 @@ class ForexReportEmailer:
         with urllib.request.urlopen(send_request, timeout=config["timeout"]) as response:
             if not 200 <= int(getattr(response, "status", 0)) < 300:
                 raise OSError(f"Gmail API returned HTTP {getattr(response, 'status', 'unknown')}")
-            response.read()
+            payload = json.loads(response.read().decode() or "{}")
+        if not payload.get("id"):
+            raise OSError("Gmail API accepted the request without returning a message ID")
+        return payload
 
     @staticmethod
     def _send_smtp(config: dict, content: dict) -> None:
@@ -320,15 +323,17 @@ class ForexReportEmailer:
                 client.send_message(message)
 
     @classmethod
-    def _send(cls, action: dict, now: datetime | None = None) -> None:
+    def _send(cls, action: dict, now: datetime | None = None) -> dict:
         config = cls._configuration()
         message_content = cls._content(action, now)
         if config["provider"] == "gmail_api":
-            cls._send_gmail_api(config, message_content)
+            result = cls._send_gmail_api(config, message_content)
         elif config["provider"] == "resend":
-            cls._send_resend(config, message_content)
+            cls._send_resend(config, message_content); result = {}
         else:
-            cls._send_smtp(config, message_content)
+            cls._send_smtp(config, message_content); result = {}
+        return {"provider_result": result, "subject": message_content["subject"],
+                "recipients": config["recipients"]}
 
     def maybe_send(self, report: dict, now: datetime | None = None) -> dict:
         if not self.enabled():
@@ -373,13 +378,21 @@ class ForexReportEmailer:
             for action in actions:
                 action_id = str(action["action_id"])
                 if action_id not in sent_set:
-                    self._send(action, now)
+                    raw_delivery = self._send(action, now)
+                    delivery = raw_delivery if isinstance(raw_delivery, dict) else {}
                     sent.append(action_id)
                     sent_set.add(action_id)
                 remaining = [item for item in remaining if str(item.get("action_id")) != action_id]
                 self.ledger.set_setting("forex_email_sent_action_ids", json.dumps(sent[-500:]))
                 self.ledger.set_setting("forex_email_pending_actions", json.dumps(remaining))
                 self.ledger.set_setting("forex_email_last_error", "")
+                self.ledger.set_setting("forex_email_last_message_id",
+                                        str((delivery.get("provider_result") or {}).get("id") or ""))
+                self.ledger.set_setting("forex_email_last_thread_id",
+                                        str((delivery.get("provider_result") or {}).get("threadId") or ""))
+                self.ledger.set_setting("forex_email_last_subject", str(delivery.get("subject") or ""))
+                self.ledger.set_setting("forex_email_last_recipients",
+                                        json.dumps(delivery.get("recipients") or []))
                 self.ledger.event("FOREX_TRADE_EMAIL_SENT", {
                     "action": action.get("email_action"), "pair": action.get("pair"),
                     "recipient_count": len(_recipients())})
@@ -398,5 +411,10 @@ class ForexReportEmailer:
             "sent_action_count": len(json.loads(self.ledger.setting("forex_email_sent_action_ids", "[]") or "[]")),
             "pending_action_count": len(json.loads(self.ledger.setting("forex_email_pending_actions", "[]") or "[]")),
             "last_error": self.ledger.setting("forex_email_last_error"),
+            "last_message_id": self.ledger.setting("forex_email_last_message_id"),
+            "last_thread_id": self.ledger.setting("forex_email_last_thread_id"),
+            "last_subject": self.ledger.setting("forex_email_last_subject"),
+            "last_recipients": json.loads(self.ledger.setting(
+                "forex_email_last_recipients", "[]") or "[]"),
             "inflight": self._inflight,
         }

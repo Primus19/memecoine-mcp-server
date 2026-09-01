@@ -385,9 +385,11 @@ function probePerformance() {
       (n, f) => n + num(f.networkFeeLamports), 0),
     networkFeeUsd = state.probeFills.reduce(
       (n, f) => n + num(f.networkFeeUsd), 0),
-    feesComplete = state.probeFills
-      .filter((f) => num(f.networkFeeLamports) > 0)
-      .every((f) => Number.isFinite(Number(f.networkFeeUsd)));
+    feeEligible = state.probeFills.filter((f) =>
+      ["PROBE_BUY", "PROBE_PARTIAL_SELL", "PROBE_PROFIT_PARTIAL_SELL", "PROBE_FINAL_SELL"]
+        .includes(f.action) && !String(f.id || "").includes(":")),
+    feeRecordsComplete = feeEligible.every((f) => f.networkFeeLamports != null),
+    feesComplete = feeRecordsComplete && feeEligible.every((f) => f.networkFeeUsd != null);
   return {
     buys: buys.length,
     successfulSales: sells.length,
@@ -403,7 +405,7 @@ function probePerformance() {
     networkFeeLamports,
     networkFeeSol: networkFeeLamports / 1e9,
     networkFeeUsd,
-    networkFeeStatus: networkFeeLamports > 0
+    networkFeeStatus: !feeRecordsComplete ? "FEES_BACKFILL_PENDING" : networkFeeLamports > 0
       ? feesComplete ? "CAPTURED_ON_CHAIN_AND_VALUED_USD" : "CAPTURED_ON_CHAIN_USD_PARTIAL"
       : "NO_CAPTURED_FEES",
     netPnlAfterNetworkFeesUsd: feesComplete ? realizedPnlUsd - networkFeeUsd : null,
@@ -706,6 +708,17 @@ async function transactionFeeEvidence(signature) {
         ? (networkFeeLamports / 1e9) * solUsd
         : null,
   };
+}
+async function backfillProbeFeeEvidence() {
+  const fill = state.probeFills.find((f) =>
+    ["PROBE_BUY", "PROBE_PARTIAL_SELL", "PROBE_PROFIT_PARTIAL_SELL", "PROBE_FINAL_SELL"]
+      .includes(f.action) && !String(f.id || "").includes(":") &&
+      f.networkFeeLamports == null);
+  if (!fill) return false;
+  const evidence = await transactionFeeEvidence(fill.id);
+  if (evidence.networkFeeLamports == null) return false;
+  Object.assign(fill, evidence, { feeEvidenceBackfilledAt: new Date().toISOString() });
+  return true;
 }
 async function paperBuy(c) {
   const o = await order(USDC, c.mint, Math.round(cfg.paperEntry * 1e6)),
@@ -1873,7 +1886,7 @@ async function email(hasTradeEvent = false) {
       "",
       probeNew ? runnerProbeEmailReport() : reportV3(),
     ].join("\r\n");
-  await json("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+  const sentMessage = await json("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
     method: "POST",
     headers: {
       authorization: `Bearer ${t.access_token}`,
@@ -1885,6 +1898,10 @@ async function email(hasTradeEvent = false) {
     ...state.email,
     lastSentAt: new Date().toISOString(),
     lastError: "",
+    lastMessageId: sentMessage?.id || "",
+    lastThreadId: sentMessage?.threadId || "",
+    lastRecipients: cfg.recipients,
+    lastSubject: subject,
     sentCount: num(state.email.sentCount) + 1,
     mode: "TRADE_EVENTS_ONLY",
     pendingTradeEvent: false,
@@ -1930,6 +1947,12 @@ async function tick() {
     }
   let changed = await supervisePaper();
   await supervisePostExitFollowups();
+  try {
+    if (await backfillProbeFeeEvidence()) save();
+  } catch (e) {
+    state.errors.unshift({ at: new Date().toISOString(), message: `fee backfill: ${e.message}` });
+    state.errors = state.errors.slice(0, 20);
+  }
   changed = (await superviseLiveShadow()) || changed;
   changed = (await superviseRunnerProbes()) || changed;
   for (const c of candidates.filter((x) => x.paper_qualified === true)) {

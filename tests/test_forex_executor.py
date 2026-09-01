@@ -56,6 +56,7 @@ class ForexExecutorTests(unittest.TestCase):
         self.assertAlmostEqual(2, (signals[0]["target_price"] - signals[0]["reference_price"]) /
                                (signals[0]["reference_price"] - signals[0]["stop_price"]))
         self.assertIn("liquidity sweep", signals[0]["entry_reason"])
+        self.assertIn("entry_drift_r", signals[0])
 
     def test_bryne_v5_does_not_predict_breakout_before_confirmation(self):
         candles = []

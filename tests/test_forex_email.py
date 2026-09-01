@@ -71,6 +71,18 @@ class ForexEmailTests(unittest.TestCase):
             self.assertEqual("[TRADE] Forex CLOSED - EUR/JPY - 2026-08-25 09:42 ET",
                              ForexReportEmailer.subject(self.action(), now))
 
+    def test_delivery_status_exposes_provider_audit_fields(self):
+        ledger = Ledger()
+        ledger.set_setting("forex_email_last_message_id", "message-123")
+        ledger.set_setting("forex_email_last_thread_id", "thread-456")
+        ledger.set_setting("forex_email_last_subject", "[TRADE] Forex CLOSED")
+        ledger.set_setting("forex_email_last_recipients", json.dumps(["one@example.test", "two@example.test"]))
+        status = ForexReportEmailer(ledger).status()
+        self.assertEqual("message-123", status["last_message_id"])
+        self.assertEqual("thread-456", status["last_thread_id"])
+        self.assertEqual("[TRADE] Forex CLOSED", status["last_subject"])
+        self.assertEqual(["one@example.test", "two@example.test"], status["last_recipients"])
+
     def test_success_is_recorded_and_same_action_is_suppressed(self):
         ledger = Ledger()
         emailer = ForexReportEmailer(ledger)

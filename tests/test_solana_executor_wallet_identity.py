@@ -30,6 +30,10 @@ def test_new_probe_fees_are_valued_and_reported_net_in_usd():
     assert "networkFeeUsd" in SOURCE
     assert "CAPTURED_ON_CHAIN_AND_VALUED_USD" in SOURCE
     assert "netPnlAfterNetworkFeesUsd" in SOURCE
+    assert "backfillProbeFeeEvidence" in SOURCE
+    assert "FEES_BACKFILL_PENDING" in SOURCE
+    assert "feeEvidenceBackfilledAt" in SOURCE
+    assert "lastMessageId" in SOURCE
 
 
 def test_paper_exploration_is_separate_from_live_qualification():
