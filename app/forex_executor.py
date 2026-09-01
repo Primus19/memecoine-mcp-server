@@ -59,6 +59,16 @@ def validated_snapshots(payload: dict, now: datetime | None = None) -> list[dict
     return snapshots
 
 
+def calendar_execution_allowed(snapshot: dict) -> bool:
+    """Fail closed when pair-level calendar evidence is contradictory."""
+    return (
+        snapshot.get("calendar_verified") is True and
+        str(snapshot.get("economic_event_source", "")).startswith("https://") and
+        int(snapshot.get("economic_event_within_minutes") or 0) <= 0 and
+        snapshot.get("high_impact_calendar_blackout") is not True
+    )
+
+
 FIVE_STREAK_STRATEGY = "FOREX_FIVE_STREAK_EXPERIMENT"
 FIVE_STREAK_FILTERED_V3_STRATEGY = "FOREX_FIVE_STREAK_FILTERED_V3"
 FIVE_STREAK_FILTERED_STRATEGY = "FOREX_FIVE_STREAK_FILTERED_V4_RATCHET"
@@ -1220,10 +1230,11 @@ class Executor:
             f"horizon agreement {float(proposal.get('horizon_agreement') or 0) * 100:.1f}%; "
             f"estimated net value {float(proposal.get('expected_net_bps') or 0):.2f} bps."
         )
-        calendar_ok = snapshot.get("calendar_verified") is True and str(snapshot.get("economic_event_source", "")).startswith("https://")
+        calendar_ok = calendar_execution_allowed(snapshot)
         mode = "LIVE" if live_armed(self.adapter) else "PRACTICE" if practice_armed(self.adapter) else "PAPER_ONLY"
         if mode in {"LIVE", "PRACTICE"} and not calendar_ok:
-            raise MultiAssetRejected("verified economic calendar evidence required for broker execution")
+            raise MultiAssetRejected(
+                "verified economic calendar evidence with no active pair blackout required for broker execution")
         preflight = self.adapter.preflight()
         limits = self.risk_limits(float(preflight.get("nav") or preflight.get("balance") or 0))
         if limits["new_entries_halted"]:
