@@ -12,7 +12,8 @@ from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServe
                                 FIVE_STREAK_STRATEGY,
                                 five_streak_email_actions, five_streak_profit_floor_r,
                                 five_streak_signals, bryne_liquidity_signals,
-                                live_profit_protection_shadow, recoverable_managed_trade,
+                                live_profit_protection_shadow, live_profit_exit_decision,
+                                recoverable_managed_trade,
                                 historical_managed_trade_outcomes,
                                 transaction_managed_intent_id, validated_snapshots)
 
@@ -109,6 +110,29 @@ class ForexExecutorTests(unittest.TestCase):
         result = live_profit_protection_shadow({"trade_id":"x"}, 1.0)
         self.assertFalse(result["eligible"])
         self.assertTrue(result["shadow_only"])
+
+    def test_live_profit_retention_exits_nzd_like_giveback_after_thesis_breaks(self):
+        trade = {"trade_id":"37", "instrument":"NZD_USD", "side":"SELL",
+                 "entry_price":.59014, "stop_price":.59140, "current_price":.59004}
+        snapshot = {"symbol":"NZD_USD", "bid":.59002, "ask":.59004, "price":.59003,
+                    "quote_age_seconds":1, "session_liquid":True, "tradable":True,
+                    "trend_strength":.01, "liquidity_score":1, "change_1h_pct":.03,
+                    "change_24h_pct":-.2, "horizon_direction":1, "horizon_agreement":.75}
+        result = live_profit_exit_decision(trade, snapshot, .16, 80)
+        self.assertTrue(result["execute"])
+        self.assertEqual("PROFIT_RETENTION_ALIGNMENT_DETERIORATION", result["reason"])
+
+    def test_live_profit_retention_holds_while_thesis_remains_aligned(self):
+        trade = {"trade_id":"37", "instrument":"NZD_USD", "side":"SELL",
+                 "entry_price":.59014, "stop_price":.59140, "current_price":.58966}
+        snapshot = {"symbol":"NZD_USD", "bid":.58964, "ask":.58966, "price":.58965,
+                    "quote_age_seconds":1, "session_liquid":True, "tradable":True,
+                    "trend_strength":-.3, "liquidity_score":1, "change_1h_pct":-.08,
+                    "change_24h_pct":-.2, "change_4h_pct":-.1,
+                    "horizon_direction":-1, "horizon_agreement":.75}
+        result = live_profit_exit_decision(trade, snapshot, .16, 80)
+        self.assertFalse(result["execute"])
+        self.assertEqual("HOLD", result["reason"])
 
     def test_five_streak_v3_fires_first_completion_with_filters(self):
         candles = []

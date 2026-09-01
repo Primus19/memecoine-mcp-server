@@ -57,6 +57,17 @@ class IntelligenceLedgerTests(unittest.TestCase):
         self.assertIn("100", learning["adoption_threshold"])
         self.assertFalse(report["promotion_policy"]["automatic_promotion"])
 
+    def test_profit_giveback_becomes_a_retained_learning(self):
+        self.ledger.record("forex", "FOREX", "FOREX_CONTROL", {
+            "id": "nzd-loss", "instrument": "NZD_USD", "status": "CLOSED",
+            "realized_pnl_usd": -.1126, "max_favorable_pnl_usd": .0815,
+        }, event_type="BROKER_CLOSE", mode="LIVE")
+        self.ledger.extract_learnings()
+        learning = next(row for row in self.ledger.report()["learnings"]
+                        if row["mechanism"] == "PROFIT_GIVEBACK")
+        self.assertEqual("PROSPECTIVE_EXIT_EXPERIMENT", learning["status"])
+        self.assertIn("turned a positive excursion", learning["statement"])
+
     def test_inactive_signals_and_forward_watchlists_become_shadow_evidence(self):
         snapshot = {
             "generated_at": "2026-09-01T01:00:00+00:00",

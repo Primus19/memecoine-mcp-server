@@ -116,6 +116,43 @@ def live_profit_protection_shadow(trade: dict, maximum_favorable_r: float) -> di
     }
 
 
+def live_profit_exit_decision(trade: dict, snapshot: dict, maximum_favorable_r: float,
+                              minimum_score: float) -> dict:
+    """Return a guarded, executable live profit-retention decision."""
+    shadow = live_profit_protection_shadow(trade, maximum_favorable_r)
+    if not shadow.get("eligible"):
+        return {**shadow, "execute": False, "reason": shadow.get("reason")}
+    current_r = float(shadow["current_r"])
+    peak_r = float(shadow["maximum_favorable_r"])
+    floor_r = float(shadow["protected_floor_r"])
+    alignment, _, proposed_side = ForexEngine.alignment(snapshot)
+    score = ForexEngine.score(snapshot)
+    side = str(trade.get("side") or "")
+    quote_fresh = float(snapshot.get("quote_age_seconds") or 999) <= 10
+    executable = float(trade.get("current_price") or 0) > 0
+    session_ok = snapshot.get("session_liquid") is True and snapshot.get("tradable") is True
+    ratchet_exit = floor_r > 0 and current_r <= floor_r
+    min_peak = max(.10, float(os.getenv("FOREX_LIVE_DETERIORATION_MIN_MFE_R", ".10")))
+    min_retained = max(.01, float(os.getenv("FOREX_LIVE_DETERIORATION_MIN_CURRENT_R", ".02")))
+    giveback_fraction = ((peak_r - current_r) / peak_r) if peak_r > 0 else 0.0
+    required_giveback = min(.90, max(.20, float(os.getenv(
+        "FOREX_LIVE_DETERIORATION_GIVEBACK_FRACTION", ".40"))))
+    contradictory = (alignment == "CONTRADICTORY" or not proposed_side or proposed_side != side
+                     or score < minimum_score - 10)
+    deterioration_exit = (peak_r >= min_peak and current_r >= min_retained
+                          and giveback_fraction >= required_giveback and contradictory)
+    execute = bool(quote_fresh and executable and session_ok and (ratchet_exit or deterioration_exit))
+    reason = (f"PROFIT_RATCHET_{floor_r:.2f}R" if ratchet_exit else
+              "PROFIT_RETENTION_ALIGNMENT_DETERIORATION" if deterioration_exit else "HOLD")
+    return {
+        **shadow, "shadow_only": False, "execute": execute, "reason": reason,
+        "alignment": alignment, "current_score": round(score, 4),
+        "minimum_score": minimum_score, "giveback_fraction": round(giveback_fraction, 6),
+        "quote_fresh": quote_fresh, "session_liquid": session_ok,
+        "safeguard": "Target remains active unless profit ratchet or confirmed thesis deterioration triggers",
+    }
+
+
 def signal_close_time(value: str | None) -> datetime | None:
     """OANDA M5 candle times identify candle open, not signal availability."""
     if not value:
@@ -1171,6 +1208,10 @@ class Executor:
 
     def process(self, snapshot: dict) -> dict:
         proposal = vars(self.engine.evaluate(snapshot))
+        minimum_net_edge = max(0.0, float(os.getenv("FOREX_MIN_NET_EDGE_BPS", "8")))
+        if float(proposal.get("expected_net_bps") or 0) < minimum_net_edge:
+            raise MultiAssetRejected(
+                f"estimated net edge below {minimum_net_edge:.2f} bps execution buffer")
         proposal["model_version"] = FOREX_MODEL_VERSION
         alignment, _, _ = self.engine.alignment(snapshot)
         proposal["entry_reason"] = (
@@ -1253,6 +1294,43 @@ class Executor:
                 self.ledger.event("ENTRY_PROTECTION_FAILED", {"intent_id": intent_id, "trade_id": trade_id, "close": close})
                 raise BrokerError("entry protection missing; trade closed")
         return {"status": status, "id": intent_id, "order_id": order_id, "trade_id": trade_id}
+
+    def supervise_live_profit(self, reconciliation: dict, snapshots: list[dict]) -> list[dict]:
+        """Actively retain live profit without weakening the broker stop/target."""
+        if not (live_armed(self.adapter) or practice_armed(self.adapter)):
+            return []
+        if os.getenv("FOREX_LIVE_PROFIT_RETENTION_ENABLED", "true").lower() != "true":
+            return []
+        marks = {str(item.get("symbol") or ""): item for item in snapshots}
+        intents = {str(item.get("broker_trade_id") or ""): item
+                   for item in self.ledger.broker_positions() if item.get("broker_trade_id")}
+        actions = []
+        for raw in reconciliation.get("open_trades", []):
+            trade_id = str(raw.get("id") or "")
+            symbol = str(raw.get("instrument") or "")
+            snapshot = marks.get(symbol, {})
+            intent = intents.get(trade_id, {})
+            normalized = normalize_open_trade(raw, snapshot)
+            risk = float(intent.get("maximum_loss_usd") or 0)
+            if risk <= 0:
+                continue
+            ledger_peak_r = max(0.0, float(intent.get("max_favorable_pnl_usd") or 0) / risk)
+            key = "live_profit_peak_r:" + trade_id
+            prior_peak = max(ledger_peak_r, float(self.ledger.setting(key, "0") or 0))
+            decision = live_profit_exit_decision(
+                normalized, snapshot, prior_peak, self.engine.policy.minimum_score)
+            if decision.get("eligible"):
+                self.ledger.set_setting(key, str(decision["maximum_favorable_r"]))
+            self.ledger.event("LIVE_PROFIT_RETENTION_EVALUATED", decision)
+            if not decision.get("execute"):
+                actions.append(decision)
+                continue
+            response = self.adapter.close_trade(trade_id)
+            event = {**decision, "trade_id": trade_id, "instrument": symbol,
+                     "executed_at": utcnow(), "broker_response": response}
+            self.ledger.event("LIVE_PROFIT_RETENTION_CLOSE_REQUESTED", event)
+            actions.append(event)
+        return actions
 
     def supervise_paper(self, snapshots: list[dict]) -> list[dict]:
         marks = {str(item.get("symbol")): item for item in snapshots}
@@ -1407,6 +1485,7 @@ class Executor:
         reconciliation = self.reconcile()
         payload = fetch_json(os.environ["MULTI_ASSET_FEED_URL"])
         snapshots = validated_snapshots(payload)
+        live_profit_actions = self.supervise_live_profit(reconciliation, snapshots)
         closes = self.supervise_paper(snapshots)
         five_streak_outcomes = [{"status": "ARCHIVED",
                                  "reason": "V4 new entries are permanently disabled"}]
@@ -1498,12 +1577,13 @@ class Executor:
                   "transaction_count_since_prior_scan": len(reconciliation["transactions"]),
                   "broker_open_trades": broker_open_trades,
                   "cross_strategy_learning": {
-                      "name": "Bryne profit-protection transfer",
-                      "mode": "SHADOW_ONLY", "version": "BRYNE_RATCHET_TRANSFER_V1",
+                      "name": "Cost-aware profit retention",
+                      "mode": "ACTIVE_GUARDED", "version": "LIVE_PROFIT_RETENTION_V2",
                       "source": "Bryne and Lot-Bill Filtered V4 Ratchet paper strategy",
                       "live_forex_observations": live_profit_shadows,
-                      "live_execution_changed": False,
-                      "reason": "Measure profit capture prospectively before changing live OANDA orders",
+                      "live_execution_changed": True,
+                      "live_profit_actions": live_profit_actions,
+                      "reason": "Keep the full target while aligned; retain profit after ratchet breach or confirmed thesis deterioration",
                       "adoption_gate": "30-50 independent closed shadow observations with positive cost-stressed expectancy",
                   },
                   "snapshots": snapshots, "outcomes": outcomes, "paper_closes": closes,

@@ -335,6 +335,22 @@ class IntelligenceLedger:
                                     statement, len(route_rows), 0, None, None,
                                     [row["evidence_id"] for row in route_rows[-100:]],
                                     "Never promote a crypto entry without a current full-size exit route")
+        givebacks = [dict(row) for row in self.db.execute("""SELECT evidence_id,strategy,
+            realized_pnl_usd,mfe_usd FROM observations WHERE realized_pnl_usd IS NOT NULL
+            AND mfe_usd>0 AND realized_pnl_usd<mfe_usd""").fetchall()]
+        giveback_groups: dict[str, list[dict]] = defaultdict(list)
+        for row in givebacks:
+            giveback_groups[row["strategy"]].append(row)
+        for strategy, values in giveback_groups.items():
+            profit_to_loss = [row for row in values if float(row["realized_pnl_usd"]) <= 0]
+            missed = [float(row["mfe_usd"]) - float(row["realized_pnl_usd"]) for row in values]
+            statement = (f"{strategy} surrendered an average ${sum(missed)/len(missed):.4f} from MFE "
+                         f"across {len(values)} closed trades; {len(profit_to_loss)} turned a positive "
+                         "excursion into a non-profit. Test guarded profit retention prospectively.")
+            added += self._learning(strategy, "PROFIT_GIVEBACK", "PROSPECTIVE_EXIT_EXPERIMENT",
+                                    statement, len(values), len(values) - len(profit_to_loss),
+                                    None, None, [row["evidence_id"] for row in values[-100:]],
+                                    "30-50 independent closes with improved capture and no worse cost-stressed expectancy")
         return added
 
     def _learning(self, strategy: str, mechanism: str, status: str, statement: str,
