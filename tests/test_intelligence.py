@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from app.intelligence import IntelligenceLedger, classify_cohort
 
@@ -126,6 +127,31 @@ class IntelligenceLedgerTests(unittest.TestCase):
                    if row["category"] == "PROMOTION_BLOCKED")
         self.assertIn("100 independent", rec["adoption_threshold"])
         self.assertFalse(rec["live_change_allowed"])
+
+    def test_compaction_removes_only_old_raw_noise_and_preserves_audit_evidence(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        noise, _, _ = self.ledger.record("discovery", "CRYPTO", "MICROCAP", {
+            "id": "old-noise", "symbol": "NOISE", "observed_at": old,
+            "failures": ["momentum below floor"],
+        }, event_type="CANDIDATE_DECISION", mode="SHADOW")
+        trade, _, _ = self.ledger.record("solana", "CRYPTO", "RUNNER", {
+            "id": "old-trade", "symbol": "AAPL", "observed_at": old,
+            "realized_pnl_usd": .2,
+        }, event_type="PAPER_CLOSE", mode="PAPER")
+        checkpointed, _, _ = self.ledger.record("discovery", "CRYPTO", "MICROCAP", {
+            "id": "old-checkpoint", "symbol": "WATCH", "observed_at": old,
+            "failures": ["momentum below floor"],
+            "checkpoints": {"60": {"executablePnlUsd": .1, "sellRouteOk": True}},
+        }, event_type="CANDIDATE_DECISION", mode="SHADOW")
+        with self.ledger.db:
+            self.ledger.db.execute("UPDATE observations SET recorded_at=?", (old,))
+        result = self.ledger.compact(force=True)
+        remaining = {row[0] for row in self.ledger.db.execute("SELECT evidence_id FROM observations")}
+        self.assertEqual("COMPLETED", result["status"])
+        self.assertNotIn(noise, remaining)
+        self.assertIn(trade, remaining)
+        self.assertIn(checkpointed, remaining)
+        self.assertEqual(1, self.ledger.db.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0])
 
 
 if __name__ == "__main__":
