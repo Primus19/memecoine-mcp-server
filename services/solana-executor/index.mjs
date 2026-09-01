@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { Keypair, VersionedTransaction } from "@solana/web3.js";
 import bs58 from "bs58";
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  WSOL = "So11111111111111111111111111111111111111112",
   PATH =
     process.env.SOLANA_EXECUTOR_STATE_PATH || "/app/data/solana_executor.json",
   ACK = "I_ACCEPT_THE_25_USD_SOLANA_EARLY_RISK",
@@ -381,7 +382,12 @@ function probePerformance() {
     realizedPnlUsd = closes.reduce((n, f) => n + num(f.realizedPnlUsd), 0),
     unresolvedCostBasisUsd = probeOpenExposureUsd(),
     networkFeeLamports = state.probeFills.reduce(
-      (n, f) => n + num(f.networkFeeLamports), 0);
+      (n, f) => n + num(f.networkFeeLamports), 0),
+    networkFeeUsd = state.probeFills.reduce(
+      (n, f) => n + num(f.networkFeeUsd), 0),
+    feesComplete = state.probeFills
+      .filter((f) => num(f.networkFeeLamports) > 0)
+      .every((f) => Number.isFinite(Number(f.networkFeeUsd)));
   return {
     buys: buys.length,
     successfulSales: sells.length,
@@ -396,8 +402,11 @@ function probePerformance() {
     unresolvedCostBasisUsd,
     networkFeeLamports,
     networkFeeSol: networkFeeLamports / 1e9,
-    networkFeeStatus: networkFeeLamports > 0 ? "CAPTURED_ON_CHAIN" : "NO_CAPTURED_FEES",
-    netPnlAfterNetworkFeesUsd: null,
+    networkFeeUsd,
+    networkFeeStatus: networkFeeLamports > 0
+      ? feesComplete ? "CAPTURED_ON_CHAIN_AND_VALUED_USD" : "CAPTURED_ON_CHAIN_USD_PARTIAL"
+      : "NO_CAPTURED_FEES",
+    netPnlAfterNetworkFeesUsd: feesComplete ? realizedPnlUsd - networkFeeUsd : null,
   };
 }
 function probeIsQuarantined(p) {
@@ -667,6 +676,36 @@ async function transactionFeeLamports(signature) {
   } catch {
     return null;
   }
+}
+let solUsdCache = { price: 0, checkedAt: 0 };
+async function currentSolUsd() {
+  if (solUsdCache.price > 0 && Date.now() - solUsdCache.checkedAt < 300000)
+    return solUsdCache.price;
+  try {
+    const payload = await json(
+      `https://api.jup.ag/price/v3?ids=${encodeURIComponent(WSOL)}`,
+      { headers: { "x-api-key": cfg.jupiter } },
+    );
+    const row = payload?.[WSOL] || payload?.data?.[WSOL] || {};
+    const price = num(row.usdPrice || row.price);
+    if (price > 0) solUsdCache = { price, checkedAt: Date.now() };
+    return price || null;
+  } catch {
+    return null;
+  }
+}
+async function transactionFeeEvidence(signature) {
+  const networkFeeLamports = await transactionFeeLamports(signature),
+    solUsd = networkFeeLamports ? await currentSolUsd() : null;
+  return {
+    networkFeeLamports,
+    networkFeeSol: networkFeeLamports == null ? null : networkFeeLamports / 1e9,
+    networkFeeSolUsd: solUsd,
+    networkFeeUsd:
+      networkFeeLamports != null && solUsd
+        ? (networkFeeLamports / 1e9) * solUsd
+        : null,
+  };
 }
 async function paperBuy(c) {
   const o = await order(USDC, c.mint, Math.round(cfg.paperEntry * 1e6)),
@@ -1168,7 +1207,7 @@ async function recordProbeSell(p, quantity, action, reason) {
     p.proceedsUsd = num(p.proceedsUsd) + proceeds;
     p.lastSellAt = at;
     p.lastSellSignature = r.signature;
-    const networkFeeLamports = await transactionFeeLamports(r.signature);
+    const feeEvidence = await transactionFeeEvidence(r.signature);
     state.probeFills.unshift({
       id: r.signature,
       action,
@@ -1181,7 +1220,7 @@ async function recordProbeSell(p, quantity, action, reason) {
       originalInputUsd: p.entryUsd,
       cumulativeProceedsUsd: p.proceedsUsd,
       realizedPnlUsd: p.quantity <= 0 ? p.proceedsUsd - p.entryUsd : null,
-      networkFeeLamports,
+      ...feeEvidence,
       strategy: "SOLANA_MICROCAP_RUNNER_LIVE_PROBE",
     });
     if (p.quantity <= 0)
@@ -1380,7 +1419,7 @@ async function runnerProbeBuy(c) {
     };
   state.probePositions.push(p);
   state.probeSeen[c.mint] = at;
-  const networkFeeLamports = await transactionFeeLamports(r.signature);
+  const feeEvidence = await transactionFeeEvidence(r.signature);
   state.probeFills.unshift({
     id: r.signature,
     action: "PROBE_BUY",
@@ -1389,7 +1428,7 @@ async function runnerProbeBuy(c) {
     symbol: p.symbol,
     inputUsd: cfg.probeEntry,
     outputUnits: quantity,
-    networkFeeLamports,
+    ...feeEvidence,
     entryEvidence: p.entryEvidence,
     strategy: "SOLANA_MICROCAP_RUNNER_LIVE_PROBE",
   });

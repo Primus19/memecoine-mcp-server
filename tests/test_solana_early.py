@@ -674,6 +674,15 @@ class SolanaEarlyTests(unittest.TestCase):
         report = strategy_diagnostics(rows)
         self.assertEqual(2, report["SOLANA_PUMPFUN_EV_EXPERIMENT"]["evaluated"])
         self.assertEqual(2, report["SOLANA_PUMPFUN_EV_EXPERIMENT"]["top_rejections"][0]["count"])
+        self.assertIn("evidence_coverage", report["SOLANA_PUMPFUN_EV_EXPERIMENT"])
+        self.assertIn("near_misses", report["SOLANA_PUMPFUN_EV_EXPERIMENT"])
+
+    def test_microcap_missing_creator_is_paper_warning_not_silent_approval(self):
+        value = candidate(creator_fraction=None)
+        result = score_microcap_launch_candidate(value, self.ledger, MicrocapLaunchPolicy())
+        self.assertIn("microcap creator concentration unavailable", result["evidence_warnings"])
+        self.assertNotIn("microcap creator concentration unavailable", result["paper_failures"])
+        self.assertFalse(result["live_eligible"])
 
 
 if __name__ == "__main__":

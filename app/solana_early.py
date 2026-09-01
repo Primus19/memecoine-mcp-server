@@ -710,6 +710,7 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
     impact = _number(candidate.get("sell_price_impact_bps"), 9999)
     top10, creator = candidate.get("top10_holder_fraction"), candidate.get("creator_fraction")
     failures = contract_safety_failures(candidate)
+    evidence_warnings: list[str] = []
     checks = (
         (not policy.enabled, "microcap launch strategy disabled"),
         (not 1 <= age <= policy.maximum_age_minutes, "microcap token age outside launch window"),
@@ -731,11 +732,17 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
         (top10 is None, "microcap top-10 concentration unavailable"),
         (top10 is not None and _number(top10) > policy.maximum_top10_holder_fraction,
          "microcap top-10 concentration too high"),
-        (creator is None, "microcap creator concentration unavailable"),
         (creator is not None and _number(creator) > policy.maximum_creator_fraction,
          "microcap creator concentration too high"),
     )
     failures.extend(reason for failed, reason in checks if failed)
+    # Creator attribution is not reliably present for fungible Solana tokens.
+    # Treat absence as a declared evidence warning for this paper-only cohort
+    # when immutable controls, top-holder concentration and sellability are
+    # independently verified. A known excessive creator holding remains a hard
+    # rejection, and this does not make Microcap live eligible.
+    if creator is None:
+        evidence_warnings.append("microcap creator concentration unavailable")
     score = round(clamp(momentum_5m, 0, 20) + clamp(pressure * 30, 0, 15) +
                   clamp((buyer_accel - 1) * 15, 0, 15) +
                   clamp((volume_accel - 1) * 10, 0, 10) +
@@ -746,6 +753,7 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
         "strategy": "SOLANA_MICROCAP_LAUNCH_MOMENTUM", "strategy_version": "MICROCAP_LAUNCH_V2",
         "mode": "PAPER_ONLY", "qualified": False, "live_eligible": False,
         "paper_qualified": not failures, "paper_failures": list(dict.fromkeys(failures)),
+        "evidence_warnings": evidence_warnings,
         "failures": ["paper-only challenger"], "score": score,
         "token_age_minutes": round(age, 4), "volume_24h_usd": round(volume_24h, 2),
         "market_cap_usd": round(market_cap, 2),
@@ -993,9 +1001,36 @@ def strategy_diagnostics(results: list[dict[str, Any]]) -> dict[str, Any]:
             for reason in row.get("paper_failures") or []:
                 key = str(reason)
                 failure_counts[key] = failure_counts.get(key, 0) + 1
+        evidence = {
+            "fresh_source": sum(bool(item.get("source_observed_at")) for item in rows),
+            "sell_route": sum(_number(item.get("sell_price_impact_bps"), 9999) < 9999 for item in rows),
+            "top10_concentration": sum(item.get("top10_holder_fraction") is not None for item in rows),
+            "creator_concentration": sum(item.get("creator_fraction") is not None for item in rows),
+        }
+        near_misses = sorted(
+            (item for item in rows if not item.get("paper_qualified")),
+            key=lambda item: (len(item.get("paper_failures") or []),
+                              -_number(item.get("score"), 0)),
+        )[:5]
         diagnostics[strategy] = {
             "evaluated": len(rows),
             "paper_qualified": sum(item.get("paper_qualified") is True for item in rows),
+            "evidence_coverage": {
+                key: {"available": value, "evaluated": len(rows),
+                      "pct": round(value / len(rows) * 100, 1) if rows else 0.0}
+                for key, value in evidence.items()
+            },
+            "near_misses": [{
+                "mint": item.get("mint"), "symbol": item.get("symbol"),
+                "pool_address": item.get("pool_address"),
+                "source_url": item.get("source_url"),
+                "score": item.get("score"),
+                "market_cap_usd": item.get("market_cap_usd"),
+                "liquidity_usd": item.get("liquidity_usd"),
+                "sell_price_impact_bps": item.get("sell_price_impact_bps"),
+                "blocking_reasons": (item.get("paper_failures") or [])[:5],
+                "evidence_warnings": item.get("evidence_warnings") or [],
+            } for item in near_misses],
             "top_rejections": [
                 {"reason": reason, "count": count}
                 for reason, count in sorted(failure_counts.items(), key=lambda item: (-item[1], item[0]))[:8]
@@ -1493,7 +1528,9 @@ def main() -> None:
                                      runner_policy.liquid_minimum_price_change_15m_pct,
                                  "liquid_momentum_maximum_sell_impact_bps":
                                      runner_policy.liquid_maximum_sell_impact_bps,
-                                 "checkpoints_minutes": [5, 15, 30, 60],
+                                 "checkpoints_minutes": [5, 15, 30, 60, 120, 240],
+                                 "checkpoint_evidence":
+                                     "executable sell route, impact, liquidity, volume and market cap",
                              },
                              watched_wallets=[value.strip() for value in
                                  os.getenv("SOLANA_WATCH_WALLETS", "").split(",") if value.strip()],
