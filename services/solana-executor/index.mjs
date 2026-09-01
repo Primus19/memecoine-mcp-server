@@ -152,7 +152,12 @@ const fresh = () => {
   };
 };
 function compactProbeAudit(rows, previous = {}) {
-  const summary = { ...previous }, kept = [], rejected = [];
+  const summary = Object.fromEntries(Object.entries(previous).map(([key, value]) => {
+      const times = [value.firstAt, value.lastAt].filter(Boolean)
+        .sort((a, b) => Date.parse(a) - Date.parse(b));
+      return [key, { ...value, firstAt: times[0] || "",
+        lastAt: times[times.length - 1] || "" }];
+    })), kept = [], rejected = [];
   for (const row of rows || []) {
     if (row.action === "PROBE_SELL_FAILED") {
       const key = `${row.mint || "unknown"}:PROBE_SELL_FAILED`, current = summary[key] || {};
