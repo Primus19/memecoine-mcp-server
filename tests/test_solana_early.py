@@ -12,6 +12,7 @@ from app.solana_early import (EarlyPolicy, Ledger, MicrocapLaunchPolicy, Pumpfun
                               goplus_safety, json_request, public_onchain_candidates,
                               solana_rpc_mint_safety,
                               safety_failures, score_candidate, score_microcap_launch_candidate,
+                              score_microcap_sub_million_shadow,
                               score_pumpfun_ev_candidate, score_runner_capture_candidate,
                               strategy_diagnostics)
 
@@ -292,6 +293,36 @@ class SolanaEarlyTests(unittest.TestCase):
         result = score_microcap_launch_candidate(candidate(volume_24h_usd=250000), self.ledger,
                                                  MicrocapLaunchPolicy())
         self.assertTrue(result["paper_qualified"])
+
+    def test_sub_million_microcap_shadow_tracks_executable_candidate_only(self):
+        result = score_microcap_sub_million_shadow(
+            candidate(market_cap_usd=450_000, volume_24h_usd=300_000,
+                      liquidity_usd=90_000, sell_simulation_ok=True,
+                      sell_price_impact_bps=65),
+            MicrocapLaunchPolicy(),
+        )
+        self.assertTrue(result["shadow_qualified"])
+        self.assertFalse(result["paper_qualified"])
+        self.assertFalse(result["live_eligible"])
+        self.assertEqual("SHADOW_ONLY", result["mode"])
+        self.assertEqual("MICROCAP_SUB_1M_SHADOW_V1", result["strategy_version"])
+
+    def test_sub_million_microcap_shadow_keeps_sellability_and_safety_hard(self):
+        result = score_microcap_sub_million_shadow(
+            candidate(market_cap_usd=450_000, volume_24h_usd=300_000,
+                      liquidity_usd=90_000, sell_simulation_ok=False,
+                      sell_price_impact_bps=9999),
+            MicrocapLaunchPolicy(),
+        )
+        self.assertFalse(result["shadow_qualified"])
+        self.assertIn("sell simulation failed", result["paper_failures"])
+        self.assertIn("shadow full-size sell route unavailable", result["paper_failures"])
+
+    def test_sub_million_shadow_does_not_include_live_eligible_market_caps(self):
+        result = score_microcap_sub_million_shadow(candidate(market_cap_usd=1_000_000),
+                                                   MicrocapLaunchPolicy())
+        self.assertFalse(result["shadow_qualified"])
+        self.assertIn("shadow market cap outside $100k-$1m research range", result["paper_failures"])
 
     def test_microcap_and_runner_enforce_one_million_market_cap_minimum(self):
         too_small = candidate(market_cap_usd=999_999)
