@@ -88,6 +88,8 @@ def classify_cohort(item: dict) -> tuple[str, list[str], list[str]]:
             if any(term in low for term in SOFT_RISK_TERMS)]
     if item.get("qualified") is True or item.get("paper_qualified") is True:
         return "PRODUCTION_QUALIFIED" if item.get("live_eligible") else "PAPER_QUALIFIED", hard, soft
+    if item.get("shadow_qualified") is True:
+        return "RESEARCH_SHADOW", hard, soft
     if hard:
         return "HARD_REJECT_CONTROL", hard, soft
     if len(rejected) == 1 and soft:
