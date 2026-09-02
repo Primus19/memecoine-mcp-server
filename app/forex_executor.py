@@ -1292,8 +1292,17 @@ class Executor:
         calendar_ok = calendar_execution_allowed(snapshot)
         mode = "LIVE" if live_armed(self.adapter) else "PRACTICE" if practice_armed(self.adapter) else "PAPER_ONLY"
         if mode in {"LIVE", "PRACTICE"} and not calendar_ok:
-            raise MultiAssetRejected(
-                "verified economic calendar evidence with no active pair blackout required for broker execution")
+            failures = []
+            if snapshot.get("calendar_verified") is not True:
+                failures.append("calendar evidence is unverified")
+            if not str(snapshot.get("economic_event_source", "")).startswith("https://"):
+                failures.append("calendar source URL is missing")
+            if int(snapshot.get("economic_event_within_minutes") or 0) > 0:
+                failures.append(
+                    f"high-impact event is {int(snapshot.get('economic_event_within_minutes') or 0)} minutes away")
+            if snapshot.get("high_impact_calendar_blackout") is True:
+                failures.append("pair-level high-impact calendar blackout is active")
+            raise MultiAssetRejected("calendar execution veto: " + "; ".join(failures or ["evidence is contradictory"]))
         preflight = self.adapter.preflight()
         limits = self.risk_limits(float(preflight.get("nav") or preflight.get("balance") or 0))
         if limits["new_entries_halted"]:
