@@ -34,6 +34,7 @@ def main():
             payload=fetch(url)
             Handler.state={"ok":bool(payload.get("ok")),"last_check":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
                            "last_error":"","worker":{"open_position_count":len(payload.get("open_positions") or []),
+                           "open_positions":payload.get("open_positions") or [],
                            "closed":payload.get("closed",0),"realized_pnl_usd":payload.get("realized_pnl_usd",0),
                            "last_scan":payload.get("last_scan","")}}
             print(json.dumps({"event":"MULTI_ASSET_SUPERVISION","paper_only":True,**Handler.state["worker"]}),flush=True)
