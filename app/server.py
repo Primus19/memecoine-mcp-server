@@ -316,8 +316,8 @@ def unauthorized():return JSONResponse({"error":"unauthorized"},status_code=401,
 
 @mcp.custom_route("/health",methods=["GET"])
 async def health(_):
-    intelligence_report=intelligence.report();intelligence_totals=intelligence_report.get("totals",{})
-    return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED",**deployment_info(),"preauthorized_auto_execution":PREAUTHORIZED_AUTO_EXECUTION,"expected_tool_count":9,"opportunity_policy":{"version":"1.0",**asdict(OpportunityPolicy.from_env())},"trading_intelligence":{"enabled":True,"persistent":os.path.abspath(INTELLIGENCE_PATH).startswith("/app/data/"),"observations":intelligence_totals.get("observations",0),"checkpoints":intelligence_totals.get("checkpoints",0),"learnings":intelligence_totals.get("learnings",0),"storage":intelligence_report.get("storage_policy",{})},"oauth":{"provider":"github","base_url":BASE_URL,"callback_url":oauth_callback_url(BASE_URL),"persistent_client_storage":os.path.abspath(OAUTH_STORAGE_DIR).startswith("/app/data/"),"jwt_signing_key_configured":True,"jwt_signing_key_source":JWT_SIGNING_KEY_SOURCE,"fastmcp_version":package_version("fastmcp")}})
+    intelligence_health=intelligence.quick_health()
+    return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED",**deployment_info(),"preauthorized_auto_execution":PREAUTHORIZED_AUTO_EXECUTION,"expected_tool_count":9,"opportunity_policy":{"version":"1.0",**asdict(OpportunityPolicy.from_env())},"trading_intelligence":{"enabled":True,"persistent":os.path.abspath(INTELLIGENCE_PATH).startswith("/app/data/"),**intelligence_health},"oauth":{"provider":"github","base_url":BASE_URL,"callback_url":oauth_callback_url(BASE_URL),"persistent_client_storage":os.path.abspath(OAUTH_STORAGE_DIR).startswith("/app/data/"),"jwt_signing_key_configured":True,"jwt_signing_key_source":JWT_SIGNING_KEY_SOURCE,"fastmcp_version":package_version("fastmcp")}})
 
 @mcp.custom_route("/dashboard",methods=["GET"])
 async def dashboard(request):
