@@ -1166,8 +1166,10 @@ def solana_rpc_mint_safety(mint: str) -> dict[str, Any]:
     normal strategies still fail closed. The separately capped $0.50 liquidity
     probe may use these immutable on-chain facts when GoPlus is unavailable.
     """
+    helius = os.getenv("HELIUS_API_KEY", "").strip()
     url = (os.getenv("SOLANA_SAFETY_RPC_URL") or os.getenv("SOLANA_RPC_URL") or
-           "https://api.mainnet-beta.solana.com").strip()
+           (f"https://mainnet.helius-rpc.com/?api-key={helius}" if helius else
+            "https://api.mainnet-beta.solana.com")).strip()
     body = json.dumps({
         "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
         "params": [mint, {"encoding": "jsonParsed", "commitment": "confirmed"}],
@@ -1397,6 +1399,20 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
         market_cap = _number(attributes.get("market_cap_usd") or attributes.get("fdv_usd"))
         liquidity = _number(attributes.get("reserve_in_usd"))
         volume_24h = _number(volume.get("h24"))
+        # Provider payloads frequently omit holder distribution.  For candidates
+        # with real execution depth, fill only the missing top-10 fact from
+        # confirmed on-chain largest-account and supply RPC results.
+        if (safety.get("top10_holder_fraction") is None and market_cap >= 250_000 and
+                volume_24h >= 100_000 and liquidity >= 10_000):
+            try:
+                onchain = solana_rpc_mint_safety(mint)
+                if onchain.get("top10_holder_fraction") is not None:
+                    safety["top10_holder_fraction"] = onchain["top10_holder_fraction"]
+                    safety["distribution_evidence_status"] = "ONCHAIN_VERIFIED"
+                    safety["distribution_evidence_source"] = onchain.get("safety_evidence_source")
+                    safety["distribution_observed_at"] = utcnow()
+            except Exception as holder_exc:
+                safety["distribution_evidence_error"] = str(holder_exc)[:180]
         if (safety.get("creator_fraction") is None and market_cap >= 250_000 and
                 volume_24h >= 100_000 and liquidity >= 10_000):
             try:
