@@ -1,5 +1,6 @@
 from __future__ import annotations
-import hashlib,json,sqlite3
+import hashlib,json,sqlite3,threading
+from functools import wraps
 from datetime import datetime,timedelta,timezone
 from pathlib import Path
 from cryptography.fernet import Fernet
@@ -11,6 +12,7 @@ def utcnow(): return datetime.now(timezone.utc).isoformat()
 class Store:
     def __init__(self,data_dir,encryption_key):
         root=Path(data_dir); root.mkdir(parents=True,exist_ok=True); self.cipher=Fernet(encryption_key.encode())
+        self.lock=threading.RLock()
         self.db=sqlite3.connect(root/"coinbase_mcp.sqlite3",check_same_thread=False); self.db.row_factory=sqlite3.Row
         self.db.execute("CREATE TABLE IF NOT EXISTS secrets (name TEXT PRIMARY KEY,value BLOB NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY,value TEXT NOT NULL)")
@@ -179,3 +181,20 @@ class Store:
         return payload.get("automatic") is True and "consecutive losses" in str(payload.get("reason",""))
     def recent(self,limit=50,since_seq=0):
         return [{**dict(r),"payload":json.loads(r["payload"])} for r in self.db.execute("SELECT seq,at,kind,ticket_id,payload,digest FROM events WHERE seq>? ORDER BY seq DESC LIMIT ?",(since_seq,limit)).fetchall()]
+
+
+def _serialized_store_method(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self.lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
+# check_same_thread=False permits cross-thread use but SQLite still requires
+# application-level serialization of the shared connection. Lock complete
+# operations so nested read/modify/write transitions remain atomic.
+for _method_name in tuple(name for name in Store.__dict__ if not name.startswith("_") and name != "__init__"):
+    _method = getattr(Store, _method_name)
+    if callable(_method):
+        setattr(Store, _method_name, _serialized_store_method(_method))

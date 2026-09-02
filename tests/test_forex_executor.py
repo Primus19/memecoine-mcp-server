@@ -42,8 +42,9 @@ class ForexExecutorTests(unittest.TestCase):
                 "economic_event_within_minutes": 0,
                 "high_impact_calendar_blackout": False}
         self.assertTrue(calendar_execution_allowed(base))
-        self.assertFalse(calendar_execution_allowed({**base, "economic_event_within_minutes": 30}))
+        self.assertTrue(calendar_execution_allowed({**base, "economic_event_within_minutes": 1250}))
         self.assertFalse(calendar_execution_allowed({**base, "high_impact_calendar_blackout": True}))
+        self.assertFalse(calendar_execution_allowed({**base, "market_veto": True}))
         self.assertFalse(calendar_execution_allowed({**base, "calendar_verified": False}))
 
     def test_bryne_v5_enters_only_after_sweep_break_and_order_block_retest(self):

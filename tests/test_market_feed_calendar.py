@@ -39,7 +39,42 @@ class MarketFeedCalendarTests(unittest.TestCase):
              patch("urllib.request.urlopen", return_value=response):
             result = calendar_evidence("USD_JPY")
         self.assertTrue(result["verified"])
-        self.assertEqual(0, result["minutes"])
+        self.assertEqual(600, result["minutes"])
+        self.assertTrue(result["blackout"])
+        self.assertEqual(0, result["blackout_distance_minutes"])
+
+    def test_distant_event_is_reported_without_activating_blackout(self):
+        payload = {"observed_at": datetime.now(timezone.utc).isoformat(),
+                   "source_url": "https://official.example/calendar",
+                   "events": [{"currency":"AUD", "impact":"HIGH", "minutes_until":1250,
+                               "blackout_before_minutes":60, "blackout_after_minutes":30}]}
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        response.__exit__.return_value = False
+        with patch.dict(os.environ, {"ECONOMIC_CALENDAR_URL":"https://calendar.internal/events"}, clear=True), \
+             patch("urllib.request.urlopen", return_value=response):
+            result = calendar_evidence("AUD_USD")
+        self.assertEqual(1250, result["minutes"])
+        self.assertFalse(result["blackout"])
+        self.assertEqual(1190, result["blackout_distance_minutes"])
+
+    def test_any_active_pair_event_wins_over_a_nearer_non_blackout_event(self):
+        payload = {"observed_at": datetime.now(timezone.utc).isoformat(),
+                   "source_url": "https://official.example/calendar",
+                   "events": [
+                       {"currency":"JPY", "impact":"HIGH", "minutes_until":100,
+                        "blackout_before_minutes":30, "blackout_after_minutes":30},
+                       {"currency":"USD", "impact":"HIGH", "minutes_until":600,
+                        "blackout_before_minutes":720, "blackout_after_minutes":360},
+                   ]}
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        response.__exit__.return_value = False
+        with patch.dict(os.environ, {"ECONOMIC_CALENDAR_URL":"https://calendar.internal/events"}, clear=True), \
+             patch("urllib.request.urlopen", return_value=response):
+            result = calendar_evidence("USD_JPY")
+        self.assertTrue(result["blackout"])
+        self.assertEqual(600, result["minutes"])
 
 
 if __name__ == "__main__": unittest.main()

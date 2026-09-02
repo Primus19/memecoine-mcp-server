@@ -64,7 +64,7 @@ def calendar_execution_allowed(snapshot: dict) -> bool:
     return (
         snapshot.get("calendar_verified") is True and
         str(snapshot.get("economic_event_source", "")).startswith("https://") and
-        int(snapshot.get("economic_event_within_minutes") or 0) <= 0 and
+        snapshot.get("market_veto") is not True and
         snapshot.get("high_impact_calendar_blackout") is not True
     )
 
@@ -918,7 +918,8 @@ def confirmed_trade_actions(transactions: list[dict], summary: dict, open_trades
     blackout_symbols = {
         str(item.get("symbol") or item.get("instrument") or "")
         for item in snapshots
-        if int(item.get("economic_event_within_minutes") or 0) > 0
+        if (item.get("high_impact_calendar_blackout") is True or
+            item.get("market_veto") is True)
     }
 
     def base(tx: dict, pair: str, action_id: str) -> dict:
@@ -1297,11 +1298,12 @@ class Executor:
                 failures.append("calendar evidence is unverified")
             if not str(snapshot.get("economic_event_source", "")).startswith("https://"):
                 failures.append("calendar source URL is missing")
-            if int(snapshot.get("economic_event_within_minutes") or 0) > 0:
-                failures.append(
-                    f"high-impact event is {int(snapshot.get('economic_event_within_minutes') or 0)} minutes away")
             if snapshot.get("high_impact_calendar_blackout") is True:
-                failures.append("pair-level high-impact calendar blackout is active")
+                failures.append(
+                    "pair-level high-impact calendar blackout is active "
+                    f"(event in {int(snapshot.get('economic_event_within_minutes') or 0)} minutes)")
+            elif snapshot.get("market_veto") is True:
+                failures.append("market feed calendar veto is active")
             raise MultiAssetRejected("calendar execution veto: " + "; ".join(failures or ["evidence is contradictory"]))
         preflight = self.adapter.preflight()
         limits = self.risk_limits(float(preflight.get("nav") or preflight.get("balance") or 0))

@@ -34,7 +34,9 @@ def configured_symbols(value: str | None = None) -> list[str]:
 def calendar_evidence(symbol: str) -> dict:
     url = os.getenv("ECONOMIC_CALENDAR_URL", "").strip()
     if not url:
-        return {"minutes": int(os.getenv("FOREX_DEFAULT_EVENT_DISTANCE_MINUTES", "0")), "verified": False, "source": ""}
+        return {"minutes": int(os.getenv("FOREX_DEFAULT_EVENT_DISTANCE_MINUTES", "0")),
+                "blackout": True, "blackout_distance_minutes": 0,
+                "verified": False, "source": ""}
     headers = {"Accept": "application/json", "User-Agent": "primus-forex-calendar/1.0"}
     token = os.getenv("ECONOMIC_CALENDAR_BEARER_TOKEN", "")
     if token: headers["Authorization"] = f"Bearer {token}"
@@ -45,16 +47,20 @@ def calendar_evidence(symbol: str) -> dict:
         raise ValueError("economic calendar stale")
     source = str(payload.get("source_url", ""))
     if not source.startswith("https://"): raise ValueError("economic calendar source missing")
-    currencies = set(symbol.split("_")); distances = []
+    currencies = set(symbol.split("_")); events = []
     for event in payload.get("events", []):
         if str(event.get("currency", "")).upper() in currencies and str(event.get("impact", "")).upper() == "HIGH":
             minutes = int(event.get("minutes_until", 0))
             before = max(0, int(event.get("blackout_before_minutes", 0)))
             after = max(0, int(event.get("blackout_after_minutes", 0)))
-            if -after <= minutes <= before: distances.append(0)
-            elif minutes > before: distances.append(minutes - before)
-            else: distances.append(abs(minutes + after))
-    return {"minutes": min(distances) if distances else 10080, "verified": True, "source": source}
+            in_blackout = -after <= minutes <= before
+            distance = 0 if in_blackout else (minutes - before if minutes > before else abs(minutes + after))
+            events.append({"minutes": minutes, "blackout": in_blackout,
+                           "blackout_distance_minutes": distance})
+    active = [item for item in events if item["blackout"]]
+    nearest = min(active or events, key=lambda item: abs(item["minutes"])) if events else {
+        "minutes": 10080, "blackout": False, "blackout_distance_minutes": 10080}
+    return {**nearest, "verified": True, "source": source}
 
 
 def forex_snapshot(adapter: OandaAdapter, symbol: str) -> dict:
@@ -103,7 +109,10 @@ def forex_snapshot(adapter: OandaAdapter, symbol: str) -> dict:
             "spread_bps": spread_bps, "median_spread_bps": median_spread,
             "bid_liquidity": bid_liquidity, "ask_liquidity": ask_liquidity,
             "quote_age_seconds": quote_age, "tradable": quote.get("status") == "tradeable",
-            "market_veto": event_minutes < 30, "observed_at": datetime.now(timezone.utc).isoformat(),
+            "market_veto": bool(calendar["blackout"]),
+            "high_impact_calendar_blackout": bool(calendar["blackout"]),
+            "economic_event_blackout_distance_minutes": calendar["blackout_distance_minutes"],
+            "observed_at": datetime.now(timezone.utc).isoformat(),
             "source_urls": [f"https://developer.oanda.com/rest-live-v20/pricing-ep/"],
             "change_1h_pct": change_1h, "change_4h_pct": change_4h, "change_24h_pct": change_24h,
             "change_5d_pct": change_5d, "change_20d_pct": change_20d,
