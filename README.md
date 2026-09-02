@@ -697,3 +697,10 @@ PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
 References: [OpenAI MCP documentation](https://developers.openai.com/api/docs/mcp), [Coinbase Advanced Trade endpoints](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/rest-api), and [Coinbase Products API](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/products/list-products).
+Microcap also retains a strictly shadow-only `$100k-$1m` executable cohort. It never
+sets `paper_qualified` or `live_eligible`; candidates must pass verified contract safety,
+the configured volume and liquidity floors, holder concentration, and a full-size
+Jupiter sell simulation within the existing impact limit. Executable outcomes are
+stored at 5/15/30/60/120/240 minutes for later cost-stressed evaluation. Live gates
+remain unchanged, and promotion still requires 100 independent positive-expectancy
+cost-stressed observations.
