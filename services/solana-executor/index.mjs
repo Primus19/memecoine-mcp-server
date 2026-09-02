@@ -821,6 +821,9 @@ async function paperBuy(c) {
     quantity: qty,
     entryUsd: cfg.paperEntry,
     highUsd: cfg.paperEntry,
+    highUsdAt: at,
+    lowUsd: cfg.paperEntry,
+    lowUsdAt: at,
     openedAt: at,
     score: c.score,
     evRank: c.ev_rank,
@@ -870,7 +873,14 @@ async function paperClose(p, reason, o) {
       entryUsd: p.entryUsd,
       exitUsd: proceeds,
       highUsd: p.highUsd,
+      highUsdAt: p.highUsdAt || p.openedAt,
       maximumFavorablePnlUsd: num(p.highUsd, p.entryUsd) - p.entryUsd,
+      maximumFavorableAt: p.highUsdAt || p.openedAt,
+      lowUsd: num(p.lowUsd, p.entryUsd),
+      lowUsdAt: p.lowUsdAt || p.openedAt,
+      maximumAdversePnlUsd: num(p.lowUsd, p.entryUsd) - p.entryUsd,
+      maximumAdverseAt: p.lowUsdAt || p.openedAt,
+      lastExecutableQuoteAt: p.markedAt || at,
       holdSeconds: Math.max(
         0,
         (Date.parse(at) - Date.parse(p.openedAt)) / 1000,
@@ -891,7 +901,13 @@ async function paperClose(p, reason, o) {
     exitUsd: proceeds,
     closeReason: reason,
     highUsd: p.highUsd,
+    highUsdAt: p.highUsdAt || p.openedAt,
+    lowUsd: num(p.lowUsd, p.entryUsd),
+    lowUsdAt: p.lowUsdAt || p.openedAt,
     maximumFavorablePnlUsd: fill.maximumFavorablePnlUsd,
+    maximumFavorableAt: fill.maximumFavorableAt,
+    maximumAdversePnlUsd: fill.maximumAdversePnlUsd,
+    maximumAdverseAt: fill.maximumAdverseAt,
     realizedPnlUsd: pnl,
     costStressedPnlUsd: adjusted,
     holdSeconds: fill.holdSeconds,
@@ -959,7 +975,14 @@ async function supervisePaper() {
       p.markUsd = mark;
       p.markedAt = new Date().toISOString();
       delete p.markError;
-      p.highUsd = Math.max(num(p.highUsd, p.entryUsd), mark);
+      if (mark > num(p.highUsd, p.entryUsd)) {
+        p.highUsd = mark;
+        p.highUsdAt = p.markedAt;
+      }
+      if (mark < num(p.lowUsd, p.entryUsd)) {
+        p.lowUsd = mark;
+        p.lowUsdAt = p.markedAt;
+      }
       const r = mark / p.entryUsd - 1,
         stop = isRunner
           ? 0.1
