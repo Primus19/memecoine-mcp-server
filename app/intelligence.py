@@ -123,6 +123,9 @@ class IntelligenceLedger:
         with self.db:
             self.db.executescript("""
             PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA wal_autocheckpoint=250;
+            PRAGMA journal_size_limit=8388608;
             CREATE TABLE IF NOT EXISTS observations(
               evidence_id TEXT PRIMARY KEY, recorded_at TEXT NOT NULL,
               observed_at TEXT, source_service TEXT NOT NULL,
@@ -237,17 +240,13 @@ class IntelligenceLedger:
                 self.db.execute("""INSERT INTO maintenance_state(key,value)
                     VALUES('storage_compaction_v2_applied',?)
                     ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (now.isoformat(),))
+            # Do not VACUUM on the ingestion path. In WAL mode VACUUM rewrites
+            # the database into the WAL, briefly duplicating almost the entire
+            # file. That exhausted the Railway volume even after it was resized.
+            # Deleted pages remain reusable by SQLite, and the bounded WAL is
+            # checkpointed after every maintenance run.
             self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            # VACUUM is intentionally outside a transaction. It reclaims pages
-            # after the evidence-safe deletes above and never runs per ingest.
-            vacuum_error = ""
-            try:
-                self.db.execute("VACUUM")
-            except sqlite3.OperationalError as exc:
-                # At the 95% Railway alert there may not be enough temporary
-                # space for VACUUM. Deleted pages remain reusable by SQLite, so
-                # ingestion can continue without growing the file further.
-                vacuum_error = str(exc)[:180]
+            vacuum_error = "SKIPPED_PERIODIC_VACUUM_TO_AVOID_WAL_DISK_AMPLIFICATION"
             after_bytes = os.path.getsize(self.path) if os.path.exists(self.path) else 0
         return {"status": "COMPLETED", "completed_at": now.isoformat(),
                 "raw_retention_hours": self.raw_retention_hours,
@@ -445,6 +444,11 @@ class IntelligenceLedger:
                 checkpoints_added=?,learnings_added=?,error=? WHERE run_id=?""",
                 (utcnow(), observations_added, checkpoints_added, learnings_added, error, run_id))
         maintenance = self.compact()
+        # compact() may be NOT_DUE for six hours. Still checkpoint every ingest
+        # so high-frequency intelligence writes cannot accumulate an unbounded
+        # WAL between maintenance runs.
+        with self.lock:
+            self.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
         return {"run_id": run_id, "observations_added": observations_added,
                 "checkpoints_added": checkpoints_added, "learnings_added": learnings_added,
                 "error": error, "maintenance": maintenance}
@@ -717,6 +721,7 @@ class IntelligenceLedger:
             maintenance = {str(row[0]): str(row[1]) for row in self.db.execute(
                 "SELECT key,value FROM maintenance_state").fetchall()}
         recommendations = self.actionable_recommendations()
+        wal_path = f"{self.path}-wal"
         return {"generated_at": utcnow(), "database": "PERSISTENT_SQLITE_AUDIT_WITH_BOUNDED_RAW_RETENTION",
                 "checkpoints_minutes": list(CHECKPOINTS), "totals": totals,
                 "strategies": strategy_rows, "learnings": learning_rows,
@@ -736,6 +741,10 @@ class IntelligenceLedger:
                     "hard_gates_never_relaxed_automatically": True,
                 }, "storage_policy": {
                     "database_bytes": os.path.getsize(self.path) if os.path.exists(self.path) else 0,
+                    "wal_bytes": os.path.getsize(wal_path) if os.path.exists(wal_path) else 0,
+                    "wal_autocheckpoint_pages": 250,
+                    "wal_journal_size_limit_bytes": 8388608,
+                    "periodic_vacuum_enabled": False,
                     "last_compacted_at": maintenance.get("last_compacted_at"),
                     "storage_compaction_v2_applied": bool(maintenance.get("storage_compaction_v2_applied")),
                     "audit_evidence_permanent": True,
@@ -756,7 +765,9 @@ class IntelligenceLedger:
                 FROM observations""").fetchone()
             migration = self.db.execute(
                 "SELECT value FROM maintenance_state WHERE key='storage_compaction_v2_applied'").fetchone()
+            wal_path = f"{self.path}-wal"
             return {"maintenance_in_progress": False, "database_bytes": database_bytes,
+                    "wal_bytes": os.path.getsize(wal_path) if os.path.exists(wal_path) else 0,
                     "observations": int(totals[0] or 0), "checkpoints": int(totals[1] or 0),
                     "learnings": int(totals[2] or 0),
                     "storage_compaction_v2_applied": bool(migration)}
