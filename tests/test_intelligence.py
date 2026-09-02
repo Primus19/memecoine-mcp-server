@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from datetime import datetime, timedelta, timezone
 
 from app.intelligence import IntelligenceLedger, classify_cohort
@@ -152,6 +153,15 @@ class IntelligenceLedgerTests(unittest.TestCase):
         self.assertIn(trade, remaining)
         self.assertIn(checkpointed, remaining)
         self.assertEqual(1, self.ledger.db.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0])
+        wal_path = f"{self.ledger.path}-wal"
+        self.assertLessEqual(os.path.getsize(wal_path) if os.path.exists(wal_path) else 0, 8 * 1024 * 1024)
+
+    def test_storage_report_exposes_bounded_wal_policy(self):
+        policy = self.ledger.report()["storage_policy"]
+        self.assertEqual(250, policy["wal_autocheckpoint_pages"])
+        self.assertEqual(8 * 1024 * 1024, policy["wal_journal_size_limit_bytes"])
+        self.assertFalse(policy["periodic_vacuum_enabled"])
+        self.assertIn("wal_bytes", policy)
 
     def test_scan_payload_is_canonical_but_trade_payload_remains_full(self):
         nested = {"unused_blob": "x" * 10000, "latest_candidate": {
