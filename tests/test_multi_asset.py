@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from app.multi_asset import AssetPolicy, ForexEngine, MultiAssetEngine, MultiAssetRejected, PaperLedger
@@ -114,10 +114,40 @@ class MultiAssetTests(unittest.TestCase):
                     "change_24h_pct": 1, "relative_volume": 2,
                     "above_vwap": True, "market_trend_positive": True}
         with patch.dict(os.environ, {"EQUITY_ENGINE_ENABLED": "true"}):
-            engine = MultiAssetEngine(self.ledger, self.policy)
+            engine = MultiAssetEngine(self.ledger, AssetPolicy(
+                minimum_score=75, max_risk_usd=2.5, max_open_positions_per_sleeve=1))
             engine.process(snapshot)
-            with self.assertRaisesRegex(MultiAssetRejected, "position limit"):
+            with self.assertRaisesRegex(MultiAssetRejected, "already has an open paper position"):
                 engine.process(snapshot)
+
+    def test_three_distinct_positions_can_collect_evidence_concurrently(self):
+        policy = AssetPolicy(minimum_score=75, max_risk_usd=2.5,
+                             max_open_positions_per_sleeve=3)
+        with patch.dict(os.environ, {"EQUITY_ENGINE_ENABLED": "true"}):
+            engine = MultiAssetEngine(self.ledger, policy)
+            for symbol in ("SPY", "QQQ", "IWM"):
+                engine.process({**self.base("EQUITY", symbol), "change_1h_pct": .3,
+                                "change_24h_pct": 1, "relative_volume": 2,
+                                "above_vwap": True, "market_trend_positive": True})
+            with self.assertRaisesRegex(MultiAssetRejected, "capacity 3/3.*SPY, QQQ, IWM"):
+                engine.process({**self.base("EQUITY", "DIA"), "change_1h_pct": .3,
+                                "change_24h_pct": 1, "relative_volume": 2,
+                                "above_vwap": True, "market_trend_positive": True})
+
+    def test_full_sleeve_does_not_hide_actual_strategy_rejection(self):
+        policy = AssetPolicy(minimum_score=75, max_risk_usd=2.5,
+                             max_open_positions_per_sleeve=1)
+        good = {**self.base("EQUITY", "SPY"), "change_1h_pct": .3,
+                "change_24h_pct": 1, "relative_volume": 2,
+                "above_vwap": True, "market_trend_positive": True}
+        bad = {**self.base("EQUITY", "QQQ"), "change_1h_pct": -.3,
+               "change_24h_pct": -1, "relative_volume": .2,
+               "above_vwap": False, "market_trend_positive": False}
+        with patch.dict(os.environ, {"EQUITY_ENGINE_ENABLED": "true"}):
+            engine = MultiAssetEngine(self.ledger, policy)
+            engine.process(good)
+            with self.assertRaisesRegex(MultiAssetRejected, "positive 1h/24h momentum required"):
+                engine.process(bad)
 
     def test_engine_disabled_by_default(self):
         snapshot = {**self.base("FOREX", "EUR_USD"), "change_1h_pct": .2,
@@ -153,6 +183,33 @@ class MultiAssetTests(unittest.TestCase):
         report = self.ledger.report()
         self.assertEqual(1, report["closed"])
         self.assertGreater(report["realized_pnl_usd"], 0)
+
+    def test_worker_expires_unmarked_position_without_blocking_forever(self):
+        fill = self.ledger.append({"type": "PAPER_FILL", "mode": "PAPER_ONLY",
+            "proposal_id": "stale-1", "asset_class": "FOREX", "strategy": "TEST",
+            "symbol": "EUR_USD", "side": "BUY", "fill_price": 1.10, "quantity": 10,
+            "stop_price": 1.09, "target_price": 1.12, "maximum_loss_usd": .10})
+        records = self.ledger.records()
+        records[-1]["recorded_at"] = (datetime.now(timezone.utc) - timedelta(minutes=300)).isoformat()
+        self.ledger.path.write_text("\n".join(__import__("json").dumps(item) for item in records) + "\n")
+        closes = supervise(self.ledger, [], max_hold_minutes=240)
+        self.assertEqual("MAX_HOLD_STALE_MARK", closes[0]["reason"])
+        self.assertEqual("ENTRY_FALLBACK_NO_MARK", closes[0]["price_source"])
+        self.assertEqual([], self.ledger.positions())
+
+    def test_report_identifies_open_position_and_excursions(self):
+        position = self.ledger.append({"type": "PAPER_FILL", "mode": "PAPER_ONLY",
+            "proposal_id": "open-1", "asset_class": "FOREX", "strategy": "TEST",
+            "symbol": "EUR_USD", "side": "BUY", "fill_price": 1.10, "quantity": 10,
+            "stop_price": 1.09, "target_price": 1.12, "maximum_loss_usd": .10})
+        self.ledger.mark(position, 1.11)
+        self.ledger.mark(position, 1.095)
+        diagnostic = self.ledger.report()["open_positions"][0]
+        self.assertEqual("EUR_USD", diagnostic["symbol"])
+        self.assertAlmostEqual(.10, diagnostic["mfe_usd"])
+        self.assertAlmostEqual(-.05, diagnostic["mae_usd"])
+        self.assertAlmostEqual(-.05, diagnostic["current_unrealized_pnl_usd"])
+        self.assertIsNotNone(diagnostic["age_minutes"])
 
 
 if __name__ == "__main__":
