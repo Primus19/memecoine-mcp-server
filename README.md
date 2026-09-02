@@ -273,6 +273,8 @@ FOREX_ENGINE_ENABLED=true
 EQUITY_ENGINE_ENABLED=true
 OPTION_ENGINE_ENABLED=true
 MULTI_ASSET_LEDGER_PATH=/app/data/multi_asset.jsonl
+ASSET_MAX_OPEN_POSITIONS=3
+ASSET_MAX_HOLD_MINUTES=240
 ```
 
 The feed returns `{"snapshots": [...]}`. Every snapshot must contain a fresh
@@ -310,8 +312,9 @@ MULTI_ASSET_FEED_INTERVAL_SECONDS=60
 
 `FOREX_DEFAULT_EVENT_DISTANCE_MINUTES=0` intentionally vetoes entries until a
 trusted economic-calendar adapter attests that the event window is clear.
-Paper and supervisor services must mount the same Railway volume at `/app/data`
-so they share `multi_asset.jsonl`.
+The paper worker is the sole ledger writer and position owner. The supervisor
+reads the worker's private `/report.json`; it must not mount or mutate a second
+copy of `multi_asset.jsonl`.
 
 ## Authoritative Forex executor
 
