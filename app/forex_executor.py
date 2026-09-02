@@ -163,6 +163,35 @@ def live_profit_exit_decision(trade: dict, snapshot: dict, maximum_favorable_r: 
     }
 
 
+def early_thesis_failure_shadow(position: dict, snapshot: dict, current_pnl_usd: float,
+                                maximum_favorable_pnl_usd: float,
+                                elapsed_minutes: float) -> dict:
+    """Measure a no-follow-through exit without changing a live or paper trade."""
+    risk = float(position.get("maximum_loss_usd") or 0)
+    side = str(position.get("side") or "")
+    if risk <= 0 or side not in {"BUY", "SELL"}:
+        return {"eligible": False, "shadow_only": True, "reason": "missing risk or side"}
+    current_r = current_pnl_usd / risk
+    maximum_favorable_r = max(0.0, maximum_favorable_pnl_usd / risk)
+    alignment, _, proposed_side = ForexEngine.alignment(snapshot)
+    score = ForexEngine.score(snapshot)
+    minimum_minutes = max(15.0, float(os.getenv("FOREX_THESIS_FAILURE_MINUTES", "30")))
+    maximum_mfe_r = min(.10, max(0.0, float(os.getenv("FOREX_THESIS_FAILURE_MAX_MFE_R", ".05"))))
+    maximum_current_r = min(-.01, float(os.getenv("FOREX_THESIS_FAILURE_CURRENT_R", "-.05")))
+    contradictory = (alignment == "CONTRADICTORY" or not proposed_side or proposed_side != side
+                     or score < float(os.getenv("FOREX_THESIS_FAILURE_SCORE", "70")))
+    would_exit = (elapsed_minutes >= minimum_minutes and maximum_favorable_r <= maximum_mfe_r
+                  and current_r <= maximum_current_r and contradictory)
+    return {
+        "eligible": True, "shadow_only": True, "experiment": "ZERO_MFE_THESIS_FAILURE_V1",
+        "would_exit_now": would_exit, "elapsed_minutes": round(elapsed_minutes, 3),
+        "current_r": round(current_r, 6), "maximum_favorable_r": round(maximum_favorable_r, 6),
+        "alignment": alignment, "proposed_side": proposed_side, "current_score": round(score, 4),
+        "reason": "NO_FOLLOW_THROUGH_AND_THESIS_DETERIORATION" if would_exit else "HOLD",
+        "adoption_gate": "30-50 independent closes with positive cost-stressed expectancy",
+    }
+
+
 def signal_close_time(value: str | None) -> datetime | None:
     """OANDA M5 candle times identify candle open, not signal availability."""
     if not value:
@@ -420,6 +449,12 @@ class Ledger:
               spread_bps REAL, financing_usd REAL, source_observed_at TEXT,
               source_url TEXT, status TEXT NOT NULL,
               PRIMARY KEY(trade_id,checkpoint_minutes));
+            CREATE TABLE IF NOT EXISTS shadow_exit_observations(
+              position_id TEXT NOT NULL, experiment TEXT NOT NULL,
+              observed_at TEXT NOT NULL, strategy TEXT, instrument TEXT,
+              executable_price REAL, pnl_usd REAL, elapsed_minutes REAL,
+              evidence_json TEXT NOT NULL,
+              PRIMARY KEY(position_id,experiment));
             """)
             columns = {str(row[1]) for row in self.db.execute("PRAGMA table_info(intents)")}
             for name, kind in (("score", "REAL"), ("model_version", "TEXT"), ("closed_at", "TEXT"),
@@ -437,6 +472,11 @@ class Ledger:
                                ("max_adverse_pnl_usd", "REAL DEFAULT 0")):
                 if name not in columns:
                     self.db.execute(f"ALTER TABLE intents ADD COLUMN {name} {kind}")
+            checkpoint_columns = {str(row[1]) for row in self.db.execute(
+                "PRAGMA table_info(trade_checkpoints)")}
+            for name, kind in (("capture_delay_seconds", "REAL"), ("checkpoint_quality", "TEXT")):
+                if name not in checkpoint_columns:
+                    self.db.execute(f"ALTER TABLE trade_checkpoints ADD COLUMN {name} {kind}")
 
     def event(self, kind: str, payload: dict) -> None:
         with self.lock, self.db:
@@ -490,15 +530,34 @@ class Ledger:
                proposal.get("evaluation_latency_seconds"), proposal.get("entry_spread_bps"),
                proposal.get("entry_slippage_bps"), json.dumps(proposal.get("experiment") or {})))
 
-    def record_checkpoint(self, intent: dict, checkpoint: int, snapshot: dict, price: float) -> bool:
+    def record_checkpoint(self, intent: dict, checkpoint: int, snapshot: dict, price: float,
+                          capture_delay_seconds: float = 0) -> bool:
         pnl = five_streak_position_pnl(intent, price)
         source_urls = snapshot.get("source_urls") or []
         with self.db:
             cursor = self.db.execute("""INSERT OR IGNORE INTO trade_checkpoints
-                VALUES(?,?,?,?,?,?,?,?)""", (intent["id"], checkpoint, utcnow(), price, pnl,
+                (intent_id,checkpoint_minutes,observed_at,executable_price,pnl_usd,
+                 source_observed_at,source_url,status,capture_delay_seconds,checkpoint_quality)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""", (intent["id"], checkpoint, utcnow(), price, pnl,
                 snapshot.get("observed_at"), source_urls[0] if source_urls else None,
-                intent.get("status") or "UNKNOWN"))
+                intent.get("status") or "UNKNOWN", max(0.0, capture_delay_seconds),
+                "ON_TIME" if capture_delay_seconds <= 120 else "FIRST_AVAILABLE_AFTER_HORIZON"))
         return cursor.rowcount == 1
+
+    def record_shadow_exit(self, position_id: str, strategy: str, instrument: str,
+                           price: float, pnl: float, evidence: dict) -> bool:
+        if not evidence.get("would_exit_now"):
+            return False
+        with self.db:
+            cursor = self.db.execute("""INSERT OR IGNORE INTO shadow_exit_observations
+                VALUES(?,?,?,?,?,?,?,?,?)""", (position_id, evidence["experiment"], utcnow(),
+                strategy, instrument, price, pnl, evidence.get("elapsed_minutes"),
+                json.dumps(evidence, sort_keys=True)))
+        return cursor.rowcount == 1
+
+    def shadow_exit_observations(self, limit: int = 250) -> list[dict]:
+        return [dict(row) for row in self.db.execute(
+            "SELECT * FROM shadow_exit_observations ORDER BY observed_at DESC LIMIT ?", (limit,))]
 
     def trade_checkpoints(self, limit: int = 250) -> list[dict]:
         return [dict(row) for row in self.db.execute(
@@ -1333,6 +1392,18 @@ class Executor:
             if decision.get("eligible"):
                 self.ledger.set_setting(key, str(decision["maximum_favorable_r"]))
             self.ledger.event("LIVE_PROFIT_RETENTION_EVALUATED", decision)
+            try:
+                opened = datetime.fromisoformat(str(intent.get("created_at") or "").replace("Z", "+00:00"))
+                elapsed = (datetime.now(UTC) - opened.astimezone(UTC)).total_seconds() / 60
+            except (ValueError, TypeError):
+                elapsed = 0
+            thesis = early_thesis_failure_shadow(
+                intent, snapshot, float(normalized.get("unrealized_pnl_usd") or 0),
+                prior_peak * risk, elapsed)
+            if self.ledger.record_shadow_exit(trade_id, str(intent.get("strategy") or "FOREX_CONTROL"),
+                                              symbol, float(normalized.get("current_price") or 0),
+                                              float(normalized.get("unrealized_pnl_usd") or 0), thesis):
+                self.ledger.event("SHADOW_EARLY_THESIS_FAILURE", thesis)
             if not decision.get("execute"):
                 actions.append(decision)
                 continue
@@ -1364,10 +1435,12 @@ class Executor:
             elapsed = max(0, (datetime.now(UTC) - opened.astimezone(UTC)).total_seconds() / 60)
             checkpoint_tolerance = max(2.0, float(os.getenv("FOREX_CHECKPOINT_TOLERANCE_MINUTES", "2")))
             for checkpoint in (0, 15, 30, 60, 120, 240):
-                # Never label one late observation as several historical
-                # checkpoints. Exact history must come from timestamped candles.
-                if checkpoint <= elapsed < checkpoint + checkpoint_tolerance:
-                    self.ledger.record_checkpoint(position, checkpoint, snapshot, price)
+                # Keep the first executable observation after each horizon and
+                # disclose its delay; never present a late quote as exact history.
+                delay_seconds = max(0.0, (elapsed - checkpoint) * 60)
+                if checkpoint <= elapsed and (position.get("status") == "PAPER_OPEN" or
+                                               elapsed < checkpoint + checkpoint_tolerance):
+                    self.ledger.record_checkpoint(position, checkpoint, snapshot, price, delay_seconds)
             if position.get("status") != "PAPER_OPEN":
                 continue
             side = position["side"]; stop = float(position["stop_price"]); target = float(position["target_price"])
@@ -1384,6 +1457,11 @@ class Executor:
                      "TARGET" if (side == "BUY" and price >= target) or (side == "SELL" and price <= target) else ""
             maximum_loss = float(position["maximum_loss_usd"])
             maximum_favorable = max(current_pnl, float(position.get("max_favorable_pnl_usd") or 0))
+            thesis = early_thesis_failure_shadow(position, snapshot, current_pnl,
+                                                  maximum_favorable, elapsed)
+            if self.ledger.record_shadow_exit(str(position["id"]), str(position.get("strategy") or ""),
+                                              str(position["symbol"]), price, current_pnl, thesis):
+                self.ledger.event("SHADOW_EARLY_THESIS_FAILURE", thesis)
             floor_r = five_streak_profit_floor_r(maximum_favorable / maximum_loss) if maximum_loss > 0 else 0
             profit_protection_strategies = {
                 FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY,
@@ -1600,6 +1678,7 @@ class Executor:
                   "snapshots": snapshots, "outcomes": outcomes, "paper_closes": closes,
                   "trade_checkpoints": self.ledger.trade_checkpoints(),
                   "live_trade_checkpoints": self.ledger.live_trade_checkpoints(),
+                  "shadow_exit_observations": self.ledger.shadow_exit_observations(),
                   "five_streak": {"name": FIVE_STREAK_DISPLAY_NAME, "mode": "PAPER_ONLY",
                                   "version": "Liquidity Range V5", "timeframe": "H1 structure / executable quote entry",
                                   "enabled": five_streak_enabled(),
