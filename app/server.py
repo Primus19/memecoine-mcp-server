@@ -13,7 +13,7 @@ from .decision import build_recommendation,canonical_hash
 from .enrichment import enrich_with_coinbase
 from .exchange import CoinbaseOrderRejected,Exchange
 from .lifecycle import profit_protection_challenger,supervision_levels
-from .intelligence import IntelligenceLedger
+from .consolidated_learnings import consolidated_report
 from .meme_email import MemeReportEmailer
 from .policy import OpportunityPolicy
 from .risk import TicketRejected,risk_size_ticket,validate_ticket
@@ -22,16 +22,15 @@ from .trading_dashboard import build_snapshot,dashboard_authorized,render_dashbo
 from .version import CRYPTO_MODEL_VERSION, deployment_info
 
 BASE_URL=validate_public_base_url(os.environ["PUBLIC_BASE_URL"]);SETUP_TOKEN=os.environ["SETUP_TOKEN"];REST_API_TOKEN=os.getenv("REST_API_TOKEN","")
-LIVE_ARMED=os.getenv("LIVE_TRADING","false").lower()=="true" and os.getenv("LIVE_CONFIRMATION","")=="I_ACCEPT_THE_25_USDC_LIVE_RISK"
+LIVE_ARMED=(os.getenv("LIVE_TRADING","false").lower()=="true" and
+            os.getenv("LIVE_CONFIRMATION","")=="I_ACCEPT_THE_25_USDC_LIVE_RISK" and
+            os.getenv("PROFITABILITY_GATE_PASSED","false").lower()=="true")
 PREAUTHORIZED_AUTO_EXECUTION=os.getenv("PREAUTHORIZED_AUTO_EXECUTION","false").lower()=="true"
 ALLOCATION_FRACTION=min(.95,max(.20,float(os.getenv("MAX_CAPITAL_ALLOCATION_PCT","95"))/100))
 ENTRY_TIMEOUT_SECONDS=min(90,max(5,int(os.getenv("ENTRY_TIMEOUT_SECONDS","45"))))
 MAX_ENTRY_DRIFT_BPS=min(35,max(1,float(os.getenv("MAX_ENTRY_DRIFT_BPS","35"))))
 DATA_DIR=os.getenv("DATA_DIR","/app/data")
 store=Store(DATA_DIR,os.environ["CREDENTIAL_ENCRYPTION_KEY"])
-INTELLIGENCE_PATH=os.getenv(
-    "TRADING_INTELLIGENCE_PATH", os.path.join(DATA_DIR,"trading_intelligence.sqlite3"))
-intelligence=IntelligenceLedger(INTELLIGENCE_PATH)
 OAUTH_STORAGE_DIR=os.path.join(DATA_DIR,"oauth")
 JWT_SIGNING_KEY,JWT_SIGNING_KEY_SOURCE=load_or_create_signing_key(DATA_DIR,os.getenv("JWT_SIGNING_KEY"))
 auth=GitHubProvider(client_id=os.environ["GITHUB_CLIENT_ID"],client_secret=os.environ["GITHUB_CLIENT_SECRET"],base_url=BASE_URL,redirect_path=OAUTH_CALLBACK_PATH,jwt_signing_key=JWT_SIGNING_KEY,client_storage=DiskStore(directory=OAUTH_STORAGE_DIR))
@@ -275,17 +274,8 @@ def hourly_snapshot(since_seq=0):
 
 def intelligence_snapshot()->dict:
     snapshot=build_snapshot(hourly_snapshot)
-    ingestion=intelligence.ingest_snapshot(snapshot)
-    snapshot["intelligence"]={**intelligence.report(),"latest_ingestion":ingestion}
+    snapshot["intelligence"]=consolidated_report()
     return snapshot
-
-def intelligence_loop():
-    while True:
-        try:intelligence_snapshot()
-        except Exception as exc:
-            store.event("TRADING_INTELLIGENCE_INGESTION_ERROR",{
-                "error":type(exc).__name__,"detail":str(exc)[:500]})
-        time.sleep(max(60,int(os.getenv("TRADING_INTELLIGENCE_INTERVAL_SECONDS","300"))))
 
 meme_emailer=MemeReportEmailer(store)
 def meme_email_loop():
@@ -316,8 +306,7 @@ def unauthorized():return JSONResponse({"error":"unauthorized"},status_code=401,
 
 @mcp.custom_route("/health",methods=["GET"])
 async def health(_):
-    intelligence_health=intelligence.quick_health()
-    return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED",**deployment_info(),"preauthorized_auto_execution":PREAUTHORIZED_AUTO_EXECUTION,"expected_tool_count":9,"opportunity_policy":{"version":"1.0",**asdict(OpportunityPolicy.from_env())},"trading_intelligence":{"enabled":True,"persistent":os.path.abspath(INTELLIGENCE_PATH).startswith("/app/data/"),**intelligence_health},"oauth":{"provider":"github","base_url":BASE_URL,"callback_url":oauth_callback_url(BASE_URL),"persistent_client_storage":os.path.abspath(OAUTH_STORAGE_DIR).startswith("/app/data/"),"jwt_signing_key_configured":True,"jwt_signing_key_source":JWT_SIGNING_KEY_SOURCE,"fastmcp_version":package_version("fastmcp")}})
+    return JSONResponse({"ok":True,"mode":"LIVE_ARMED" if LIVE_ARMED else "DRY_RUN_LOCKED",**deployment_info(),"preauthorized_auto_execution":PREAUTHORIZED_AUTO_EXECUTION,"expected_tool_count":9,"opportunity_policy":{"version":"1.0",**asdict(OpportunityPolicy.from_env())},"trading_intelligence":{"enabled":False,"status":"RETIRED_AND_CONSOLIDATED","archive":consolidated_report()["archive"]},"oauth":{"provider":"github","base_url":BASE_URL,"callback_url":oauth_callback_url(BASE_URL),"persistent_client_storage":os.path.abspath(OAUTH_STORAGE_DIR).startswith("/app/data/"),"jwt_signing_key_configured":True,"jwt_signing_key_source":JWT_SIGNING_KEY_SOURCE,"fastmcp_version":package_version("fastmcp")}})
 
 @mcp.custom_route("/dashboard",methods=["GET"])
 async def dashboard(request):
@@ -352,7 +341,7 @@ async def intelligence_report(request):
             "WWW-Authenticate": 'Basic realm="Primus Trading Intelligence"',
             "Cache-Control":"no-store",
         })
-    return JSONResponse(intelligence.report(),headers={
+    return JSONResponse(consolidated_report(),headers={
         "Cache-Control":"no-store, max-age=0",
         "X-Content-Type-Options":"nosniff",
         "Referrer-Policy":"no-referrer",
@@ -426,5 +415,4 @@ async def rest_position_supervision(request):
 
 if __name__=="__main__":
     if meme_emailer.enabled():threading.Thread(target=meme_email_loop,daemon=True,name="meme-email-reporter").start()
-    threading.Thread(target=intelligence_loop,daemon=True,name="trading-intelligence-ledger").start()
     mcp.run(transport="http",host="0.0.0.0",port=int(os.getenv("PORT","8080")))
