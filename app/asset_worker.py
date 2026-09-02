@@ -42,7 +42,7 @@ def fetch(url: str, token: str) -> dict:
         return value if isinstance(value, dict) else {}
 
 
-def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int = 1440) -> list[dict]:
+def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int = 240) -> list[dict]:
     """Close the worker's own positions so supervision cannot split-brain.
 
     Railway services do not share their local /app/data directories. Keeping
@@ -55,21 +55,29 @@ def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int 
     closes = []
     for position in ledger.positions():
         price = marks.get(str(position.get("symbol") or "").upper())
-        if not price:
+        try:
+            opened = datetime.fromisoformat(str(position["recorded_at"]).replace("Z", "+00:00"))
+            expired = (now - opened).total_seconds() >= max_hold_minutes * 60
+        except (KeyError, ValueError):
+            expired = False
+        price_source = "CURRENT_EXECUTABLE_MARK"
+        if price:
+            ledger.mark(position, price, price_source)
+        elif expired:
+            retained = ledger.latest_marks().get(str(position.get("proposal_id") or ""), {})
+            price = float(retained.get("mark_price") or position.get("fill_price") or 0)
+            price_source = "LAST_RETAINED_MARK" if retained else "ENTRY_FALLBACK_NO_MARK"
+        else:
             continue
         side = str(position["side"])
         stop, target = float(position["stop_price"]), float(position["target_price"])
         reason = "STOP" if (side == "BUY" and price <= stop) or (side == "SELL" and price >= stop) else \
                  "TARGET" if (side == "BUY" and price >= target) or (side == "SELL" and price <= target) else ""
-        if not reason:
-            try:
-                opened = datetime.fromisoformat(str(position["recorded_at"]).replace("Z", "+00:00"))
-                if (now - opened).total_seconds() >= max_hold_minutes * 60:
-                    reason = "MAX_HOLD"
-            except (KeyError, ValueError):
-                pass
+        if not reason and expired:
+            reason = "MAX_HOLD" if price_source == "CURRENT_EXECUTABLE_MARK" else "MAX_HOLD_STALE_MARK"
         if reason:
-            closes.append(ledger.close(str(position["proposal_id"]), price, reason))
+            closes.append(ledger.close(str(position["proposal_id"]), price, reason,
+                                       price_source=price_source))
     return closes
 
 
@@ -88,7 +96,7 @@ def main() -> None:
         try:
             payload = fetch(feed_url, token)
             snapshots = list(payload.get("snapshots", []))
-            closes = supervise(ledger, snapshots, max(15, int(os.getenv("ASSET_MAX_HOLD_MINUTES", "1440"))))
+            closes = supervise(ledger, snapshots, max(15, int(os.getenv("ASSET_MAX_HOLD_MINUTES", "240"))))
             outcomes = []
             for snapshot in snapshots:
                 try:
