@@ -431,8 +431,11 @@ function probePerformance() {
     feeEligible = state.probeFills.filter((f) =>
       ["PROBE_BUY", "PROBE_PARTIAL_SELL", "PROBE_PROFIT_PARTIAL_SELL", "PROBE_FINAL_SELL"]
         .includes(f.action) && !String(f.id || "").includes(":")),
-    feeRecordsComplete = feeEligible.every((f) => f.networkFeeLamports != null),
-    feesComplete = feeRecordsComplete && feeEligible.every((f) => f.networkFeeUsd != null);
+    missingFeeRecords = feeEligible.filter((f) => f.networkFeeLamports == null),
+    unvaluedFeeRecords = feeEligible.filter((f) =>
+      f.networkFeeLamports != null && f.networkFeeUsd == null),
+    feeRecordsComplete = missingFeeRecords.length === 0,
+    feesComplete = feeRecordsComplete && unvaluedFeeRecords.length === 0;
   return {
     buys: buys.length,
     successfulSales: sells.length,
@@ -448,6 +451,9 @@ function probePerformance() {
     networkFeeLamports,
     networkFeeSol: networkFeeLamports / 1e9,
     networkFeeUsd,
+    feeEligibleTransactionCount: feeEligible.length,
+    missingOnChainFeeCount: missingFeeRecords.length,
+    unvaluedFeeCount: unvaluedFeeRecords.length,
     networkFeeStatus: !feeRecordsComplete ? "FEES_BACKFILL_PENDING" : networkFeeLamports > 0
       ? feesComplete ? "CAPTURED_ON_CHAIN_AND_VALUED_USD" : "CAPTURED_ON_CHAIN_USD_PARTIAL"
       : "NO_CAPTURED_FEES",
@@ -768,10 +774,54 @@ async function backfillProbeFeeEvidence() {
   Object.assign(fill, evidence, { feeEvidenceBackfilledAt: new Date().toISOString() });
   return true;
 }
+async function paperRoundTripPreflight(c, buyQuote, expectedQuantity) {
+  const partialQuantity = Math.max(
+      1,
+      Math.floor(expectedQuantity * cfg.probePartialFraction),
+    ),
+    partial = await order(c.mint, USDC, partialQuantity),
+    full = await order(c.mint, USDC, expectedQuantity),
+    expectedPartialRecoveryUsd =
+      num(partial.outAmount || partial.outputAmount) / 1e6,
+    expectedFullRecoveryUsd = num(full.outAmount || full.outputAmount) / 1e6,
+    proportionalCostUsd = cfg.paperEntry * cfg.probePartialFraction,
+    minimumPartialRecoveryUsd =
+      proportionalCostUsd * (1 - cfg.probeRoundTripMaxLossBps / 10000),
+    minimumFullRecoveryUsd =
+      cfg.paperEntry * cfg.probePostBuyRecoveryFloorPct;
+  return {
+    passed:
+      expectedPartialRecoveryUsd + 1e-9 >= minimumPartialRecoveryUsd &&
+      expectedFullRecoveryUsd + 1e-9 >= minimumFullRecoveryUsd,
+    expectedOutputUnits: expectedQuantity,
+    partialQuantity,
+    expectedPartialRecoveryUsd,
+    expectedFullRecoveryUsd,
+    minimumPartialRecoveryUsd,
+    minimumFullRecoveryUsd,
+    buyRequestId: buyQuote.requestId || null,
+  };
+}
 async function paperBuy(c) {
   const o = await order(USDC, c.mint, Math.round(cfg.paperEntry * 1e6)),
     qty = num(o.outAmount || o.outputAmount);
   if (!qty) throw Error(`no paper buy route for ${c.mint}`);
+  let roundTripPreflight = null;
+  if (c.strategy === "SOLANA_MICROCAP_RUNNER_CAPTURE") {
+    try {
+      roundTripPreflight = await paperRoundTripPreflight(c, o, qty);
+    } catch (e) {
+      const error = Error(`ROUND_TRIP_PREFLIGHT_ROUTE_UNAVAILABLE: ${e.message}`);
+      error.code = "ROUND_TRIP_PREFLIGHT_ROUTE_UNAVAILABLE";
+      throw error;
+    }
+    if (!roundTripPreflight.passed) {
+      const error = Error("ROUND_TRIP_PREFLIGHT_RECOVERY_BELOW_MINIMUM");
+      error.code = "ROUND_TRIP_PREFLIGHT_RECOVERY_BELOW_MINIMUM";
+      error.evidence = roundTripPreflight;
+      throw error;
+    }
+  }
   const at = new Date().toISOString(),
     strategy = c.strategy || "SOLANA_EARLY_CONTROL",
     strategyVersion =
@@ -780,6 +830,8 @@ async function paperBuy(c) {
         ? "DIVINE_V3"
         : strategy === "SOLANA_MICROCAP_LAUNCH_MOMENTUM"
           ? "MICROCAP_LAUNCH_V2"
+          : strategy === "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW"
+            ? "MICROCAP_SUB_1M_SHADOW_V1"
           : strategy === "SOLANA_MICROCAP_RUNNER_CAPTURE"
             ? "RUNNER_CAPTURE_V1"
             : "CONTROL_V2"),
@@ -809,6 +861,7 @@ async function paperBuy(c) {
       distributionEvidenceStatus: c.distribution_evidence_status,
       walletEvidence: c.qualified_wallet_count || 0,
       flowDataProvenance: c.flow_data_provenance,
+      roundTripPreflight,
     };
   state.paperPositions.push({
     id,
@@ -945,9 +998,9 @@ async function supervisePaper() {
         isDivineV2 = p.strategyVersion === "DIVINE_V2",
         isDivineV3 = p.strategyVersion === "DIVINE_V3",
         isControlV2 = p.strategyVersion === "CONTROL_V2",
-        isMicrocap = String(p.strategyVersion || "").startsWith(
-          "MICROCAP_LAUNCH_",
-        ),
+        isMicrocap =
+          String(p.strategyVersion || "").startsWith("MICROCAP_LAUNCH_") ||
+          p.strategyVersion === "MICROCAP_SUB_1M_SHADOW_V1",
         isRunner = p.strategyVersion === "RUNNER_CAPTURE_V1",
         ageMs = Date.now() - Date.parse(p.openedAt),
         maxHoldMs = isRunner
@@ -1780,10 +1833,10 @@ function reportV2() {
           rowStyle = isNew
             ? "background:#fef3c7;color:#78350f;border:3px solid #f59e0b"
             : strategyStyle(f);
-        return `<tr style="${rowStyle}"><td>${esc(f.at)}</td><td><b>${esc(strategyName(f.strategy))}</b></td><td>${badge}${esc(f.action)}</td><td>${esc(f.symbol || f.mint.slice(0, 6))}</td><td>${esc(actionExplanation(f))}</td><td>${f.evRank == null ? "-" : num(f.evRank).toFixed(4)}</td><td>${f.realizedPnlUsd == null ? "-" : `$${num(f.realizedPnlUsd).toFixed(4)}`}</td><td>${f.costStressedPnlUsd == null ? "-" : `$${num(f.costStressedPnlUsd).toFixed(4)}`}</td></tr>`;
+        return `<tr style="${rowStyle}"><td>${esc(f.at)}</td><td><b>${esc(strategyName(f.strategy))}</b></td><td>${badge}${esc(f.action)}</td><td>${esc(f.symbol || f.mint.slice(0, 6))}</td><td>${esc(actionExplanation(f))}</td><td>${f.evRank == null ? "-" : num(f.evRank).toFixed(4)}</td><td>${f.realizedPnlUsd == null ? "-" : `$${num(f.realizedPnlUsd).toFixed(4)}`}</td><td>${f.maximumFavorablePnlUsd == null ? "-" : `$${num(f.maximumFavorablePnlUsd).toFixed(4)} @ ${esc(f.maximumFavorableAt || "unknown")}`}</td><td>${f.maximumAdversePnlUsd == null ? "-" : `$${num(f.maximumAdversePnlUsd).toFixed(4)} @ ${esc(f.maximumAdverseAt || "unknown")}`}</td><td>${f.costStressedPnlUsd == null ? "-" : `$${num(f.costStressedPnlUsd).toFixed(4)}`}</td></tr>`;
       })
       .join("");
-  return `<div style="font-family:Arial,sans-serif;color:#0f172a"><div style="background:#312e81;color:white;border-radius:14px;padding:20px"><span style="display:inline-block;background:#dc2626;color:white;padding:6px 11px;border-radius:999px;font-weight:900">NEW ACTION</span><h2 style="margin:10px 0 8px">Solana Strategy Action Report</h2><div style="font-size:20px;font-weight:bold">Divine Strategy + Solana Early Control + Microcap Launch V2 + Runner Capture V1</div></div>${newest ? `<div style="margin-top:12px;padding:16px;border:3px solid #f59e0b;background:#fef3c7;border-radius:8px"><b>REASON FOR ENTRY / ACTION</b><div style="margin-top:7px">${esc(actionExplanation(newest))}</div></div>` : ""}<p><span style="display:inline-block;background:#f3e8ff;color:#6b21a8;border:1px solid #c084fc;border-radius:999px;padding:7px 12px;font-weight:bold">PURPLE • Divine Strategy</span> <span style="display:inline-block;background:#ecfdf5;color:#065f46;border:1px solid #34d399;border-radius:999px;padding:7px 12px;font-weight:bold">GREEN • Solana Early Control</span> <span style="display:inline-block;background:#fff7ed;color:#9a3412;border:1px solid #fb923c;border-radius:999px;padding:7px 12px;font-weight:bold">ORANGE • Microcap Launch V2</span> <span style="display:inline-block;background:#ecfeff;color:#155e75;border:1px solid #22d3ee;border-radius:999px;padding:7px 12px;font-weight:bold">CYAN • Runner Capture V1</span></p><p><b>PAPER ONLY - no funds were spent.</b></p><p><b>Divine V2 forward sample:</b> ${divineV2.closed} closed, ${divineV2.open} open, ${divineV2.winRatePct.toFixed(1)}% win rate, $${divineV2.costStressedPnlUsd.toFixed(4)} cost-stressed P&amp;L. Historical V1 results remain in the all-time row below.</p><p><b>Strict live-strategy shadow:</b> Closed ${shadow.closed}/${cfg.minPaper}; cost-stressed P&amp;L $${shadow.costStressedPnlUsd.toFixed(4)}; open ${state.liveShadowPositions.length}.</p><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>Strategy</th><th>Actions</th><th>Buys</th><th>Closed</th><th>Open</th><th>Win rate</th><th>Raw P&amp;L</th><th>Cost-stressed P&amp;L</th><th>Expectancy</th></tr>${cards}</table><h3>Recent actions</h3><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>UTC</th><th>Strategy</th><th>Action</th><th>Token</th><th>Reason for entry / action</th><th>EV rank</th><th>Raw P&amp;L</th><th>Stressed P&amp;L</th></tr>${rows || "<tr><td colspan=8>No paper fills yet</td></tr>"}</table></div>`;
+  return `<div style="font-family:Arial,sans-serif;color:#0f172a"><div style="background:#312e81;color:white;border-radius:14px;padding:20px"><span style="display:inline-block;background:#dc2626;color:white;padding:6px 11px;border-radius:999px;font-weight:900">NEW ACTION</span><h2 style="margin:10px 0 8px">Solana Strategy Action Report</h2><div style="font-size:20px;font-weight:bold">Divine Strategy + Solana Early Control + Microcap Launch V2 + Runner Capture V1</div></div>${newest ? `<div style="margin-top:12px;padding:16px;border:3px solid #f59e0b;background:#fef3c7;border-radius:8px"><b>REASON FOR ENTRY / ACTION</b><div style="margin-top:7px">${esc(actionExplanation(newest))}</div></div>` : ""}<p><span style="display:inline-block;background:#f3e8ff;color:#6b21a8;border:1px solid #c084fc;border-radius:999px;padding:7px 12px;font-weight:bold">PURPLE • Divine Strategy</span> <span style="display:inline-block;background:#ecfdf5;color:#065f46;border:1px solid #34d399;border-radius:999px;padding:7px 12px;font-weight:bold">GREEN • Solana Early Control</span> <span style="display:inline-block;background:#fff7ed;color:#9a3412;border:1px solid #fb923c;border-radius:999px;padding:7px 12px;font-weight:bold">ORANGE • Microcap Launch V2</span> <span style="display:inline-block;background:#ecfeff;color:#155e75;border:1px solid #22d3ee;border-radius:999px;padding:7px 12px;font-weight:bold">CYAN • Runner Capture V1</span></p><p><b>PAPER ONLY - no funds were spent.</b></p><p><b>Divine V2 forward sample:</b> ${divineV2.closed} closed, ${divineV2.open} open, ${divineV2.winRatePct.toFixed(1)}% win rate, $${divineV2.costStressedPnlUsd.toFixed(4)} cost-stressed P&amp;L. Historical V1 results remain in the all-time row below.</p><p><b>Strict live-strategy shadow:</b> Closed ${shadow.closed}/${cfg.minPaper}; cost-stressed P&amp;L $${shadow.costStressedPnlUsd.toFixed(4)}; open ${state.liveShadowPositions.length}.</p><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>Strategy</th><th>Actions</th><th>Buys</th><th>Closed</th><th>Open</th><th>Win rate</th><th>Raw P&amp;L</th><th>Cost-stressed P&amp;L</th><th>Expectancy</th></tr>${cards}</table><h3>Recent actions</h3><table cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%"><tr style="background:#e2e8f0"><th>UTC</th><th>Strategy</th><th>Action</th><th>Token</th><th>Reason for entry / action</th><th>EV rank</th><th>Raw P&amp;L</th><th>MFE</th><th>MAE</th><th>Stressed P&amp;L</th></tr>${rows || "<tr><td colspan=10>No paper fills yet</td></tr>"}</table></div>`;
 }
 function reportV3() {
   const divine = strategyVersionStats(
@@ -1794,6 +1847,10 @@ function reportV3() {
     micro = strategyVersionStats(
       "SOLANA_MICROCAP_LAUNCH_MOMENTUM",
       "MICROCAP_LAUNCH_V2",
+    ),
+    microSub1m = strategyVersionStats(
+      "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
+      "MICROCAP_SUB_1M_SHADOW_V1",
     ),
     runner = strategyVersionStats(
       "SOLANA_MICROCAP_RUNNER_CAPTURE",
@@ -1806,6 +1863,7 @@ function reportV3() {
             "DIVINE_V3",
             "CONTROL_V2",
             "MICROCAP_LAUNCH_V2",
+            "MICROCAP_SUB_1M_SHADOW_V1",
             "RUNNER_CAPTURE_V1",
           ].includes(p.strategyVersion),
         )
@@ -1814,7 +1872,7 @@ function reportV3() {
             `<li><b>${esc(p.strategyVersion)} ${esc(p.symbol)}</b> • mint ${esc(p.mint)} • $${num(p.entryUsd).toFixed(2)} paper amount • score ${num(p.score).toFixed(2)} • ${esc(p.entryReason)}</li>`,
         )
         .join("") || "<li>No current-version positions open.</li>",
-    summary = `<div style="margin:14px 0;padding:14px;border:2px solid #7c3aed;background:#faf5ff;border-radius:10px"><h3 style="margin-top:0">NEW evidence-confirmed strategy versions</h3><p><b>Divine V3:</b> ${divine.closed} closed, ${divine.open} open, ${divine.winRatePct.toFixed(1)}% wins, $${divine.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Control V2:</b> ${control.closed} closed, ${control.open} open, ${control.winRatePct.toFixed(1)}% wins, $${control.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Microcap Launch V2:</b> ${micro.closed} closed, ${micro.open} open, ${micro.winRatePct.toFixed(1)}% wins, $${micro.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Runner Capture V1:</b> ${runner.closed} closed, ${runner.open} open, ${runner.winRatePct.toFixed(1)}% wins, $${runner.costStressedPnlUsd.toFixed(4)} stressed P&amp;L.</p><p><b>Microcap entry:</b> at least $100k rolling 24-hour volume, a pool no older than 30 minutes, serious five-minute momentum, persistent buyer/volume acceleration across two scans, verified safety/concentration, and an executable Jupiter sell route.</p><p><b>Runner Capture entry:</b> paper only; at least $100k volume, 20% retained gain, 15% current five-minute momentum, positive fifteen-minute momentum, two-scan persistence, executable sell route, adequate liquidity and no more than 10% retracement from the observed high.</p><p><b>Runner Capture exit:</b> 10% hard stop, gain-dependent 8–15% trailing protection, two-tick 5% rollover confirmation, 500% terminal target, or 30-minute maximum hold.</p><ul>${positions}</ul></div>`;
+    summary = `<div style="margin:14px 0;padding:14px;border:2px solid #7c3aed;background:#faf5ff;border-radius:10px"><h3 style="margin-top:0">NEW evidence-confirmed strategy versions</h3><p><b>Divine V3:</b> ${divine.closed} closed, ${divine.open} open, ${divine.winRatePct.toFixed(1)}% wins, $${divine.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Control V2:</b> ${control.closed} closed, ${control.open} open, ${control.winRatePct.toFixed(1)}% wins, $${control.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Microcap Launch V2:</b> ${micro.closed} closed, ${micro.open} open, ${micro.winRatePct.toFixed(1)}% wins, $${micro.costStressedPnlUsd.toFixed(4)} stressed P&amp;L. <b>Microcap $100K–$1M executable shadow:</b> ${microSub1m.closed} closed, ${microSub1m.open} open, ${microSub1m.winRatePct.toFixed(1)}% wins, $${microSub1m.costStressedPnlUsd.toFixed(4)} stressed P&amp;L, $${microSub1m.expectancyUsd.toFixed(4)} expectancy. <b>Runner Capture V1:</b> ${runner.closed} closed, ${runner.open} open, ${runner.winRatePct.toFixed(1)}% wins, $${runner.costStressedPnlUsd.toFixed(4)} stressed P&amp;L.</p><p><b>Microcap entry:</b> at least $100k rolling 24-hour volume, a pool no older than 30 minutes, serious five-minute momentum, persistent buyer/volume acceleration across two scans, verified safety/concentration, and an executable Jupiter sell route.</p><p><b>Runner Capture entry:</b> paper only; two consecutive scans plus the same buy→partial/full-sell round-trip recovery test used by the live probe. Displayed liquidity alone cannot admit a paper position.</p><p><b>Runner Capture exit:</b> 10% hard stop, gain-dependent 8–15% trailing protection, two-tick 5% rollover confirmation, 500% terminal target, or 30-minute maximum hold.</p><ul>${positions}</ul></div>`;
   const probeRows = state.probeFills
     .slice(0, 20)
     .map(
@@ -2038,7 +2096,14 @@ async function tick() {
       scanAt = data.scanned_at || new Date().toISOString();
     if (
       state.seen[seenKey] ||
-      !confirmCandidate(c, strategy, scanAt, cfg.paperConfirmationScans)
+      !confirmCandidate(
+        c,
+        strategy,
+        scanAt,
+        strategy === "SOLANA_MICROCAP_RUNNER_CAPTURE"
+          ? Math.max(2, cfg.paperConfirmationScans)
+          : cfg.paperConfirmationScans,
+      )
     )
       continue;
     const strategyOpen = state.paperPositions.filter(
@@ -2072,7 +2137,41 @@ async function tick() {
           strategy,
           mint: c.mint,
           symbol: c.symbol,
-          status: "PAPER_ENTRY_QUOTE_FAILED",
+          status: String(e.code || "").startsWith("ROUND_TRIP_PREFLIGHT_")
+            ? "PAPER_ENTRY_PREFLIGHT_REJECTED"
+            : "PAPER_ENTRY_QUOTE_FAILED",
+          reason: e.code || "ENTRY_QUOTE_FAILED",
+          evidence: e.evidence || null,
+          error: e.message.slice(0, 250),
+        });
+      }
+      state.candidateHandoffs = state.candidateHandoffs.slice(0, 100);
+    }
+  }
+  for (const c of candidates.filter(
+    (x) =>
+      x.strategy === "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW" &&
+      x.shadow_qualified === true,
+  )) {
+    const seenKey = `${c.strategy}:${c.mint}`,
+      scanAt = data.scanned_at || new Date().toISOString();
+    if (state.seen[seenKey] || !confirmCandidate(c, c.strategy, scanAt, 2))
+      continue;
+    if (
+      state.paperPositions.length < cfg.paperMax &&
+      exposure(state.paperPositions) + cfg.paperEntry <= cfg.paperTotal
+    ) {
+      try {
+        changed = (await paperBuy(c)) || changed;
+        state.seen[seenKey] = scanAt;
+        state.candidateHandoffs.unshift({
+          at: new Date().toISOString(), scanAt, strategy: c.strategy,
+          mint: c.mint, symbol: c.symbol, status: "SHADOW_ENTRY_CAPTURED",
+        });
+      } catch (e) {
+        state.candidateHandoffs.unshift({
+          at: new Date().toISOString(), scanAt, strategy: c.strategy,
+          mint: c.mint, symbol: c.symbol, status: "SHADOW_ENTRY_QUOTE_FAILED",
           error: e.message.slice(0, 250),
         });
       }
@@ -2219,6 +2318,10 @@ http
                   "SOLANA_MICROCAP_LAUNCH_MOMENTUM",
                   "MICROCAP_LAUNCH_V2",
                 ),
+                microcapSub1mShadowPerformance: strategyVersionStats(
+                  "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
+                  "MICROCAP_SUB_1M_SHADOW_V1",
+                ),
                 runnerCaptureV1Performance: strategyVersionStats(
                   "SOLANA_MICROCAP_RUNNER_CAPTURE",
                   "RUNNER_CAPTURE_V1",
@@ -2233,6 +2336,11 @@ http
                 microcapWatchlistSummary: state.microcapWatchlistSummary || {},
                 watchedWallets: state.watchedWallets || [],
                 walletEvidence: state.walletEvidence || [],
+                walletIntelligenceStatus:
+                  (state.watchedWallets || []).length > 0
+                    ? "CONFIGURED_COLLECTING_EVIDENCE"
+                    : "NO_REVIEWED_WALLETS_CONFIGURED_NO_PREDICTIVE_CREDIT",
+                candidateHandoffs: (state.candidateHandoffs || []).slice(0, 100),
                 lastSuccessfulDiscoveryAt: p.lastSuccessfulDiscoveryAt,
                 discoveryError: p.discoveryError,
                 recentActions: state.paperFills.slice(0, 20),

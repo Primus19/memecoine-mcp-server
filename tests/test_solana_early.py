@@ -710,6 +710,38 @@ class SolanaEarlyTests(unittest.TestCase):
                       "maximumAdversePnlUsd", "maximumAdverseAt", "lastExecutableQuoteAt"):
             self.assertIn(field, source)
 
+    def test_runner_paper_uses_live_equivalent_round_trip_preflight(self):
+        source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+        compact = "".join(source.split())
+        for expected in (
+            "paperRoundTripPreflight",
+            "PAPER_ENTRY_PREFLIGHT_REJECTED",
+            "ROUND_TRIP_PREFLIGHT_RECOVERY_BELOW_MINIMUM",
+            'strategy==="SOLANA_MICROCAP_RUNNER_CAPTURE"?Math.max(2,cfg.paperConfirmationScans)',
+            "roundTripPreflight",
+        ):
+            self.assertIn("".join(expected.split()), compact)
+
+    def test_sub_million_shadow_has_dedicated_positions_and_performance(self):
+        source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+        compact = "".join(source.split())
+        for expected in (
+            "MICROCAP_SUB_1M_SHADOW_V1",
+            "SHADOW_ENTRY_CAPTURED",
+            "microcapSub1mShadowPerformance",
+            "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
+        ):
+            self.assertIn("".join(expected.split()), compact)
+
+    def test_reports_fee_completeness_and_wallet_credit_status(self):
+        source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
+        for expected in (
+            "feeEligibleTransactionCount", "missingOnChainFeeCount",
+            "unvaluedFeeCount", "walletIntelligenceStatus",
+            "NO_REVIEWED_WALLETS_CONFIGURED_NO_PREDICTIVE_CREDIT",
+        ):
+            self.assertIn(expected, source)
+
     def test_runner_live_probe_reprices_actual_fill_and_exits_fast(self):
         source = (Path(__file__).parents[1] / "services/solana-executor/index.mjs").read_text()
         compact = "".join(source.split())
