@@ -305,11 +305,12 @@ class ForexExecutorTests(unittest.TestCase):
             with LOCK:
                 STATE.clear(); STATE.update(original)
 
-    def test_live_requires_all_four_independent_gates(self):
+    def test_live_requires_profitability_gate_in_addition_to_execution_gates(self):
         values = {
             "FOREX_LIVE_ENABLED": "true",
             "FOREX_LIVE_ACK": "I_ACCEPT_REAL_MONEY_RISK",
             "FOREX_ALLOWED_ACCOUNT_ID": Adapter.account,
+            "FOREX_PROFITABILITY_GATE_PASSED": "true",
         }
         with patch.dict(os.environ, values, clear=False):
             self.assertTrue(live_armed(Adapter()))
@@ -319,6 +320,7 @@ class ForexExecutorTests(unittest.TestCase):
     def test_practice_execution_has_separate_acknowledgement(self):
         adapter = Adapter(); adapter.environment = "practice"
         with patch.dict(os.environ, {"FOREX_PRACTICE_EXECUTION_ENABLED":"true",
+                                     "FOREX_PROFITABILITY_GATE_PASSED":"true",
                                      "FOREX_PRACTICE_ACK":"I_ACCEPT_PRACTICE_ORDER_EXECUTION"}, clear=False):
             self.assertTrue(practice_armed(adapter))
             self.assertFalse(live_armed(adapter))
