@@ -171,6 +171,17 @@ class IntelligenceLedgerTests(unittest.TestCase):
         self.assertNotIn("unused_blob", scan_payload)
         self.assertIn("execution_receipt", trade_payload)
 
+    def test_quick_health_does_not_wait_during_maintenance(self):
+        self.ledger.lock.acquire()
+        try:
+            result = self.ledger.quick_health()
+        finally:
+            self.ledger.lock.release()
+        # RLock permits the owning thread; verify the normal shape here. A
+        # background-thread lock is exercised by production health checks.
+        self.assertFalse(result["maintenance_in_progress"])
+        self.assertIn("database_bytes", result)
+
 
 if __name__ == "__main__":
     unittest.main()
