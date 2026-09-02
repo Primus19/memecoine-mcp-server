@@ -31,7 +31,7 @@ def _hash(value: dict[str, Any]) -> str:
 @dataclass(frozen=True)
 class AssetPolicy:
     paper_only: bool = True
-    max_open_positions_per_sleeve: int = 1
+    max_open_positions_per_sleeve: int = 3
     max_risk_usd: float = 25.0
     minimum_score: float = 75.0
     max_spread_bps: float = 35.0
@@ -42,7 +42,7 @@ class AssetPolicy:
         # This first release deliberately cannot be switched to live execution.
         return cls(
             paper_only=True,
-            max_open_positions_per_sleeve=max(1, int(os.getenv("ASSET_MAX_OPEN_POSITIONS", "1"))),
+            max_open_positions_per_sleeve=max(1, int(os.getenv("ASSET_MAX_OPEN_POSITIONS", "3"))),
             max_risk_usd=min(250.0, float(os.getenv("ASSET_MAX_RISK_USD", "25.00"))),
             minimum_score=float(os.getenv("ASSET_MIN_SCORE", "75")),
             max_spread_bps=float(os.getenv("ASSET_MAX_SPREAD_BPS", "35")),
@@ -325,6 +325,12 @@ class PaperLedger:
                 positions[proposal_id] = False
         return sum(positions.values())
 
+    def has_open_symbol(self, asset_class: str, symbol: str) -> bool:
+        wanted = str(symbol).upper()
+        return any(str(item.get("asset_class") or "").upper() == asset_class.upper()
+                   and str(item.get("symbol") or "").upper() == wanted
+                   for item in self.positions())
+
     def records(self) -> list[dict[str, Any]]:
         try:
             return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -341,7 +347,67 @@ class PaperLedger:
                 positions.pop(proposal_id, None)
         return list(positions.values())
 
-    def close(self, proposal_id: str, price: float, reason: str) -> dict[str, Any]:
+    def mark(self, position: dict[str, Any], price: float, source: str = "CURRENT_EXECUTABLE_MARK") -> dict[str, Any]:
+        if price <= 0:
+            raise MultiAssetRejected("paper mark price is not positive")
+        side = str(position["side"])
+        quantity = float(position["quantity"])
+        entry = float(position["fill_price"])
+        pnl = (price - entry) * quantity * (1 if side == "BUY" else -1)
+        return self.append({"type": "PAPER_MARK", "mode": "PAPER_ONLY",
+                            "asset_class": position["asset_class"], "strategy": position["strategy"],
+                            "symbol": position["symbol"], "proposal_id": position["proposal_id"],
+                            "mark_price": price, "unrealized_pnl_usd": round(pnl, 8),
+                            "price_source": source})
+
+    def latest_marks(self) -> dict[str, dict[str, Any]]:
+        marks: dict[str, dict[str, Any]] = {}
+        for record in self.records():
+            if record.get("type") == "PAPER_MARK":
+                marks[str(record.get("proposal_id") or "")] = record
+        return marks
+
+    def position_diagnostics(self, now: datetime | None = None) -> list[dict[str, Any]]:
+        current = now or now_utc()
+        marks = self.latest_marks()
+        diagnostics = []
+        for position in self.positions():
+            recorded = str(position.get("recorded_at") or "")
+            try:
+                opened = datetime.fromisoformat(recorded.replace("Z", "+00:00"))
+                age_minutes = max(0.0, (current - opened.astimezone(UTC)).total_seconds() / 60)
+            except (TypeError, ValueError):
+                age_minutes = None
+            proposal_id = str(position.get("proposal_id") or "")
+            mark = marks.get(proposal_id, {})
+            position_marks = [item for item in self.records()
+                              if item.get("type") == "PAPER_MARK" and
+                              str(item.get("proposal_id") or "") == proposal_id]
+            pnls = [float(item.get("unrealized_pnl_usd") or 0) for item in position_marks]
+            diagnostics.append({
+                "proposal_id": proposal_id,
+                "asset_class": position.get("asset_class"),
+                "strategy": position.get("strategy"),
+                "symbol": position.get("symbol"),
+                "side": position.get("side"),
+                "entry_price": position.get("fill_price"),
+                "stop_price": position.get("stop_price"),
+                "target_price": position.get("target_price"),
+                "quantity": position.get("quantity"),
+                "maximum_loss_usd": position.get("maximum_loss_usd"),
+                "opened_at": recorded,
+                "age_minutes": round(age_minutes, 2) if age_minutes is not None else None,
+                "current_mark_price": mark.get("mark_price"),
+                "current_unrealized_pnl_usd": mark.get("unrealized_pnl_usd"),
+                "last_mark_at": mark.get("recorded_at"),
+                "mfe_usd": round(max([0.0, *pnls]), 8),
+                "mae_usd": round(min([0.0, *pnls]), 8),
+                "blocks_new_symbol": True,
+            })
+        return diagnostics
+
+    def close(self, proposal_id: str, price: float, reason: str,
+              *, price_source: str = "CURRENT_EXECUTABLE_MARK") -> dict[str, Any]:
         position = next((item for item in self.positions() if item.get("proposal_id") == proposal_id), None)
         if not position:
             raise MultiAssetRejected("paper position is not open")
@@ -352,7 +418,8 @@ class PaperLedger:
         return self.append({"type": "PAPER_CLOSE", "mode": "PAPER_ONLY", "asset_class": position["asset_class"],
                             "strategy": position["strategy"], "symbol": position["symbol"],
                             "proposal_id": proposal_id, "entry_price": entry, "fill_price": price,
-                            "quantity": quantity, "reason": reason, "realized_pnl_usd": round(pnl, 8)})
+                            "quantity": quantity, "reason": reason, "realized_pnl_usd": round(pnl, 8),
+                            "price_source": price_source})
 
     def report(self) -> dict[str, Any]:
         records = self.records()
@@ -374,7 +441,7 @@ class PaperLedger:
                 bucket["net_pnl_usd"] = round(bucket["net_pnl_usd"] + pnl, 8)
         return {
             "paper_only": True,
-            "open_positions": self.positions(),
+            "open_positions": self.position_diagnostics(),
             "closed": len(closes),
             "wins": sum(value > 0 for value in pnls),
             "losses": sum(value <= 0 for value in pnls),
@@ -403,9 +470,18 @@ class MultiAssetEngine:
             raise MultiAssetRejected("unsupported asset class")
         if not self.enabled(asset_class):
             raise MultiAssetRejected(f"{asset_class} engine is disabled")
-        if self.ledger.open_positions(asset_class) >= self.policy.max_open_positions_per_sleeve:
-            raise MultiAssetRejected("paper sleeve position limit reached")
         proposal = self.engines[asset_class].evaluate(snapshot)
+        if self.ledger.has_open_symbol(asset_class, str(snapshot.get("symbol") or "")):
+            raise MultiAssetRejected(
+                f"qualified signal blocked: {snapshot.get('symbol')} already has an open paper position")
+        open_count = self.ledger.open_positions(asset_class)
+        if open_count >= self.policy.max_open_positions_per_sleeve:
+            blockers = ", ".join(str(item.get("symbol") or "UNKNOWN")
+                                 for item in self.ledger.position_diagnostics()
+                                 if str(item.get("asset_class") or "").upper() == asset_class)
+            raise MultiAssetRejected(
+                f"qualified signal blocked: paper sleeve capacity {open_count}/"
+                f"{self.policy.max_open_positions_per_sleeve}; open positions: {blockers or 'UNKNOWN'}")
         frozen = asdict(proposal)
         self.ledger.append({"type": "PROPOSAL", **frozen, "mode": "PAPER_ONLY"})
         return self.ledger.append({"type": "PAPER_FILL", **frozen, "mode": "PAPER_ONLY", "fill_price": proposal.reference_price})
