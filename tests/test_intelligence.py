@@ -153,6 +153,24 @@ class IntelligenceLedgerTests(unittest.TestCase):
         self.assertIn(checkpointed, remaining)
         self.assertEqual(1, self.ledger.db.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0])
 
+    def test_scan_payload_is_canonical_but_trade_payload_remains_full(self):
+        nested = {"unused_blob": "x" * 10000, "latest_candidate": {
+            "mint": "mint-1", "symbol": "RUN", "liquidity_usd": 250000,
+            "failures": ["momentum below floor"]}}
+        scan_id, _, _ = self.ledger.record("discovery", "CRYPTO", "RUNNER", nested,
+                                            event_type="CANDIDATE_DECISION", mode="SHADOW")
+        trade_id, _, _ = self.ledger.record("solana", "CRYPTO", "RUNNER", {
+            "id": "trade-1", "symbol": "RUN", "realized_pnl_usd": .2,
+            "execution_receipt": {"signature": "kept"}},
+            event_type="PAPER_CLOSE", mode="PAPER")
+        scan_payload = self.ledger.db.execute(
+            "SELECT payload_json FROM observations WHERE evidence_id=?", (scan_id,)).fetchone()[0]
+        trade_payload = self.ledger.db.execute(
+            "SELECT payload_json FROM observations WHERE evidence_id=?", (trade_id,)).fetchone()[0]
+        self.assertIn("CANONICAL_SCAN_SUMMARY", scan_payload)
+        self.assertNotIn("unused_blob", scan_payload)
+        self.assertIn("execution_receipt", trade_payload)
+
 
 if __name__ == "__main__":
     unittest.main()
