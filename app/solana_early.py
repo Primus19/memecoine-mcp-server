@@ -135,6 +135,9 @@ class MicrocapLaunchPolicy:
     maximum_sell_price_impact_bps: float = 150.0
     maximum_top10_holder_fraction: float = 0.70
     maximum_creator_fraction: float = 0.20
+    shadow_enabled: bool = True
+    shadow_minimum_market_cap_usd: float = 100_000.0
+    shadow_maximum_market_cap_usd: float = 1_000_000.0
 
     @classmethod
     def from_env(cls) -> "MicrocapLaunchPolicy":
@@ -150,6 +153,15 @@ class MicrocapLaunchPolicy:
             watch_minimum_volume_24h_usd=max(5_000.0, float(os.getenv("SOLANA_MICROCAP_WATCH_MIN_VOLUME_24H_USD", "5000"))),
             minimum_liquidity_usd=max(7_500.0, float(os.getenv("SOLANA_MICROCAP_MIN_LIQUIDITY_USD", "10000"))),
             maximum_age_minutes=min(60.0, max(5.0, float(os.getenv("SOLANA_MICROCAP_MAX_AGE_MINUTES", "30")))),
+            shadow_enabled=os.getenv("SOLANA_MICROCAP_SUB_1M_SHADOW_ENABLED", "true").lower() == "true",
+            shadow_minimum_market_cap_usd=max(
+                100_000.0,
+                float(os.getenv("SOLANA_MICROCAP_SHADOW_MIN_MARKET_CAP_USD", "100000")),
+            ),
+            shadow_maximum_market_cap_usd=min(
+                1_000_000.0,
+                max(100_001.0, float(os.getenv("SOLANA_MICROCAP_SHADOW_MAX_MARKET_CAP_USD", "1000000"))),
+            ),
         )
 
 
@@ -783,6 +795,76 @@ def score_microcap_launch_candidate(candidate: dict[str, Any], ledger: Ledger,
     }
 
 
+def score_microcap_sub_million_shadow(candidate: dict[str, Any],
+                                      policy: MicrocapLaunchPolicy) -> dict[str, Any]:
+    """Track executable $100k-$1m pools without authorizing a paper or live entry."""
+    age = _number(candidate.get("token_age_minutes"), 9999)
+    volume_24h = _number(candidate.get("volume_24h_usd"), 0)
+    market_cap = _number(candidate.get("market_cap_usd"), 0)
+    liquidity = _number(candidate.get("liquidity_usd"), 0)
+    impact = _number(candidate.get("sell_price_impact_bps"), 9999)
+    top10 = candidate.get("top10_holder_fraction")
+    creator = candidate.get("creator_fraction")
+    failures = contract_safety_failures(candidate)
+    checks = (
+        (not policy.shadow_enabled, "microcap sub-$1m shadow cohort disabled"),
+        (not 1 <= age <= policy.maximum_age_minutes, "shadow token age outside launch window"),
+        (not policy.shadow_minimum_market_cap_usd <= market_cap < policy.shadow_maximum_market_cap_usd,
+         "shadow market cap outside $100k-$1m research range"),
+        (volume_24h < policy.minimum_volume_24h_usd,
+         f"shadow 24h volume below ${policy.minimum_volume_24h_usd / 1000:.0f}k minimum"),
+        (liquidity < policy.minimum_liquidity_usd, "shadow liquidity below minimum"),
+        (candidate.get("sell_simulation_ok") is not True, "shadow full-size sell route unavailable"),
+        (impact > policy.maximum_sell_price_impact_bps,
+         "shadow executable sell impact above maximum"),
+        (top10 is None, "shadow top-10 concentration unavailable"),
+        (top10 is not None and _number(top10) > policy.maximum_top10_holder_fraction,
+         "shadow top-10 concentration too high"),
+        (creator is not None and _number(creator) > policy.maximum_creator_fraction,
+         "shadow creator concentration too high"),
+    )
+    failures.extend(reason for failed, reason in checks if failed)
+    warnings = (["shadow creator concentration unavailable"] if creator is None else [])
+    shadow_qualified = not failures
+    return {
+        "mint": str(candidate.get("mint") or ""),
+        "symbol": str(candidate.get("symbol") or ""),
+        "price_usd": _number(candidate.get("price_usd")),
+        "decimals": int(candidate.get("decimals") or 0),
+        "strategy": "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
+        "strategy_version": "MICROCAP_SUB_1M_SHADOW_V1",
+        "mode": "SHADOW_ONLY",
+        "qualified": False,
+        "paper_qualified": False,
+        "live_eligible": False,
+        "shadow_qualified": shadow_qualified,
+        "paper_failures": list(dict.fromkeys(failures)),
+        "evidence_warnings": warnings,
+        "failures": ["shadow-only research cohort"],
+        "score": round(clamp(_number(candidate.get("price_change_5m_pct"), 0), 0, 30) +
+                       clamp(_number(candidate.get("transaction_buy_pressure"), 0) * 30, 0, 20) +
+                       clamp(math.log10(max(liquidity, 1) / policy.minimum_liquidity_usd + 1) * 20, 0, 20), 2),
+        "token_age_minutes": round(age, 4),
+        "volume_24h_usd": round(volume_24h, 2),
+        "market_cap_usd": round(market_cap, 2),
+        "liquidity_usd": round(liquidity, 2),
+        "sell_simulation_ok": candidate.get("sell_simulation_ok") is True,
+        "sell_price_impact_bps": round(impact, 2),
+        "top10_holder_fraction": _number(top10) if top10 is not None else None,
+        "creator_fraction": _number(creator) if creator is not None else None,
+        "safety_evidence_status": str(candidate.get("safety_evidence_status") or "MISSING"),
+        "pool_address": str(candidate.get("pool") or ""),
+        "source_observed_at": str(candidate.get("observed_at") or ""),
+        "source_url": str(candidate.get("source_url") or ""),
+        "entry_reason": (f"Shadow-only executable sub-$1M observation: ${market_cap:,.0f} market cap; "
+                         f"${volume_24h:,.0f} 24h volume; ${liquidity:,.0f} liquidity; "
+                         f"full-size sell impact {impact:.0f} bps."),
+        "adoption_threshold": (
+            "100 independent cost-stressed shadow closes with positive expectancy; live gates unchanged"
+        ),
+    }
+
+
 def score_runner_capture_candidate(candidate: dict[str, Any], ledger: Ledger,
                                    policy: RunnerCapturePolicy) -> dict[str, Any]:
     """Test persistent explosive runners without making them live eligible."""
@@ -1013,7 +1095,8 @@ def strategy_diagnostics(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Explain why each paper strategy did or did not produce candidates."""
     diagnostics: dict[str, Any] = {}
     for strategy in ("SOLANA_EARLY_CONTROL", "SOLANA_PUMPFUN_EV_EXPERIMENT",
-                     "SOLANA_MICROCAP_LAUNCH_MOMENTUM", "SOLANA_MICROCAP_RUNNER_CAPTURE"):
+                     "SOLANA_MICROCAP_LAUNCH_MOMENTUM", "SOLANA_MICROCAP_RUNNER_CAPTURE",
+                     "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW"):
         rows = [item for item in results if item.get("strategy") == strategy]
         failure_counts: dict[str, int] = {}
         for row in rows:
@@ -1027,13 +1110,15 @@ def strategy_diagnostics(results: list[dict[str, Any]]) -> dict[str, Any]:
             "creator_concentration": sum(item.get("creator_fraction") is not None for item in rows),
         }
         near_misses = sorted(
-            (item for item in rows if not item.get("paper_qualified")),
+            (item for item in rows
+             if not item.get("paper_qualified") and not item.get("shadow_qualified")),
             key=lambda item: (len(item.get("paper_failures") or []),
                               -_number(item.get("score"), 0)),
         )[:5]
         diagnostics[strategy] = {
             "evaluated": len(rows),
             "paper_qualified": sum(item.get("paper_qualified") is True for item in rows),
+            "shadow_qualified": sum(item.get("shadow_qualified") is True for item in rows),
             "evidence_coverage": {
                 key: {"available": value, "evaluated": len(rows),
                       "pct": round(value / len(rows) * 100, 1) if rows else 0.0}
@@ -1332,6 +1417,7 @@ def public_onchain_candidates(ledger: Ledger) -> list[dict[str, Any]]:
         "SOLANA_PUMPFUN_EV_EXPERIMENT",
         "SOLANA_MICROCAP_LAUNCH_MOMENTUM",
         "SOLANA_MICROCAP_RUNNER_CAPTURE",
+        "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
     )
     retained_pools: list[str] = []
     for strategy in strategies:
@@ -1611,6 +1697,15 @@ def main() -> None:
                 ledger.store_signal({**candidate, "strategy": microcap["strategy"]}, microcap["score"],
                                     "PAPER_QUALIFIED" if microcap["paper_qualified"] else "REJECTED")
                 results.append(microcap_evidence)
+                shadow = score_microcap_sub_million_shadow(candidate, microcap_policy)
+                shadow_evidence = {**candidate, **shadow}
+                ledger.store_signal({**candidate, "strategy": shadow["strategy"]}, shadow["score"],
+                                    "SHADOW_QUALIFIED" if shadow["shadow_qualified"] else "REJECTED")
+                if shadow["shadow_qualified"] or ledger.is_watched(shadow["strategy"], shadow["mint"]):
+                    ledger.upsert_watch_candidate(
+                        shadow_evidence, shadow["strategy"],
+                        "RESEARCH_SHADOW" if shadow["shadow_qualified"] else "WATCHING")
+                results.append(shadow_evidence)
                 runner = score_runner_capture_candidate(candidate, ledger, runner_policy)
                 runner_evidence = {**candidate, **runner}
                 ledger.store_signal({**candidate, "strategy": runner["strategy"]}, runner["score"],
@@ -1632,6 +1727,7 @@ def main() -> None:
                 "SOLANA_PUMPFUN_EV_EXPERIMENT",
                 "SOLANA_MICROCAP_LAUNCH_MOMENTUM",
                 "SOLANA_MICROCAP_RUNNER_CAPTURE",
+                "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
             ):
                 for evidence in [item for item in results if item.get("strategy") == strategy][:5]:
                     ledger.upsert_watch_candidate(evidence, strategy, classify_cohort(evidence)[0])
@@ -1643,6 +1739,7 @@ def main() -> None:
                                        "SOLANA_PUMPFUN_EV_EXPERIMENT",
                                        "SOLANA_MICROCAP_LAUNCH_MOMENTUM",
                                        "SOLANA_MICROCAP_RUNNER_CAPTURE",
+                                       "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
                                    )}
             with LOCK:
                 completed_at = utcnow()
@@ -1654,7 +1751,7 @@ def main() -> None:
                     "strategy_watchlists": strategy_watchlists,
                 }
                 STATE.update(ok=True, scanned_at=completed_at, scan_status="COMPLETE",
-                             # Four strategy evaluations are emitted per pool.
+                             # Five strategy evaluations are emitted per pool.
                              # Keep all bounded results so a valid Runner Probe
                              # candidate cannot be truncated by other cohorts.
                              candidates=results[:240], error="", feed=feed,
@@ -1671,6 +1768,14 @@ def main() -> None:
                                  "tracked": len(watchlist),
                                  "execution_volume_floor_usd": microcap_policy.minimum_volume_24h_usd,
                                  "minimum_market_cap_usd": microcap_policy.minimum_market_cap_usd,
+                                 "sub_1m_shadow_enabled": microcap_policy.shadow_enabled,
+                                 "sub_1m_shadow_market_cap_range_usd": [
+                                     microcap_policy.shadow_minimum_market_cap_usd,
+                                     microcap_policy.shadow_maximum_market_cap_usd,
+                                 ],
+                                 "sub_1m_shadow_strategy":
+                                     "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
+                                 "sub_1m_shadow_requires_full_size_sell_route": True,
                                  "watch_volume_floor_usd": microcap_policy.watch_minimum_volume_24h_usd,
                                  "runner_capture_enabled": runner_policy.enabled,
                                  "runner_minimum_return_since_seen":
