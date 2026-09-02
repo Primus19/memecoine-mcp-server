@@ -13,6 +13,7 @@ from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServe
                                 five_streak_email_actions, five_streak_profit_floor_r,
                                 five_streak_signals, bryne_liquidity_signals,
                                 calendar_execution_allowed,
+                                early_thesis_failure_shadow,
                                 live_profit_protection_shadow, live_profit_exit_decision,
                                 recoverable_managed_trade,
                                 historical_managed_trade_outcomes,
@@ -100,6 +101,26 @@ class ForexExecutorTests(unittest.TestCase):
             self.assertFalse(ledger.record_live_checkpoint({
                 "trade_id": "37", "instrument": "NZD_USD", "current_price": .59160,
             }, 15))
+
+    def test_paper_checkpoint_labels_delayed_capture_truthfully(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(directory + "/forex.sqlite3")
+            intent = {"id":"p1", "side":"BUY", "entry_price":1.0, "stop_price":.99,
+                      "maximum_loss_usd":.5, "status":"PAPER_OPEN"}
+            self.assertTrue(ledger.record_checkpoint(intent, 15, {"observed_at":"now"}, 1.001, 240))
+            row = ledger.trade_checkpoints()[0]
+            self.assertEqual("FIRST_AVAILABLE_AFTER_HORIZON", row["checkpoint_quality"])
+            self.assertEqual(240, row["capture_delay_seconds"])
+
+    def test_zero_mfe_thesis_failure_is_shadow_only(self):
+        position = {"side":"BUY", "maximum_loss_usd":.5}
+        snapshot = {"symbol":"USD_CHF", "bid":.81, "ask":.8101, "price":.81005,
+                    "trend_strength":-.1, "liquidity_score":1, "change_1h_pct":-.1,
+                    "change_24h_pct":-.2, "horizon_direction":-1, "horizon_agreement":1}
+        result = early_thesis_failure_shadow(position, snapshot, -.05, 0, 45)
+        self.assertTrue(result["would_exit_now"])
+        self.assertTrue(result["shadow_only"])
+        self.assertEqual("ZERO_MFE_THESIS_FAILURE_V1", result["experiment"])
 
     def test_five_streak_profit_floor_ratchets_without_moving_backward(self):
         self.assertEqual(0, five_streak_profit_floor_r(.49))
