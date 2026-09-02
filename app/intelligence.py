@@ -742,3 +742,21 @@ class IntelligenceLedger:
                     "hard_control_retention_days": self.hard_control_retention_days,
                     "ingestion_run_retention_days": self.ingestion_run_retention_days,
                 }}
+
+    def quick_health(self) -> dict:
+        """Return without waiting for a potentially long one-time VACUUM."""
+        database_bytes = os.path.getsize(self.path) if os.path.exists(self.path) else 0
+        if not self.lock.acquire(blocking=False):
+            return {"maintenance_in_progress": True, "database_bytes": database_bytes}
+        try:
+            totals = self.db.execute("""SELECT COUNT(*),
+                (SELECT COUNT(*) FROM checkpoints),(SELECT COUNT(*) FROM learnings)
+                FROM observations""").fetchone()
+            migration = self.db.execute(
+                "SELECT value FROM maintenance_state WHERE key='storage_compaction_v2_applied'").fetchone()
+            return {"maintenance_in_progress": False, "database_bytes": database_bytes,
+                    "observations": int(totals[0] or 0), "checkpoints": int(totals[1] or 0),
+                    "learnings": int(totals[2] or 0),
+                    "storage_compaction_v2_applied": bool(migration)}
+        finally:
+            self.lock.release()
