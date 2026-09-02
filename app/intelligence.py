@@ -712,6 +712,8 @@ class IntelligenceLedger:
                 FROM observations ORDER BY recorded_at DESC LIMIT ?""", (limit,)).fetchall()]
             runs = [dict(row) for row in self.db.execute(
                 "SELECT * FROM ingestion_runs ORDER BY started_at DESC LIMIT 10").fetchall()]
+            maintenance = {str(row[0]): str(row[1]) for row in self.db.execute(
+                "SELECT key,value FROM maintenance_state").fetchall()}
         recommendations = self.actionable_recommendations()
         return {"generated_at": utcnow(), "database": "PERSISTENT_SQLITE_AUDIT_WITH_BOUNDED_RAW_RETENTION",
                 "checkpoints_minutes": list(CHECKPOINTS), "totals": totals,
@@ -731,6 +733,9 @@ class IntelligenceLedger:
                     "recommendations_are_advisory": True,
                     "hard_gates_never_relaxed_automatically": True,
                 }, "storage_policy": {
+                    "database_bytes": os.path.getsize(self.path) if os.path.exists(self.path) else 0,
+                    "last_compacted_at": maintenance.get("last_compacted_at"),
+                    "storage_compaction_v2_applied": bool(maintenance.get("storage_compaction_v2_applied")),
                     "audit_evidence_permanent": True,
                     "trades_checkpoints_learnings_preserved": True,
                     "raw_non_actionable_retention_hours": self.raw_retention_hours,
