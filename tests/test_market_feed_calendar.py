@@ -1,13 +1,37 @@
 import json
 import os
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-from app.market_feed import calendar_evidence, configured_symbols, scan_symbols
+from app.market_feed import Handler, LOCK, STATE, ThreadingHTTPServer, calendar_evidence, configured_symbols, scan_symbols
 
 
 class MarketFeedCalendarTests(unittest.TestCase):
+    def test_health_is_process_liveness_while_status_remains_fail_closed(self):
+        with LOCK:
+            original = dict(STATE)
+            STATE.update(ok=False, scanned_at="", snapshots=[], error="upstream unavailable")
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+            with urllib.request.urlopen(f"{base}/health", timeout=2) as response:
+                self.assertEqual(200, response.status)
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(f"{base}/status", timeout=2)
+            self.assertEqual(503, raised.exception.code)
+        finally:
+            server.shutdown()
+            server.server_close()
+            with LOCK:
+                STATE.clear()
+                STATE.update(original)
+
     def test_legacy_symbol_override_retains_expanded_liquid_core(self):
         symbols = configured_symbols("EUR_USD,GBP_USD,USD_JPY")
         self.assertEqual(12, len(symbols))

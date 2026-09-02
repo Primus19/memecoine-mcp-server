@@ -153,7 +153,12 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK: value = dict(STATE)
         if self.path == "/health": value = {"ok": value["ok"], "service": "multi-asset-market-feed", "scanned_at": value["scanned_at"], "error": value["error"]}
         elif self.path == "/snapshots": value = {"snapshots": value["snapshots"], "scanned_at": value["scanned_at"]}
-        body = json.dumps(value).encode(); self.send_response(200 if value.get("ok", True) else 503)
+        # Railway's health check proves that the process is listening.  Market
+        # readiness remains fail-closed on /status so an upstream OANDA or
+        # calendar delay cannot turn into a trading signal, but it must not
+        # prevent an otherwise healthy process from deploying.
+        status_code = 200 if self.path == "/health" else (200 if value.get("ok", True) else 503)
+        body = json.dumps(value).encode(); self.send_response(status_code)
         self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
     def log_message(self, *_): return
 
