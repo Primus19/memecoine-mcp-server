@@ -100,17 +100,20 @@ def classify_cohort(item: dict) -> tuple[str, list[str], list[str]]:
 class IntelligenceLedger:
     """Persistent, append-only evidence warehouse spanning every strategy.
 
-    It records source payloads verbatim for reproducibility, while normalized
-    columns make cross-strategy comparisons deterministic. It never changes a
-    strategy or authorizes a trade.
+    Trade evidence is retained in full. High-frequency scan evidence is stored
+    as a canonical summary plus a hash of the original payload so the database
+    remains useful without duplicating entire discovery snapshots indefinitely.
+    It never changes a strategy or authorizes a trade.
     """
 
     def __init__(self, path: str):
         self.path = path
-        self.raw_retention_days = max(
-            7, int(os.getenv("TRADING_INTELLIGENCE_RAW_RETENTION_DAYS", "30")))
+        self.raw_retention_hours = max(
+            6, int(os.getenv("TRADING_INTELLIGENCE_RAW_RETENTION_HOURS", "24")))
+        self.hard_control_retention_days = max(
+            2, int(os.getenv("TRADING_INTELLIGENCE_HARD_CONTROL_RETENTION_DAYS", "7")))
         self.ingestion_run_retention_days = max(
-            7, int(os.getenv("TRADING_INTELLIGENCE_RUN_RETENTION_DAYS", "30")))
+            1, int(os.getenv("TRADING_INTELLIGENCE_RUN_RETENTION_DAYS", "7")))
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -178,29 +181,49 @@ class IntelligenceLedger:
         """
         now = datetime.now(timezone.utc)
         with self.lock:
+            migration = self.db.execute(
+                "SELECT value FROM maintenance_state WHERE key='storage_compaction_v2_applied'").fetchone()
             previous = self.db.execute(
                 "SELECT value FROM maintenance_state WHERE key='last_compacted_at'").fetchone()
-            if not force and previous:
+            if not force and migration and previous:
                 try:
-                    if now - datetime.fromisoformat(previous[0]) < timedelta(hours=24):
+                    if now - datetime.fromisoformat(previous[0]) < timedelta(hours=6):
                         return {"status": "NOT_DUE", "last_compacted_at": previous[0]}
                 except (TypeError, ValueError):
                     pass
-            observation_cutoff = (now - timedelta(days=self.raw_retention_days)).isoformat()
+            observation_cutoff = (now - timedelta(hours=self.raw_retention_hours)).isoformat()
+            hard_cutoff = (now - timedelta(days=self.hard_control_retention_days)).isoformat()
             run_cutoff = (now - timedelta(days=self.ingestion_run_retention_days)).isoformat()
             before_bytes = os.path.getsize(self.path) if os.path.exists(self.path) else 0
             with self.db:
+                payloads_compacted = 0
+                scan_types = ("CANDIDATE_DECISION", "SHADOW_FORWARD_PATH", "TRADE_CHECKPOINT",
+                              "CANDIDATE_HANDOFF")
+                marks = ",".join("?" for _ in scan_types)
+                payload_rows = self.db.execute(f"""SELECT evidence_id,payload_json FROM observations
+                    WHERE event_type IN ({marks}) AND payload_json NOT LIKE '%\"_storage_tier\":\"CANONICAL_SCAN_SUMMARY\"%'""",
+                    scan_types).fetchall()
+                for evidence_id, payload_json in payload_rows:
+                    try:
+                        item = json.loads(payload_json or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        item = {}
+                    compacted = self.compact_scan_payload(item)
+                    self.db.execute("UPDATE observations SET payload_json=? WHERE evidence_id=?",
+                                    (json.dumps(compacted, sort_keys=True, separators=(",", ":")), evidence_id))
+                    payloads_compacted += 1
                 eligible = [row[0] for row in self.db.execute("""
                     SELECT o.evidence_id FROM observations o
                     WHERE o.recorded_at < ?
                       AND o.realized_pnl_usd IS NULL
-                      AND o.event_type IN ('CANDIDATE_DECISION','TRADE_CHECKPOINT')
-                      AND o.cohort NOT IN ('HARD_REJECT_CONTROL','PRODUCTION_QUALIFIED','PAPER_QUALIFIED')
+                      AND o.event_type IN ('CANDIDATE_DECISION','SHADOW_FORWARD_PATH','TRADE_CHECKPOINT','CANDIDATE_HANDOFF')
+                      AND o.cohort NOT IN ('PRODUCTION_QUALIFIED','PAPER_QUALIFIED')
+                      AND (o.cohort!='HARD_REJECT_CONTROL' OR o.recorded_at < ?)
                       AND NOT EXISTS (SELECT 1 FROM checkpoints c WHERE c.evidence_id=o.evidence_id)
                       AND NOT EXISTS (
                         SELECT 1 FROM learnings l
                         WHERE instr(l.evidence_ids_json,o.evidence_id)>0)
-                    """, (observation_cutoff,)).fetchall()]
+                    """, (observation_cutoff, hard_cutoff)).fetchall()]
                 if eligible:
                     marks = ",".join("?" for _ in eligible)
                     self.db.execute(f"DELETE FROM rule_evidence WHERE evidence_id IN ({marks})", eligible)
@@ -209,17 +232,52 @@ class IntelligenceLedger:
                     WHERE started_at < ? AND COALESCE(error,'')=''""", (run_cutoff,))
                 self.db.execute("""INSERT INTO maintenance_state(key,value) VALUES('last_compacted_at',?)
                     ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (now.isoformat(),))
+                self.db.execute("""INSERT INTO maintenance_state(key,value)
+                    VALUES('storage_compaction_v2_applied',?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (now.isoformat(),))
             self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             # VACUUM is intentionally outside a transaction. It reclaims pages
             # after the evidence-safe deletes above and never runs per ingest.
-            self.db.execute("VACUUM")
+            vacuum_error = ""
+            try:
+                self.db.execute("VACUUM")
+            except sqlite3.OperationalError as exc:
+                # At the 95% Railway alert there may not be enough temporary
+                # space for VACUUM. Deleted pages remain reusable by SQLite, so
+                # ingestion can continue without growing the file further.
+                vacuum_error = str(exc)[:180]
             after_bytes = os.path.getsize(self.path) if os.path.exists(self.path) else 0
         return {"status": "COMPLETED", "completed_at": now.isoformat(),
-                "raw_retention_days": self.raw_retention_days,
+                "raw_retention_hours": self.raw_retention_hours,
+                "hard_control_retention_days": self.hard_control_retention_days,
+                "payloads_compacted": payloads_compacted,
+                "vacuum_error": vacuum_error,
                 "observations_removed": len(eligible),
                 "ingestion_runs_removed": max(0, run_cursor.rowcount),
                 "bytes_before": before_bytes, "bytes_after": after_bytes,
                 "bytes_reclaimed": max(0, before_bytes - after_bytes)}
+
+    @staticmethod
+    def compact_scan_payload(item: dict) -> dict:
+        """Retain decision-grade scan facts without nested duplicate snapshots."""
+        latest = item.get("latest_candidate") if isinstance(item.get("latest_candidate"), dict) else {}
+        source = {**latest, **item}
+        keys = (
+            "id", "mint", "contract_address", "pool", "pool_address", "symbol", "instrument",
+            "strategy", "strategy_version", "status", "decision", "cohort", "observed_at",
+            "at", "first_seen_at", "last_seen_at", "source_url", "price_usd", "entry_price",
+            "exit_price", "market_cap_usd", "liquidity_usd", "volume_24h_usd", "trades_5m",
+            "unique_buyers_5m", "net_buy_pressure", "buyer_acceleration", "volume_acceleration",
+            "price_change_5m_pct", "price_change_15m_pct", "return_since_seen",
+            "retracement_from_high", "sell_simulation_ok", "sell_price_impact_bps",
+            "top10_holder_fraction", "creator_fraction", "safety_evidence_status",
+            "distribution_evidence_status", "paper_qualified", "qualified", "live_eligible",
+            "paper_failures", "failures", "blocking_reasons", "rejection_reasons", "blockers",
+            "entryUsd", "exitUsd", "realizedPnlUsd", "costStressedPnlUsd", "checkpoints",
+        )
+        retained = {key: source[key] for key in keys if source.get(key) is not None}
+        retained["_storage_tier"] = "CANONICAL_SCAN_SUMMARY"
+        return retained
 
     @staticmethod
     def evidence_id(service: str, strategy: str, item: dict, ordinal: int = 0) -> str:
@@ -236,6 +294,10 @@ class IntelligenceLedger:
         cohort, hard, soft = classify_cohort(item)
         evidence_id = self.evidence_id(service, strategy, item, ordinal)
         body = json.dumps(item, sort_keys=True, separators=(",", ":"), default=str)
+        stored_item = (self.compact_scan_payload(item) if event_type in {
+            "CANDIDATE_DECISION", "SHADOW_FORWARD_PATH", "TRADE_CHECKPOINT", "CANDIDATE_HANDOFF"
+        } else item)
+        stored_body = json.dumps(stored_item, sort_keys=True, separators=(",", ":"), default=str)
         instrument = first(item, "instrument", "symbol", "pair", "product_id", "mint")
         status = str(first(item, "status", "decision", "action", default=""))
         realized = number(first(item, "realized_pnl_usd", "realizedPnlUsd", "net_pnl_usd",
@@ -254,7 +316,7 @@ class IntelligenceLedger:
             number(first(item, "max_favorable_pnl_usd", "mfe_usd", "maximumFavorablePnlUsd")),
             number(first(item, "max_adverse_pnl_usd", "mae_usd", "maximumAdversePnlUsd")),
             number(first(item, "hold_minutes", "duration_minutes")), json.dumps(hard), json.dumps(soft),
-            body, hashlib.sha256(body.encode()).hexdigest(),
+            stored_body, hashlib.sha256(body.encode()).hexdigest(),
         )
         with self.lock, self.db:
             cursor = self.db.execute(
@@ -671,6 +733,7 @@ class IntelligenceLedger:
                 }, "storage_policy": {
                     "audit_evidence_permanent": True,
                     "trades_checkpoints_learnings_preserved": True,
-                    "raw_non_actionable_retention_days": self.raw_retention_days,
+                    "raw_non_actionable_retention_hours": self.raw_retention_hours,
+                    "hard_control_retention_days": self.hard_control_retention_days,
                     "ingestion_run_retention_days": self.ingestion_run_retention_days,
                 }}
