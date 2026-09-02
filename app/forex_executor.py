@@ -859,6 +859,7 @@ def fetch_json(url: str) -> dict:
 def live_armed(adapter: OandaAdapter) -> bool:
     return all((
         truthy("FOREX_LIVE_ENABLED"),
+        truthy("FOREX_PROFITABILITY_GATE_PASSED"),
         os.getenv("FOREX_LIVE_ACK") == "I_ACCEPT_REAL_MONEY_RISK",
         adapter.environment == "live",
         os.getenv("FOREX_ALLOWED_ACCOUNT_ID", "") == adapter.account,
@@ -866,7 +867,7 @@ def live_armed(adapter: OandaAdapter) -> bool:
 
 
 def practice_armed(adapter: OandaAdapter) -> bool:
-    return all((truthy("FOREX_PRACTICE_EXECUTION_ENABLED"), adapter.environment == "practice",
+    return all((truthy("FOREX_PRACTICE_EXECUTION_ENABLED"), truthy("FOREX_PROFITABILITY_GATE_PASSED"), adapter.environment == "practice",
                 os.getenv("FOREX_PRACTICE_ACK") == "I_ACCEPT_PRACTICE_ORDER_EXECUTION"))
 
 
