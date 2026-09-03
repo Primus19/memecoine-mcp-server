@@ -226,7 +226,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path not in {"/health", "/snapshots", "/status"}: self.send_error(404); return
         with LOCK: value = dict(STATE)
         if self.path == "/health": value = {"ok": value["ok"], "service": "multi-asset-market-feed", "scanned_at": value["scanned_at"], "error": value["error"]}
-        elif self.path == "/snapshots": value = {"snapshots": value["snapshots"], "crypto_universe": value.get("crypto_universe", []), "scanned_at": value["scanned_at"]}
+        elif self.path == "/snapshots": value = {
+            "snapshots": value["snapshots"], "crypto_universe": value.get("crypto_universe", []),
+            "scanned_at": value["scanned_at"], "forex_health": value.get("forex_health", {}),
+            "crypto_health": value.get("crypto_health", {}),
+        }
         # Railway's health check proves that the process is listening.  Market
         # readiness remains fail-closed on /status so an upstream OANDA or
         # calendar delay cannot turn into a trading signal, but it must not

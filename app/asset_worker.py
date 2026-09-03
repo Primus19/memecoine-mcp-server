@@ -159,6 +159,9 @@ def main() -> None:
                                  recent_actions=crypto_events[:25])
             feed_health = dict(payload.get("crypto_health") or {})
             feed_health.setdefault("universe_count", len(payload.get("crypto_universe") or []))
+            feed_health.setdefault("status", "READY" if feed_health["universe_count"] else "DEGRADED")
+            if not feed_health["universe_count"]:
+                feed_health.setdefault("last_error", "crypto universe is empty")
             runtime = {"last_scan": datetime.now(timezone.utc).isoformat(), "last_error": "",
                        "last_outcomes": outcomes[-25:], "last_closes": closes[-25:],
                        "multi_week_crypto": crypto_bucket, "feed_health": feed_health}
