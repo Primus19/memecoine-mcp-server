@@ -81,7 +81,7 @@ def crypto_market_universe() -> list[dict]:
             "volume_24h_usd": float(market.get("total_volume") or 0),
             "benchmark_return_7d_pct": 0.0,
             "daily_candles": candles,
-            "token_age_days": 7.0,
+            "token_age_days": -1.0,
             "sell_route_ok": False, "security_verified": False,
             "round_trip_recovery": -1.0, "sell_impact_bps": 10_000.0,
             "top10_holder_fraction": None, "creator_fraction": None,
@@ -239,12 +239,26 @@ def main():
     if os.getenv("MULTI_ASSET_FEED_ENABLED", "false").lower() != "true": raise SystemExit("MULTI_ASSET_FEED_ENABLED is not true")
     threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler).serve_forever, daemon=True).start()
     interval = max(30, int(os.getenv("MULTI_ASSET_FEED_INTERVAL_SECONDS", "60")))
+    crypto_refresh = max(1800, int(os.getenv("MULTI_WEEK_CRYPTO_REFRESH_SECONDS", "21600")))
+    last_crypto_attempt = 0.0
     symbols = configured_symbols()
     while True:
         try:
             adapter = OandaAdapter()
             snapshots, rejected = scan_symbols(adapter, symbols)
-            crypto = crypto_market_universe()
+            with LOCK:
+                crypto = list(STATE.get("crypto_universe", []))
+            if time.monotonic() - last_crypto_attempt >= crypto_refresh:
+                last_crypto_attempt = time.monotonic()
+                try:
+                    refreshed = crypto_market_universe()
+                    if refreshed:
+                        crypto = refreshed
+                except Exception as crypto_exc:
+                    print(json.dumps({"event": "MULTI_WEEK_CRYPTO_FEED_WARNING",
+                                      "error": type(crypto_exc).__name__,
+                                      "detail": str(crypto_exc)[:500],
+                                      "retained_universe_count": len(crypto)}), flush=True)
             for item in rejected:
                 print(json.dumps({"event": "FOREX_SYMBOL_REJECTED", **item}), flush=True)
             with LOCK: STATE.update(ok=True, scanned_at=datetime.now(timezone.utc).isoformat(), snapshots=snapshots, crypto_universe=crypto, error="")
