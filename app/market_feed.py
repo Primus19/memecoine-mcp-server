@@ -79,242 +79,384 @@ def _coinbase_execution(book: object, probe_usd: float, fee_bps_per_side: float)
                    "sell_impact_bps": 10_000.0, "spread_bps": 10_000.0, "liquidity_usd": 0.0}
     if not isinstance(book, dict):
         return unavailable
-    asks, bids6ßÞ­¢G§²ÚîÆ­yÜWJH›Üˆ›ÝÈ[ˆ
-\ÝÜžK™Ù]
-Ý[Ý›Û[Y\ÈŠHÜˆ×JBˆYˆ\Ú[œÝ[˜ÙJ›ÝË\Ý
-H[™[Š›ÝÊHHŸBˆØ[™\ÈH×Bˆ›Üˆ›ÝÈ[ˆšXÙ\Î‚ˆYˆ›Ý\Ú[œÝ[˜ÙJ›ÝË\Ý
-HÜˆ[Š›ÝÊHˆÜˆ›Ø]
-›ÝÖÌWHÜˆ
-HH‚ˆÛÛ[YBˆÝ[\ÛÜÙHH[
-›ÝÖÌJK›Ø]
-›ÝÖÌWJBˆØ[™\Ë˜\[™
-Âˆ›ØœÙ\™YØ]Žˆ]][YK™œ›Û][Y\Ý[\
-Ý[\ÈL[Y^›Û™K]ÊKš\ÛÙ›Ü›X]
+    asks, bids = list(book.get("asks") or []), list(book.get("bids") or [])
+    if not asks or not bids:
+        return unavailable
+    best_ask, best_bid = float(asks[0][0]), float(bids[0][0])
+    midpoint = (best_ask + best_bid) / 2
+    acquired, spent = _walk_book(asks, probe_usd, buying=True)
+    sold, received = _walk_book(bids, acquired, buying=False)
+    fee_fraction = max(0.0, fee_bps_per_side) / 10_000
+    recovery = received * (1 - fee_fraction) / (spent * (1 + fee_fraction)) \
+        if spent > 0 and sold >= acquired * .999 else -1.0
+    average_sell = received / sold if sold > 0 else 0.0
+    impact = (best_bid - average_sell) / best_bid * 10_000 if best_bid > 0 and average_sell > 0 else 10_000.0
+    bid_depth = sum(float(row[0]) * float(row[1]) for row in bids if len(row) >= 2 and float(row[0]) >= midpoint * .98)
+    ask_depth = sum(float(row[0]) * float(row[1]) for row in asks if len(row) >= 2 and float(row[0]) <= midpoint * 1.02)
+    return {"price": best_ask, "executable_buy_price": best_ask,
+            "executable_sell_price": best_bid, "mid_price": midpoint,
+            "bid": best_bid, "ask": best_ask,
+            "spread_bps": (best_ask - best_bid) / midpoint * 10_000,
+            "estimated_slippage_bps": max(0.0, impact), "sell_route_ok": recovery > 0,
+            "round_trip_recovery": recovery, "sell_impact_bps": max(0.0, impact),
+            "liquidity_usd": min(bid_depth, ask_depth), "execution_probe_usd": probe_usd,
+            "modeled_fee_bps_per_side": fee_bps_per_side}
 
-Kˆ›Ü[ˆŽˆÛÜÙKšYÚŽˆÛÜÙK›ÝÈŽˆÛÜÙK˜ÛÜÙHŽˆÛÜÙKˆ›Û[YWÝ\ÙŽˆ›Û[Y\Ë™Ù]
-Ý[\Œ
-KˆJBˆ™\Ý[˜\[™
-Âˆ˜ÚZ[ˆŽˆ˜ÛÚ[™ÙXÚÛÈ‹˜ÛÛ˜XÝŽˆÛÚ[—ÚYˆœÞ[X›ÛŽˆÝŠX\šÙ]™Ù]
-œÞ[X›ÛŠHÜˆÛÚ[—ÚY
-K\\Š
-Kˆ›˜[YHŽˆÝŠX\šÙ]™Ù]
-›˜[YHŠHÜˆÛÚ[—ÚY
-KˆœšXÙHŽˆ›Ø]
-X\šÙ]™Ù]
-˜Ý\œ™[ÜšXÙHŠHÜˆ
-Kˆ›X\šÙ]ØØ\Ý\ÙŽˆ›Ø]
-X\šÙ]™Ù]
-›X\šÙ]ØØ\ŠHÜˆ
-Kˆ›\]ZY]WÝ\ÙŽˆŒˆ›Û[YWÌÝ\ÙŽˆ›Ø]
-X\šÙ]™Ù]
-Ý[Ý›Û[YHŠHÜˆ
-Kˆ˜™[˜ÚX\š×Ü™]\›—ÍÙÜÝŽˆŒˆ™Z[WØØ[™\ÈŽˆØ[™\ËˆÚÙ[—ØYÙWÙ^\ÈŽˆLKŒˆœÙ[Ü›Ý]WÛÚÈŽˆ˜[ÙKœÙXÝ\š]WÝ™\šYšYYŽˆ˜[ÙKˆœ›Ý[™Ýš\Ü™XÛÝ™\žHŽˆLKŒœÙ[Ú[\XÝØœÈŽˆLÌŒˆÜLÚÛ\—Ùœ˜XÝ[ÛˆŽˆ›Û™K˜Ü™X]Ü—Ùœ˜XÝ[ÛˆŽˆ›Û™KˆšÛ\—ÙÜ›ÝÝÍÙÜÝŽˆŒš[š]X[ÜÝÜÙœ˜XÝ[ÛˆŽˆŒLˆ›ØœÙ\™YØ]Žˆ]][YK››ÝÊ[Y^›Û™K]ÊKš\ÛÙ›Ü›X]
 
-KˆœÛÝ\˜ÙWÝ\›ÈŽˆÙˆšÎ‹ËÝÝÝË˜ÛÚ[™ÙXÚÛË˜ÛÛKÙ[‹ØÛÚ[œËÞØÛÚ[—ÚYH—Kˆ™]šY[˜ÙWÜÝ]\ÈŽˆ“PT’ÑUÒTÕÔ–WÓÓ“WÑVPÕUSÓ—ÐS‘ÔÐQ‘UWÔS‘S‘È‹ˆJBˆ[YKœÛY\
-X^
-Œ›Ø]
-ÜË™Ù][Š“USWÕÑQR×ÐÔ–T×Ô‘TUQTÕÔÔPÒS‘×ÔÑPÓÓ‘È‹ŒŒÍHŠJJJBˆ™]\›ˆ™\Ý[‚‚™YˆÜž\×ÛX\šÙ]Ý[š]™\œÙJ
-HOˆ\VÛ\ÝÙXÝKXÝN‚ˆˆˆÛÛXš[™H\ÝX›\ÚYÑV\ÜÙ]ÈÚ][˜[ZXÈ[Y\™Ú[™ÈÛ‹XÚZ[ˆ™\ÙX\˜Úˆˆˆ‚ˆYˆÜË™Ù][Š“USWÕÑQR×ÐÔ–T×Ñ‘QQÑSP“Q‹YHŠK›ÝÙ\Š
-HOHYHŽ‚ˆ™]\›ˆ×KÈœ›ÝšY\ˆŽˆ™\ØX›Y‹œ›ÝšY\—Ù\œ›ÜœÈŽˆ×_Bˆ›ÝšY\œÈHÚ][KœÝš\
+def coinbase_crypto_market_universe() -> list[dict]:
+    """Build an executable, paper-only universe from public Coinbase order books."""
+    base = os.getenv("COINBASE_EXCHANGE_BASE_URL", "https://api.exchange.coinbase.com").rstrip("/")
+    limit = max(5, min(50, int(os.getenv("MULTI_WEEK_CRYPTO_UNIVERSE_SIZE", "20"))))
+    probe = max(10.0, float(os.getenv("MULTI_WEEK_EXECUTION_PROBE_USD", "100")))
+    fee_bps = max(0.0, float(os.getenv("MULTI_WEEK_MODELED_FEE_BPS_PER_SIDE", "60")))
+    excluded = {item.strip().upper() for item in os.getenv(
+        "MULTI_WEEK_CRYPTO_EXCLUDED_BASES", "USDT,USDC,DAI,PYUSD,EURC").split(",") if item.strip()}
+    priority = [item.strip().upper() for item in os.getenv(
+        "MULTI_WEEK_CRYPTO_PRIORITY_BASES",
+        "BTC,ETH,SOL,XRP,DOGE,ADA,AVAX,LINK,LTC,BCH,DOT,UNI,NEAR,APT,ARB,OP,SUI,INJ,FET,AAVE"
+    ).split(",") if item.strip()]
+    priority_rank = {symbol: index for index, symbol in enumerate(priority)}
+    products = fetch_json(f"{base}/products")
+    if not isinstance(products, list):
+        return []
+    eligible = []
+    for product in products:
+        product_id = str(product.get("id") or "")
+        base_currency = str(product.get("base_currency") or "").upper()
+        quote_currency = str(product.get("quote_currency") or "").upper()
+        if (product_id and quote_currency in {"USD", "USDC"} and base_currency not in excluded and
+                product.get("status") == "online" and product.get("trading_disabled") is not True and
+                product.get("cancel_only") is not True and product.get("post_only") is not True):
+            # /products does not publish comparable 24-hour volume. Prefer a
+            # configurable established-liquidity seed, then deterministically
+            # include the rest of the live venue universe for discovery.
+            eligible.append((priority_rank.get(base_currency, len(priority)),
+                             0 if quote_currency == "USD" else 1, product_id, base_currency))
+    eligible.sort()
+    result, now = [], datetime.now(timezone.utc)
+    spacing = max(0.0, float(os.getenv("MULTI_WEEK_CRYPTO_REQUEST_SPACING_SECONDS", "0.15")))
+    seen_bases = set()
+    for _, _, product_id, symbol in eligible:
+        if symbol in seen_bases:
+            continue
+        seen_bases.add(symbol)
+        try:
+            candles = _coinbase_candles(base, product_id)
+            book = fetch_json(f"{base}/products/{urllib.parse.quote(product_id)}/book?level=2")
+            execution = _coinbase_execution(book, probe, fee_bps)
+            if len(candles) < 20 or execution.get("price", 0) <= 0:
+                continue
+            listing_age = max(0.0, (now - datetime.fromisoformat(candles[0]["observed_at"])).total_seconds() / 86400)
+            result.append({"chain": "coinbase-spot", "contract": product_id, "symbol": symbol,
+                           "name": product_id, "market_cap_usd": 0.0,
+                           "volume_24h_usd": float(candles[-1].get("volume_usd") or 0),
+                           "benchmark_return_7d_pct": 0.0, "daily_candles": candles,
+                           "token_age_days": listing_age, "listing_age_observed_days": listing_age,
+                           "security_verified": False, "top10_holder_fraction": None,
+                           "creator_fraction": None, "holder_growth_7d_pct": 0.0,
+                           "venue_operational": True, "execution_evidence_mode": "CEX_ORDER_BOOK",
+                           "tradable": True, "market_veto": False, "quote_age_seconds": 0.0,
+                           "initial_stop_fraction": 0.10, "observed_at": now.isoformat(),
+                           "source_urls": [f"https://exchange.coinbase.com/trade/{product_id}"],
+                           "evidence_status": "PUBLIC_CEX_ORDER_BOOK_COST_STRESSED_PAPER_ONLY", **execution})
+            if len(result) >= limit:
+                break
+        except Exception as exc:
+            print(json.dumps({"event": "COINBASE_CRYPTO_ASSET_WARNING", "product": product_id,
+                              "error": type(exc).__name__, "detail": str(exc)[:300]}), flush=True)
+        if spacing:
+            time.sleep(spacing)
+    return result
 
-K›ÝÙ\Š
-H›Üˆ][H[ˆÜË™Ù][Šˆ“USWÕÑQR×ÐÔ–T×Ô“Õ’QT”È‹˜ÛÚ[˜˜\ÙKÛÚ[™ÙXÚÛÈŠKœÜ]
-‹ŠHYˆ][KœÝš\
 
-WBˆ\œ›ÜœÈH×Bˆ\ÝX›\ÚYˆ\ÝÙXÝHH×BˆÙ[XÝYÜ›ÝšY\ˆH››Û™H‚ˆ›Üˆ›ÝšY\ˆ[ˆ›ÝšY\œÎ‚ˆžN‚ˆ›ÝÜÈH
-ÛÚ[˜˜\ÙWØÜž\×ÛX\šÙ]Ý[š]™\œÙJ
-HYˆ›ÝšY\ˆOH˜ÛÚ[˜˜\ÙHˆ[ÙBˆÛÚ[™ÙXÚÛ×ØÜž\×ÛX\šÙ]Ý[š]™\œÙJ
-HYˆ›ÝšY\ˆOH˜ÛÚ[™ÙXÚÛÈˆ[ÙH×JBˆYˆ›ÝÜÎ‚ˆ\ÝX›\ÚYÙ[XÝYÜ›ÝšY\ˆH›ÝÜË›ÝšY\‚ˆœ™XZÂˆ\œ›ÜœË˜\[™
-Èœ›ÝšY\ˆŽˆ›ÝšY\‹™\œ›ÜˆŽˆ™[\H[š]™\œÙHŸJBˆ^Ù\^Ù\[Ûˆ\È^Î‚ˆ\œ›ÜœË˜\[™
-Èœ›ÝšY\ˆŽˆ›ÝšY\‹™\œ›ÜˆŽˆˆžÝ\J^ÊK—×Û˜[YW×ßNˆÜÝŠ^ÊVÎŒÌ_HŸJBˆžN‚ˆ[Y\™Ú[™Ë[Y\™Ú[™×ÚX[H[Y\™Ú[™×ØÜž\×Ý[š]™\œÙJ
-Bˆ^Ù\^Ù\[Ûˆ\È^Î‚ˆ[Y\™Ú[™Ë[Y\™Ú[™×ÚX[H×KÈœÝ]\ÈŽˆ‘QÔQQ‹˜Ø[™Y]WØÛÝ[Žˆˆ™\œ›ÜœÈŽˆÞÈ™\œ›ÜˆŽˆˆžÝ\J^ÊK—×Û˜[YW×ßNˆÜÝŠ^ÊVÎŒÌ_HŸW_BˆY[]Y\ÈHÊÝŠ›ÝË™Ù]
-˜ÚZ[ˆŠJKÝŠ›ÝË™Ù]
-˜ÛÛ˜XÝŠJK›ÝÙ\Š
-JH›Üˆ›ÝÈ[ˆ\ÝX›\ÚYBˆÛÛXš[™YH\ÝX›\ÚY
-ÈÜ›ÝÈ›Üˆ›ÝÈ[ˆ[Y\™Ú[™ÂˆYˆ
-ÝŠ›ÝË™Ù]
-˜ÚZ[ˆŠJKÝŠ›ÝË™Ù]
-˜ÛÛ˜XÝŠJK›ÝÙ\Š
-JH›Ý[ˆY[]Y\×Bˆ™]\›ˆÛÛXš[™YÈœ›ÝšY\ˆŽˆÙ[XÝYÜ›ÝšY\‹œ›ÝšY\—Ù\œ›ÜœÈŽˆ\œ›ÜœËˆ™\ÝX›\ÚYØÛÝ[Žˆ[Š\ÝX›\ÚY
-K™[Y\™Ú[™ÈŽˆ[Y\™Ú[™×ÚX[B‚‚™YˆÝ
-Nˆ›Ø]Žˆ›Ø]
-HOˆ›Ø]ˆ™]\›ˆŒYˆHOH[ÙH
-ˆHJHÈH
-ˆL‚‚™YˆÛÛ™šYÝ\™YÜÞ[X›ÛÊ˜[YNˆÝˆ›Û™HH›Û™JHOˆ\ÝÜÝ—N‚ˆˆˆ’ÙY\H\›Ý™Y\]ZYÛÜ™H[™[ÝÈÜ\˜]ÜœÈÈ\[™[Ü™HZ\œËˆˆˆ‚ˆ^˜\ÈHÜËœÝš\
+def coingecko_crypto_market_universe() -> list[dict]:
+    """Publish a broad, auditable research universe without inventing safety facts.
 
-K\\Š
-H›ÜˆÈ[ˆ
-˜[YHYˆ˜[YH\È›Ý›Û™H[ÙHÜË™Ù][Š‘“Ô‘VÔÖSP“ÓÈ‹ˆŠJKœÜ]
-‹ŠHYˆËœÝš\
+    CoinGecko supplies market and daily price/volume history.  Contract safety,
+    holder concentration and executable round-trip evidence remain explicitly
+    unverified so the paper engine forward-tracks these assets but cannot open a
+    position until an execution/safety adapter supplies those facts.
+    """
+    if os.getenv("MULTI_WEEK_CRYPTO_FEED_ENABLED", "true").lower() != "true":
+        return []
+    base = os.getenv("COINGECKO_BASE_URL", "https://api.coingecko.com/api/v3").rstrip("/")
+    limit = max(5, min(50, int(os.getenv("MULTI_WEEK_CRYPTO_UNIVERSE_SIZE", "20"))))
+    query = urllib.parse.urlencode({
+        "vs_currency": "usd", "order": "market_cap_desc", "per_page": limit,
+        "page": 1, "sparkline": "false", "price_change_percentage": "7d",
+    })
+    markets = fetch_json(f"{base}/coins/markets?{query}")
+    if not isinstance(markets, list):
+        return []
+    result = []
+    for market in markets:
+        coin_id = str(market.get("id") or "").strip()
+        if not coin_id:
+            continue
+        history = fetch_json(f"{base}/coins/{urllib.parse.quote(coin_id)}/market_chart?vs_currency=usd&days=30&interval=daily")
+        if not isinstance(history, dict):
+            continue
+        prices = history.get("prices") or []
+        volumes = {int(row[0]): float(row[1]) for row in (history.get("total_volumes") or [])
+                   if isinstance(row, list) and len(row) >= 2}
+        candles = []
+        for row in prices:
+            if not isinstance(row, list) or len(row) < 2 or float(row[1] or 0) <= 0:
+                continue
+            stamp, close = int(row[0]), float(row[1])
+            candles.append({
+                "observed_at": datetime.fromtimestamp(stamp / 1000, timezone.utc).isoformat(),
+                "open": close, "high": close, "low": close, "close": close,
+                "volume_usd": volumes.get(stamp, 0.0),
+            })
+        result.append({
+            "chain": "coingecko", "contract": coin_id,
+            "symbol": str(market.get("symbol") or coin_id).upper(),
+            "name": str(market.get("name") or coin_id),
+            "price": float(market.get("current_price") or 0),
+            "market_cap_usd": float(market.get("market_cap") or 0),
+            "liquidity_usd": 0.0,
+            "volume_24h_usd": float(market.get("total_volume") or 0),
+            "benchmark_return_7d_pct": 0.0,
+            "daily_candles": candles,
+            "token_age_days": -1.0,
+            "sell_route_ok": False, "security_verified": False,
+            "round_trip_recovery": -1.0, "sell_impact_bps": 10_000.0,
+            "top10_holder_fraction": None, "creator_fraction": None,
+            "holder_growth_7d_pct": 0.0, "initial_stop_fraction": 0.10,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "source_urls": [f"https://www.coingecko.com/en/coins/{coin_id}"],
+            "evidence_status": "MARKET_HISTORY_ONLY_EXECUTION_AND_SAFETY_PENDING",
+        })
+        time.sleep(max(0.0, float(os.getenv("MULTI_WEEK_CRYPTO_REQUEST_SPACING_SECONDS", "0.35"))))
+    return result
 
-WBˆ™]\›ˆ\Ý
-XÝ™œ›ÛZÙ^\Ê
 
-ÓÔ‘WÑ“Ô‘VÔÖSP“ÓË
-™^˜\ÊJJB‚‚™YˆØ[[™\—Ù]šY[˜ÙJÞ[X›ÛˆÝŠHOˆXÝ‚ˆ\›HÜË™Ù][Š‘PÓÓ“ÓRP×ÐÐSS‘T—ÕT“‹ˆŠKœÝš\
+def crypto_market_universe() -> tuple[list[dict], dict]:
+    """Combine established CEX assets with dynamic emerging on-chain research."""
+    if os.getenv("MULTI_WEEK_CRYPTO_FEED_ENABLED", "true").lower() != "true":
+        return [], {"provider": "disabled", "provider_errors": []}
+    providers = [item.strip().lower() for item in os.getenv(
+        "MULTI_WEEK_CRYPTO_PROVIDERS", "coinbase,coingecko").split(",") if item.strip()]
+    errors = []
+    established: list[dict] = []
+    selected_provider = "none"
+    for provider in providers:
+        try:
+            rows = (coinbase_crypto_market_universe() if provider == "coinbase" else
+                    coingecko_crypto_market_universe() if provider == "coingecko" else [])
+            if rows:
+                established, selected_provider = rows, provider
+                break
+            errors.append({"provider": provider, "error": "empty universe"})
+        except Exception as exc:
+            errors.append({"provider": provider, "error": f"{type(exc).__name__}: {str(exc)[:300]}"})
+    try:
+        emerging, emerging_health = emerging_crypto_universe()
+    except Exception as exc:
+        emerging, emerging_health = [], {"status": "DEGRADED", "candidate_count": 0,
+                                         "errors": [{"error": f"{type(exc).__name__}: {str(exc)[:300]}"}]}
+    identities = {(str(row.get("chain")), str(row.get("contract")).lower()) for row in established}
+    combined = established + [row for row in emerging
+                              if (str(row.get("chain")), str(row.get("contract")).lower()) not in identities]
+    return combined, {"provider": selected_provider, "provider_errors": errors,
+                      "established_count": len(established), "emerging": emerging_health}
 
-BˆYˆ›Ý\›‚ˆ™]\›ˆÈ›Z[]\ÈŽˆ[
-ÜË™Ù][Š‘“Ô‘VÑQUSÑU‘S•ÑTÕSÑWÓRS•UTÈ‹ŒŠJKˆ˜›XÚÛÝ]ŽˆYK˜›XÚÛÝ]Ù\Ý[˜ÙWÛZ[]\ÈŽˆˆ™\šYšYYŽˆ˜[ÙKœÛÝ\˜ÙHŽˆˆŸBˆXY\œÈHÈXØÙ\Žˆ˜\XØ][Û‹ÚœÛÛˆ‹•\Ù\‹PYÙ[Žˆœš[]\ËY›Ü™^XØ[[™\‹ÌKŒŸBˆÚÙ[ˆHÜË™Ù][Š‘PÓÓ“ÓRP×ÐÐSS‘T—Ð‘PT‘T—ÕÒÑSˆ‹ˆŠBˆYˆÚÙ[ŽˆXY\œÖÈ]]Üš^˜][Ûˆ—HHˆ™X\™\ˆÝÚÙ[ŸH‚ˆÚ]\›X‹œ™\]Y\Ý\›Ü[Š\›X‹œ™\]Y\Ý”™\]Y\Ý
-\›XY\œÏZXY\œÊK[Y[Ý]LMJH\È™\ÜÛœÙN‚ˆ^[ØYHœÛÛ‹›ØYÊ™\ÜÛœÙKœ™XY
 
-K™XÛÙJ
-JBˆØœÙ\™YH]][YK™œ›ÛZ\ÛÙ›Ü›X]
-ÝŠ^[ØYÈ›ØœÙ\™YØ]—JKœ™\XÙJ–ˆ‹ŠÌŒŠJBˆYˆ
-]][YK››ÝÊ[Y^›Û™K]ÊHHØœÙ\™Y
-KÝ[ÜÙXÛÛ™Ê
-Hˆ[
-ÜË™Ù][Š‘PÓÓ“ÓRP×ÐÐSS‘T—ÓPVÐQÑWÔÑPÓÓ‘È‹ŒÌŠJN‚ˆ˜Z\ÙH˜[YQ\œ›ÜŠ™XÛÛ›ÛZXÈØ[[™\ˆÝ[HŠBˆÛÝ\˜ÙHHÝŠ^[ØY™Ù]
-œÛÝ\˜ÙWÝ\›‹ˆŠJBˆYˆ›ÝÛÝ\˜ÙKœÝ\ÝÚ]
-šÎ‹ËÈŠNˆ˜Z\ÙH˜[YQ\œ›ÜŠ™XÛÛ›ÛZXÈØ[[™\ˆÛÝ\˜ÙHZ\ÜÚ[™ÈŠBˆÝ\œ™[˜ÚY\ÈHÙ]
-Þ[X›ÛœÜ]
-—ÈŠJNÈ]™[ÈH×Bˆ›Üˆ]™[[ˆ^[ØY™Ù]
-™]™[È‹×JN‚ˆYˆÝŠ]™[™Ù]
-˜Ý\œ™[˜ÞH‹ˆŠJK\\Š
-H[ˆÝ\œ™[˜ÚY\È[™ÝŠ]™[™Ù]
-š[\XÝ‹ˆŠJK\\Š
-HOH’QÒŽ‚ˆZ[]\ÈH[
-]™[™Ù]
-›Z[]\×Ý[[‹
-JBˆ™Y›Ü™HHX^
-[
-]™[™Ù]
-˜›XÚÛÝ]Ø™Y›Ü™WÛZ[]\È‹
-JJBˆY\ˆHX^
-[
-]™[™Ù]
-˜›XÚÛÝ]ØY\—ÛZ[]\È‹
-JJBˆ[—Ø›XÚÛÝ]HXY\ˆHZ[]\ÈH™Y›Ü™Bˆ\Ý[˜ÙHHYˆ[—Ø›XÚÛÝ][ÙH
-Z[]\ÈH™Y›Ü™HYˆZ[]\Èˆ™Y›Ü™H[ÙHXœÊZ[]\È
-ÈY\ŠJBˆ]™[Ë˜\[™
-È›Z[]\ÈŽˆZ[]\Ë˜›XÚÛÝ]Žˆ[—Ø›XÚÛÝ]ˆ˜›XÚÛÝ]Ù\Ý[˜ÙWÛZ[]\ÈŽˆ\Ý[˜Ù_JBˆXÝ]™HHÚ][H›Üˆ][H[ˆ]™[ÈYˆ][VÈ˜›XÚÛÝ]—WBˆ™X\™\ÝHZ[ŠXÝ]™HÜˆ]™[ËÙ^O[[X™H][NˆXœÊ][VÈ›Z[]\È—JJHYˆ]™[È[ÙHÂˆ›Z[]\ÈŽˆL˜›XÚÛÝ]Žˆ˜[ÙK˜›XÚÛÝ]Ù\Ý[˜ÙWÛZ[]\ÈŽˆLBˆ™]\›ˆÊŠ›™X\™\Ý™\šYšYYŽˆYKœÛÝ\˜ÙHŽˆÛÝ\˜Ù_B‚‚™Yˆ›Ü™^ÜÛ˜\ÚÝ
-Y\\ŽˆØ[™PY\\‹Þ[X›ÛˆÝŠHOˆXÝ‚ˆMHHØÈ›ÜˆÈ[ˆY\\‹˜Ø[™\ÊÞ[X›Û“MH‹MJHYˆË™Ù]
-˜ÛÛ\]HŠWBˆHHØÈ›ÜˆÈ[ˆY\\‹˜Ø[™\ÊÞ[X›Û’H‹LŒ
-HYˆË™Ù]
-˜ÛÛ\]HŠWBˆHØÈ›ÜˆÈ[ˆY\\‹˜Ø[™\ÊÞ[X›Û’‹L
-HYˆË™Ù]
-˜ÛÛ\]HŠWBˆHHØÈ›ÜˆÈ[ˆY\\‹˜Ø[™\ÊÞ[X›Û‘‹ÍJHYˆË™Ù]
-˜ÛÛ\]HŠWBˆ][ÝHHY\\‹œšXÙJÞ[X›Û
-NÈšYÈH][ÝK™Ù]
-˜šYÈ‹×JNÈ\ÚÜÈH][ÝK™Ù]
-˜\ÚÜÈ‹×JBˆYˆ[ŠMJHˆÜˆ[ŠJHLÜˆ[Š
-HÌÜˆ[ŠJHŒÜˆ›ÝšYÈÜˆ›Ý\ÚÜÎˆ˜Z\ÙH˜[YQ\œ›ÜŠš[œÝY™šXÚY[œ›ÚÙ\ˆX\šÙ]]HŠBˆÛÜÙ\ÈHÙ›Ø]
-ÖÈ›ZY—VÈ˜È—JH›ÜˆÈ[ˆWBˆØÛÜÙ\ÈHÙ›Ø]
-ÖÈ›ZY—VÈ˜È—JH›ÜˆÈ[ˆBˆWØÛÜÙ\ÈHÙ›Ø]
-ÖÈ›ZY—VÈ˜È—JH›ÜˆÈ[ˆWBˆšY\ÚÈH›Ø]
-šYÖÌVÈœšXÙH—JK›Ø]
-\ÚÜÖÌVÈœšXÙH—JNÈZYH
-šY
-È\ÚÊHÈ‚ˆÜ™XYØœÈH
-\ÚÈHšY
-HÈZY
-ˆLˆ\ÝÜžHHÔ‘PQÒTÕÔ–VÜÞ[X›ÛBˆYYX[—ÜÜ™XYHÝ]\ÝXÜË›YYX[Š\ÝÜžJHYˆ\ÝÜžH[ÙHÜ™XYØœÂˆ\ÝÜžK˜\[™
-Ü™XYØœÊBˆšYÛ\]ZY]HHÝ[J›Ø]
-][K™Ù]
-›\]ZY]HŠHÜˆ
-H›Üˆ][H[ˆšYÖÎJBˆ\Ú×Û\]ZY]HHÝ[J›Ø]
-][K™Ù]
-›\]ZY]HŠHÜˆ
-H›Üˆ][H[ˆ\ÚÜÖÎJBˆžN‚ˆ][ÝWÝ[YHH]][YK™œ›ÛZ\ÛÙ›Ü›X]
-ÝŠ][ÝVÈ[YH—JKœ™\XÙJ–ˆ‹ŠÌŒŠJBˆ][ÝWØYÙHHX^
-Œ
-]][YK››ÝÊ[Y^›Û™K]ÊHH][ÝWÝ[YJKÝ[ÜÙXÛÛ™Ê
-JBˆ^Ù\^Ù\[ÛŽ‚ˆ][ÝWØYÙHHNNNKŒˆÚ[™ÙWÌZHÜš^›Û—Ü™]\›ŠÛÜÙ\ËJNÈÚ[™ÙWÍHÜš^›Û—Ü™]\›ŠØÛÜÙ\ËJBˆÚ[™ÙWÌHÜš^›Û—Ü™]\›ŠÛÜÙ\Ë
-BˆÚ[™ÙWÍYHÜš^›Û—Ü™]\›ŠØÛÜÙ\ËÌ
-NÈÚ[™ÙWÌŒHÜš^›Û—Ü™]\›ŠWØÛÜÙ\ËŒ
-BˆÛÛœÙ[œÝ\ÈH][WÚÜš^›Û—ØÛÛœÙ[œÝ\Ê
-Ú[™ÙWÌZÚ[™ÙWÍÚ[™ÙWÌÚ[™ÙWÍYÚ[™ÙWÌŒ
-K
-ŒLŒMKŒKŒKŒJJBˆ™[™H
-ÛÜÙ\ÖËLWHHÝ]\ÝXÜË›YX[ŠÛÜÙ\ÖËLŒ—JJHÈX^
-XœÊÛÜÙ\ÖËLWJH
-ˆŒKYKNJBˆ]ˆH]™\˜YÙWÝYWÜ˜[™ÙJKM
-Bˆ]ÛXHH]ÛXWÝ›Û][]JÛÜÙ\ÖËMŒ—JH
-ˆZYˆÝÜÙ\Ý[˜ÙHHX^
-KH
-ˆ]‹‹Œ
-ˆ]ÛXKZY
-ˆŒMJBˆ[œÝ[Y[HY\\‹š[œÝ[Y[
-Þ[X›Û
-Bˆš[˜[˜Ú[™ÈH[œÝ[Y[™Ù]
-™š[˜[˜Ú[™ÈŠHÜˆßBˆÈ]™[\Ý[˜ÙH\È˜Z[XÛÜÙY[›\ÜÈ[ˆ[™\[™[H›Ü›X[^™YØ[[™\ˆÙ\šXÙH]\ÝÈ]‚ˆØ[[™\ˆHØ[[™\—Ù]šY[˜ÙJÞ[X›Û
-NÈ]™[ÛZ[]\ÈHØ[[™\–È›Z[]\È—Bˆš]™WÜÝ™XZ×ØØ[™\ÈHÞÈ[YHŽˆÝŠË™Ù]
-[YHŠHÜˆˆŠKˆ›Ü[ˆŽˆ›Ø]
-ÖÈ›ZY—VÈ›È—JKšYÚŽˆ›Ø]
-ÖÈ›ZY—VÈš—JKˆ›ÝÈŽˆ›Ø]
-ÖÈ›ZY—VÈ›—JK˜ÛÜÙHŽˆ›Ø]
-ÖÈ›ZY—VÈ˜È—J_H›ÜˆÈ[ˆMVËLLŽ—WBˆœž[™WÚWØØ[™\ÈHÞÈ[YHŽˆÝŠË™Ù]
-[YHŠHÜˆˆŠKˆ›Ü[ˆŽˆ›Ø]
-ÖÈ›ZY—VÈ›È—JKšYÚŽˆ›Ø]
-ÖÈ›ZY—VÈš—JKˆ›ÝÈŽˆ›Ø]
-ÖÈ›ZY—VÈ›—JK˜ÛÜÙHŽˆ›Ø]
-ÖÈ›ZY—VÈ˜È—J_H›ÜˆÈ[ˆVËN—WBˆ™]\›ˆÈ˜\ÜÙ]ØÛ\ÜÈŽˆ‘“Ô‘V‹œÞ[X›ÛŽˆÞ[X›ÛœšXÙHŽˆZY˜šYŽˆšY˜\ÚÈŽˆ\ÚËˆ™š]™WÜÝ™XZ×ØØ[™\ÈŽˆš]™WÜÝ™XZ×ØØ[™\Ëˆ˜œž[™WÚWØØ[™\ÈŽˆœž[™WÚWØØ[™\ËˆœÜ™XYØœÈŽˆÜ™XYØœË›YYX[—ÜÜ™XYØœÈŽˆYYX[—ÜÜ™XYˆ˜šYÛ\]ZY]HŽˆšYÛ\]ZY]K˜\Ú×Û\]ZY]HŽˆ\Ú×Û\]ZY]Kˆœ][ÝWØYÙWÜÙXÛÛ™ÈŽˆ][ÝWØYÙK˜YX›HŽˆ][ÝK™Ù]
-œÝ]\ÈŠHOH˜YXX›H‹ˆ›X\šÙ]Ý™]ÈŽˆ›ÛÛ
-Ø[[™\–È˜›XÚÛÝ]—JKˆšYÚÚ[\XÝØØ[[™\—Ø›XÚÛÝ]Žˆ›ÛÛ
-Ø[[™\–È˜›XÚÛÝ]—JKˆ™XÛÛ›ÛZX×Ù]™[Ø›XÚÛÝ]Ù\Ý[˜ÙWÛZ[]\ÈŽˆØ[[™\–È˜›XÚÛÝ]Ù\Ý[˜ÙWÛZ[]\È—Kˆ›ØœÙ\™YØ]Žˆ]][YK››ÝÊ[Y^›Û™K]ÊKš\ÛÙ›Ü›X]
+def pct(a: float, b: float) -> float: return 0.0 if a == 0 else (b - a) / a * 100
 
-KˆœÛÝ\˜ÙWÝ\›ÈŽˆÙˆšÎ‹ËÙ]™[Ü\‹›Ø[™K˜ÛÛKÜ™\Ý[]™K]ŒŒÜšXÚ[™ËY\È—Kˆ˜Ú[™ÙWÌZÜÝŽˆÚ[™ÙWÌZ˜Ú[™ÙWÍÜÝŽˆÚ[™ÙWÍ˜Ú[™ÙWÌÜÝŽˆÚ[™ÙWÌˆ˜Ú[™ÙWÍYÜÝŽˆÚ[™ÙWÍY˜Ú[™ÙWÌŒÜÝŽˆÚ[™ÙWÌŒˆšÜš^›Û—Ù\™XÝ[ÛˆŽˆÛÛœÙ[œÝ\ÖÈ™\™XÝ[Ûˆ—KšÜš^›Û—ØYÜ™Y[Y[ŽˆÛÛœÙ[œÝ\ÖÈ˜YÜ™Y[Y[—Kˆ™[™ÜÝ™[™ÝŽˆX^
-LKZ[ŠK™[™
-JKˆ›\]ZY]WÜØÛÜ™HŽˆ\]ZY]WÜ]X[]JÜ™XYØœÏ\Ü™XYØœËYYX[—ÜÜ™XYØœÏ[YYX[—ÜÜ™XYˆšYÛ\]ZY]OXšYÛ\]ZY]K\Ú×Û\]ZY]OX\Ú×Û\]ZY]Kˆ][ÝWØYÙWÜÙXÛÛ™Ï\][ÝWØYÙJKˆœÙ\ÜÚ[Û—Û\]ZYŽˆ][ÝK™Ù]
-œÝ]\ÈŠHOH˜YXX›Hˆ[™][ÝWØYÙHHLˆ™XÛÛ›ÛZX×Ù]™[ÝÚ][—ÛZ[]\ÈŽˆ]™[ÛZ[]\Ëˆ˜Ø[[™\—Ý™\šYšYYŽˆØ[[™\–È™\šYšYY—K™XÛÛ›ÛZX×Ù]™[ÜÛÝ\˜ÙHŽˆØ[[™\–ÈœÛÝ\˜ÙH—Kˆ˜]—ÌMŽˆ]‹™]ÛXWÝ›Û][]WÜšXÙHŽˆ]ÛXKœÝÜÙ\Ý[˜ÙHŽˆÝÜÙ\Ý[˜ÙKˆ›Û™×Ùš[˜[˜Ú[™×Ü˜]HŽˆ›Ø]
-š[˜[˜Ú[™Ë™Ù]
-›Û™Ô˜]HŠHÜˆ
-KˆœÚÜÙš[˜[˜Ú[™×Ü˜]HŽˆ›Ø]
-š[˜[˜Ú[™Ë™Ù]
-œÚÜ˜]HŠHÜˆ
-Kˆ™š[˜[˜Ú[™×Ù^\ÈŽˆš[˜[˜Ú[™Ë™Ù]
-™š[˜[˜Ú[™Ñ^\ÓÙ•ÙYZÈŠHÜˆ×Kˆ›X^[][WÛÜÜ×Ý\ÙŽˆ›Ø]
-ÜË™Ù][Š‘“Ô‘VÔTT—ÓPVÓÔÔ×ÕTÑ‹Œ‹LŠJKˆœ™]Ø\™Û][\HŽˆ‹Œ™^\žWÜÙXÛÛ™ÈŽˆÌˆ\Ú\ÈŽˆœ›ÚÙ\‹X]\ÝY\]ZY\Ù\ÜÚ[Ûˆ™[™ÛÛ[X][Ûˆ‹ˆš[˜[Y][ÛˆŽˆ•™[™[YÛ›Y[Ü™XYÙ\ÜÚ[Ûˆ\]ZY]HÜˆXÛÛ›ÛZXËY]™[Ø]H˜Z[ÈŸB‚‚™YˆØØ[—ÜÞ[X›ÛÊY\\ŽˆØ[™PY\\‹Þ[X›ÛÎˆ\ÝÜÝ—JHOˆ\VÛ\ÝÙXÝK\ÝÙXÝWN‚ˆÛ˜\ÚÝË™Z™XÝYH×K×Bˆ›ÜˆÞ[X›Û[ˆÞ[X›ÛÎ‚ˆžN‚ˆÛ˜\ÚÝË˜\[™
-›Ü™^ÜÛ˜\ÚÝ
-Y\\‹Þ[X›Û
-JBˆ^Ù\^Ù\[Ûˆ\È^Î‚ˆ™Z™XÝY˜\[™
-ÈœÞ[X›ÛŽˆÞ[X›Ûœ™X\ÛÛˆŽˆÝŠ^ÊVÎŒÌ_JBˆYˆ›ÝÛ˜\ÚÝÎ‚ˆ]Z[HŽÈ‹š›Ú[ŠˆžÚ][VÉÜÞ[X›Û	×_NˆÚ][VÉÜ™X\ÛÛ‰×_Hˆ›Üˆ][H[ˆ™Z™XÝY
-Bˆ˜Z\ÙH[[YQ\œ›ÜŠˆ››È˜[Y›Ü™^Û˜\ÚÝÈ
-Ù]Z[Üˆ	Û›ÈÞ[X›ÛÈÛÛ™šYÝ\™Y	ßJHŠBˆ™]\›ˆÛ˜\ÚÝË™Z™XÝY‚‚˜Û\ÜÈ[™\Š˜\ÙR™\]Y\Ý[™\ŠN‚ˆYˆ×ÑÑU
-Ù[ŠN‚ˆYˆÙ[‹œ]›Ý[ˆÈ‹ÚX[‹‹ÜÛ˜\ÚÝÈ‹‹ÜÝ]\ÈŸNˆÙ[‹œÙ[™Ù\œ›ÜŠ
-NÈ™]\›‚ˆÚ]ÐÒÎˆ˜[YHHXÝ
-ÕUJBˆYˆÙ[‹œ]OH‹ÚX[Žˆ˜[YHHÈ›ÚÈŽˆ˜[YVÈ›ÚÈ—KœÙ\šXÙHŽˆ›][KX\ÜÙ][X\šÙ]Y™YY‹œØØ[›™YØ]Žˆ˜[YVÈœØØ[›™YØ]—K™\œ›ÜˆŽˆ˜[YVÈ™\œ›Üˆ—_Bˆ[YˆÙ[‹œ]OH‹ÜÛ˜\ÚÝÈŽˆ˜[YHHÂˆœÛ˜\ÚÝÈŽˆ˜[YVÈœÛ˜\ÚÝÈ—K˜Üž\×Ý[š]™\œÙHŽˆ˜[YK™Ù]
-˜Üž\×Ý[š]™\œÙH‹×JKˆœØØ[›™YØ]Žˆ˜[YVÈœØØ[›™YØ]—K™›Ü™^ÚX[Žˆ˜[YK™Ù]
-™›Ü™^ÚX[‹ßJKˆ˜Üž\×ÚX[Žˆ˜[YK™Ù]
-˜Üž\×ÚX[‹ßJKˆBˆÈ˜Z[Ø^IÜÈX[ÚXÚÈ›Ý™\È]H›ØÙ\ÜÈ\È\Ý[š[™ËˆX\šÙ]ˆÈ™XY[™\ÜÈ™[XZ[œÈ˜Z[XÛÜÙYÛˆÜÝ]\ÈÛÈ[ˆ\Ý™X[HÐS‘HÜ‚ˆÈØ[[™\ˆ[^HØ[››Ý\›ˆ[ÈH˜Y[™ÈÚYÛ˜[]]]\Ý›ÝˆÈ™]™[[ˆÝ\Ú\ÙHX[H›ØÙ\ÜÈœ›ÛH\ÞZ[™Ë‚ˆÝ]\×ØÛÙHHŒYˆÙ[‹œ]OH‹ÚX[ˆ[ÙH
-ŒYˆ˜[YK™Ù]
-›ÚÈ‹YJH[ÙHLÊBˆ›ÙHHœÛÛ‹™[\Ê˜[YJK™[˜ÛÙJ
-NÈÙ[‹œÙ[™Ü™\ÜÛœÙJÝ]\×ØÛÙJBˆÙ[‹œÙ[™ÚXY\ŠÛÛ[U\H‹˜\XØ][Û‹ÚœÛÛˆŠNÈÙ[‹œÙ[™ÚXY\ŠÛÛ[S[™Ý‹ÝŠ[Š›ÙJJJNÈÙ[‹™[™ÚXY\œÊ
-NÈÙ[‹Ùš[KÜš]J›ÙJBˆYˆÙ×ÛY\ÜØYÙJÙ[‹
-—ÊNˆ™]\›‚‚‚™YˆXZ[Š
-N‚ˆYˆÜË™Ù][Š“USWÐTÔÑUÑ‘QQÑSP“Q‹™˜[ÙHŠK›ÝÙ\Š
-HOHYHŽˆ˜Z\ÙHÞ\Ý[Q^]
-“USWÐTÔÑUÑ‘QQÑSP“Q\È›ÝYHŠBˆ™XY[™Ë•™XY
-\™Ù]U™XY[™ÒÙ\™\Š
-ŒŒŒŒ‹[
-ÜË™Ù][Š”Ô•‹ŽŠJJK[™\ŠKœÙ\™WÙ›Ü™]™\‹Y[[ÛUYJKœÝ\
 
-Bˆ[\˜[HX^
-Ì[
-ÜË™Ù][Š“USWÐTÔÑUÑ‘QQÒS•T•SÔÑPÓÓ‘È‹ŒŠJJBˆÜž\×Ü™Yœ™\ÚHX^
-N[
-ÜË™Ù][Š“USWÕÑQR×ÐÔ–T×Ô‘Q”‘TÒÔÑPÓÓ‘È‹ŒŒMŒŠJJBˆ\ÝØÜž\×Ø][\HŒˆ\ÝØÜž\×Ø][\Ø]Hˆ‚ˆ\ÝØÜž\×ÜÝXØÙ\Ü×Ø]Hˆ‚ˆ\ÝØÜž\×Ù\œ›ÜˆHˆ‚ˆ›ÝšY\—ÚX[ˆXÝHßBˆÞ[X›ÛÈHÛÛ™šYÝ\™YÜÞ[X›ÛÊ
-BˆÚ[HYN‚ˆžN‚ˆY\\ˆHØ[™PY\\Š
-BˆÛ˜\ÚÝË™Z™XÝYHØØ[—ÜÞ[X›ÛÊY\\‹Þ[X›ÛÊBˆÚ]ÐÒÎ‚ˆÜž\ÈH\Ý
-ÕUK™Ù]
-˜Üž\×Ý[š]™\œÙH‹×JJBˆYˆ[YK›[Û›ÝÛšXÊ
-HH\ÝØÜž\×Ø][\HÜž\×Ü™Yœ™\Ú‚ˆ\ÝØÜž\×Ø][\H[YK›[Û›ÝÛšXÊ
-Bˆ\ÝØÜž\×Ø][\Ø]H]][YK››ÝÊ[Y^›Û™K]ÊKš\ÛÙ›Ü›X]
+def configured_symbols(value: str | None = None) -> list[str]:
+    """Keep the approved liquid core and allow operators to append more pairs."""
+    extras = [s.strip().upper() for s in (value if value is not None else os.getenv("FOREX_SYMBOLS", "")).split(",") if s.strip()]
+    return list(dict.fromkeys((*CORE_FOREX_SYMBOLS, *extras)))
 
-BˆžN‚ˆ™Yœ™\ÚY›ÝšY\—ÚX[HÜž\×ÛX\šÙ]Ý[š]™\œÙJ
-BˆYˆ™Yœ™\ÚY‚ˆÜž\ÈH™Yœ™\ÚYˆ\ÝØÜž\×ÜÝXØÙ\Ü×Ø]H]][YK››ÝÊ[Y^›Û™K]ÊKš\ÛÙ›Ü›X]
 
-Bˆ\ÝØÜž\×Ù\œ›ÜˆHˆ‚ˆ[YˆÜË™Ù][Š“USWÕÑQR×ÐÔ–T×Ñ‘QQÑSP“Q‹YHŠK›ÝÙ\Š
-HOHYHŽ‚ˆ\ÝØÜž\×Ù\œ›ÜˆH˜Üž\È›ÝšY\ˆ™]\›™Y[ˆ[\H[š]™\œÙH‚ˆ^Ù\^Ù\[Ûˆ\ÈÜž\×Ù^Î‚ˆ\ÝØÜž\×Ù\œ›ÜˆHˆžÝ\JÜž\×Ù^ÊK—×Û˜[YW×ßNˆÜÝŠÜž\×Ù^ÊVÎL_H‚ˆš[
-œÛÛ‹™[\ÊÈ™]™[Žˆ“USWÕÑQR×ÐÔ–T×Ñ‘QQÕÐT“’S‘È‹ˆ™\œ›ÜˆŽˆ\JÜž\×Ù^ÊK—×Û˜[YW×Ëˆ™]Z[ŽˆÝŠÜž\×Ù^ÊVÎLKˆœ™]Z[™YÝ[š]™\œÙWØÛÝ[Žˆ[ŠÜž\Ê_JK›\ÚUYJBˆ›Üˆ][H[ˆ™Z™XÝY‚ˆš[
-œÛÛ‹™[\ÊÈ™]™[Žˆ‘“Ô‘VÔÖSP“ÓÔ‘R‘PÕQ‹
-Šš][_JK›\ÚUYJBˆÜž\×Ù[˜X›YHÜË™Ù][Š“USWÕÑQR×ÐÔ–T×Ñ‘QQÑSP“Q‹YHŠK›ÝÙ\Š
-HOHYH‚ˆÜž\×ÜÝ]\ÈH”‘PQHˆYˆÜž\È[ÙH
-‘QÔQQˆYˆÜž\×Ù[˜X›Y[ÙH‘TÐP“QŠBˆÚ]ÐÒÎˆÕUK\]JÚÏUYKØØ[›™YØ]Y]][YK››ÝÊ[Y^›Û™K]ÊKš\ÛÙ›Ü›X]
+def calendar_evidence(symbol: str) -> dict:
+    url = os.getenv("ECONOMIC_CALENDAR_URL", "").strip()
+    if not url:
+        return {"minutes": int(os.getenv("FOREX_DEFAULT_EVENT_DISTANCE_MINUTES", "0")),
+                "blackout": True, "blackout_distance_minutes": 0,
+                "verified": False, "source": ""}
+    headers = {"Accept": "application/json", "User-Agent": "primus-forex-calendar/1.0"}
+    token = os.getenv("ECONOMIC_CALENDAR_BEARER_TOKEN", "")
+    if token: headers["Authorization"] = f"Bearer {token}"
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as response:
+        payload = json.loads(response.read().decode())
+    observed = datetime.fromisoformat(str(payload["observed_at"]).replace("Z", "+00:00"))
+    if (datetime.now(timezone.utc) - observed).total_seconds() > int(os.getenv("ECONOMIC_CALENDAR_MAX_AGE_SECONDS", "300")):
+        raise ValueError("economic calendar stale")
+    source = str(payload.get("source_url", ""))
+    if not source.startswith("https://"): raise ValueError("economic calendar source missing")
+    currencies = set(symbol.split("_")); events = []
+    for event in payload.get("events", []):
+        if str(event.get("currency", "")).upper() in currencies and str(event.get("impact", "")).upper() == "HIGH":
+            minutes = int(event.get("minutes_until", 0))
+            before = max(0, int(event.get("blackout_before_minutes", 0)))
+            after = max(0, int(event.get("blackout_after_minutes", 0)))
+            in_blackout = -after <= minutes <= before
+            distance = 0 if in_blackout else (minutes - before if minutes > before else abs(minutes + after))
+            events.append({"minutes": minutes, "blackout": in_blackout,
+                           "blackout_distance_minutes": distance})
+    active = [item for item in events if item["blackout"]]
+    nearest = min(active or events, key=lambda item: abs(item["minutes"])) if events else {
+        "minutes": 10080, "blackout": False, "blackout_distance_minutes": 10080}
+    return {**nearest, "verified": True, "source": source}
 
-KÛ˜\ÚÝÏ\Û˜\ÚÝËˆÜž\×Ý[š]™\œÙOXÜž\Ë\œ›ÜHˆ‹›Ü™^ÚX[^ÈœÝ]\ÈŽˆ”‘PQH‹œÛ˜\ÚÝØÛÝ[Žˆ[ŠÛ˜\ÚÝÊ_KˆÜž\×ÚX[^ÈœÝ]\ÈŽˆÜž\×ÜÝ]\Ë[š]™\œÙWØÛÝ[Žˆ[ŠÜž\ÊKˆ›\ÝØ][\Ø]Žˆ\ÝØÜž\×Ø][\Ø]›\ÝÜÝXØÙ\Ü×Ø]Žˆ\ÝØÜž\×ÜÝXØÙ\Ü×Ø]ˆ›\ÝÙ\œ›ÜˆŽˆ\ÝØÜž\×Ù\œ›Ü‹œ™Yœ™\ÚÚ[\˜[ÜÙXÛÛ™ÈŽˆÜž\×Ü™Yœ™\Úˆ
-Šœ›ÝšY\—ÚX[JBˆš[
-œÛÛ‹™[\ÊÈ™]™[Žˆ“USWÐTÔÑUÑ‘QQÔÐÐSˆ‹œ\\—ÛÛ›HŽˆYKœÛ˜\ÚÝØÛÝ[Žˆ[ŠÛ˜\ÚÝÊK˜Üž\×Ý[š]™\œÙWØÛÝ[Žˆ[ŠÜž\Ê_JK›\ÚUYJBˆ^Ù\^Ù\[Ûˆ\È^Î‚ˆÚ]ÐÒÎˆÕUK\]JÚÏQ˜[ÙK\œ›Ü\ÝŠ^ÊVÎLJBˆš[
-œÛÛ‹™[\ÊÈ™]™[Žˆ“USWÐTÔÑUÑ‘QQÑT”“Ôˆ‹™\œ›ÜˆŽˆ\J^ÊK—×Û˜[YW×Ë™]Z[ŽˆÝŠ^ÊVÎL_JK›\ÚUYJBˆ[YKœÛY\
-[\˜[
-B‚‚šYˆ×Û˜[YW×ÈOH—×ÛXZ[—×ÈŽˆXZ[Š
-B
+
+def forex_snapshot(adapter: OandaAdapter, symbol: str) -> dict:
+    m5 = [c for c in adapter.candles(symbol, "M5", 15) if c.get("complete")]
+    h1 = [c for c in adapter.candles(symbol, "H1", 120) if c.get("complete")]
+    h4 = [c for c in adapter.candles(symbol, "H4", 90) if c.get("complete")]
+    d1 = [c for c in adapter.candles(symbol, "D", 35) if c.get("complete")]
+    quote = adapter.price(symbol); bids = quote.get("bids", []); asks = quote.get("asks", [])
+    if len(m5) < 6 or len(h1) < 100 or len(h4) < 30 or len(d1) < 20 or not bids or not asks: raise ValueError("insufficient broker market data")
+    closes = [float(c["mid"]["c"]) for c in h1]
+    h4_closes = [float(c["mid"]["c"]) for c in h4]
+    d1_closes = [float(c["mid"]["c"]) for c in d1]
+    bid, ask = float(bids[0]["price"]), float(asks[0]["price"]); mid = (bid + ask) / 2
+    spread_bps = (ask - bid) / mid * 10000
+    history = SPREAD_HISTORY[symbol]
+    median_spread = statistics.median(history) if history else spread_bps
+    history.append(spread_bps)
+    bid_liquidity = sum(float(item.get("liquidity") or 0) for item in bids[:4])
+    ask_liquidity = sum(float(item.get("liquidity") or 0) for item in asks[:4])
+    try:
+        quote_time = datetime.fromisoformat(str(quote["time"]).replace("Z", "+00:00"))
+        quote_age = max(0.0, (datetime.now(timezone.utc) - quote_time).total_seconds())
+    except Exception:
+        quote_age = 9999.0
+    change_1h = horizon_return(closes, 1); change_4h = horizon_return(h4_closes, 1)
+    change_24h = horizon_return(closes, 24)
+    change_5d = horizon_return(h4_closes, 30); change_20d = horizon_return(d1_closes, 20)
+    consensus = multi_horizon_consensus((change_1h, change_4h, change_24h, change_5d, change_20d), (.10, .15, .25, .25, .25))
+    trend = (closes[-1] - statistics.mean(closes[-20:])) / max(abs(closes[-1]) * .01, 1e-9)
+    atr = average_true_range(h1, 14)
+    ewma = ewma_volatility(closes[-60:]) * mid
+    stop_distance = max(1.5 * atr, 2.0 * ewma, mid * .0015)
+    instrument = adapter.instrument(symbol)
+    financing = instrument.get("financing") or {}
+    # Event distance is fail-closed unless an independently normalized calendar service attests it.
+    calendar = calendar_evidence(symbol); event_minutes = calendar["minutes"]
+    five_streak_candles = [{"time": str(c.get("time") or ""),
+                            "open": float(c["mid"]["o"]), "high": float(c["mid"]["h"]),
+                            "low": float(c["mid"]["l"]), "close": float(c["mid"]["c"])} for c in m5[-12:]]
+    bryne_h1_candles = [{"time": str(c.get("time") or ""),
+                         "open": float(c["mid"]["o"]), "high": float(c["mid"]["h"]),
+                         "low": float(c["mid"]["l"]), "close": float(c["mid"]["c"])} for c in h1[-80:]]
+    return {"asset_class": "FOREX", "symbol": symbol, "price": mid, "bid": bid, "ask": ask,
+            "five_streak_candles": five_streak_candles,
+            "bryne_h1_candles": bryne_h1_candles,
+            "spread_bps": spread_bps, "median_spread_bps": median_spread,
+            "bid_liquidity": bid_liquidity, "ask_liquidity": ask_liquidity,
+            "quote_age_seconds": quote_age, "tradable": quote.get("status") == "tradeable",
+            "market_veto": bool(calendar["blackout"]),
+            "high_impact_calendar_blackout": bool(calendar["blackout"]),
+            "economic_event_blackout_distance_minutes": calendar["blackout_distance_minutes"],
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "source_urls": [f"https://developer.oanda.com/rest-live-v20/pricing-ep/"],
+            "change_1h_pct": change_1h, "change_4h_pct": change_4h, "change_24h_pct": change_24h,
+            "change_5d_pct": change_5d, "change_20d_pct": change_20d,
+            "horizon_direction": consensus["direction"], "horizon_agreement": consensus["agreement"],
+            "trend_strength": max(-1, min(1, trend)),
+            "liquidity_score": liquidity_quality(spread_bps=spread_bps, median_spread_bps=median_spread,
+                                                 bid_liquidity=bid_liquidity, ask_liquidity=ask_liquidity,
+                                                 quote_age_seconds=quote_age),
+            "session_liquid": quote.get("status") == "tradeable" and quote_age <= 10,
+            "economic_event_within_minutes": event_minutes,
+            "calendar_verified": calendar["verified"], "economic_event_source": calendar["source"],
+            "atr_14": atr, "ewma_volatility_price": ewma, "stop_distance": stop_distance,
+            "long_financing_rate": float(financing.get("longRate") or 0),
+            "short_financing_rate": float(financing.get("shortRate") or 0),
+            "financing_days": financing.get("financingDaysOfWeek") or [],
+            "maximum_loss_usd": float(os.getenv("FOREX_PAPER_MAX_LOSS_USD", "2.50")),
+            "reward_multiple": 2.0, "expiry_seconds": 300,
+            "thesis": "Broker-attested liquid-session trend continuation",
+            "invalidation": "Trend alignment, spread, session liquidity or economic-event gate fails"}
+
+
+def scan_symbols(adapter: OandaAdapter, symbols: list[str]) -> tuple[list[dict], list[dict]]:
+    snapshots, rejected = [], []
+    for symbol in symbols:
+        try:
+            snapshots.append(forex_snapshot(adapter, symbol))
+        except Exception as exc:
+            rejected.append({"symbol": symbol, "reason": str(exc)[:300]})
+    if not snapshots:
+        detail = "; ".join(f"{item['symbol']}: {item['reason']}" for item in rejected)
+        raise RuntimeError(f"no valid forex snapshots ({detail or 'no symbols configured'})")
+    return snapshots, rejected
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path not in {"/health", "/snapshots", "/status"}: self.send_error(404); return
+        with LOCK: value = dict(STATE)
+        if self.path == "/health": value = {"ok": value["ok"], "service": "multi-asset-market-feed", "scanned_at": value["scanned_at"], "error": value["error"]}
+        elif self.path == "/snapshots": value = {
+            "snapshots": value["snapshots"], "crypto_universe": value.get("crypto_universe", []),
+            "scanned_at": value["scanned_at"], "forex_health": value.get("forex_health", {}),
+            "crypto_health": value.get("crypto_health", {}),
+        }
+        # Railway's health check proves that the process is listening.  Market
+        # readiness remains fail-closed on /status so an upstream OANDA or
+        # calendar delay cannot turn into a trading signal, but it must not
+        # prevent an otherwise healthy process from deploying.
+        status_code = 200 if self.path == "/health" else (200 if value.get("ok", True) else 503)
+        body = json.dumps(value).encode(); self.send_response(status_code)
+        self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *_): return
+
+
+def main():
+    if os.getenv("MULTI_ASSET_FEED_ENABLED", "false").lower() != "true": raise SystemExit("MULTI_ASSET_FEED_ENABLED is not true")
+    threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler).serve_forever, daemon=True).start()
+    interval = max(30, int(os.getenv("MULTI_ASSET_FEED_INTERVAL_SECONDS", "60")))
+    crypto_refresh = max(1800, int(os.getenv("MULTI_WEEK_CRYPTO_REFRESH_SECONDS", "21600")))
+    last_crypto_attempt = 0.0
+    last_crypto_attempt_at = ""
+    last_crypto_success_at = ""
+    last_crypto_error = ""
+    provider_health: dict = {}
+    symbols = configured_symbols()
+    while True:
+        try:
+            adapter = OandaAdapter()
+            snapshots, rejected = scan_symbols(adapter, symbols)
+            with LOCK:
+                crypto = list(STATE.get("crypto_universe", []))
+            if time.monotonic() - last_crypto_attempt >= crypto_refresh:
+                last_crypto_attempt = time.monotonic()
+                last_crypto_attempt_at = datetime.now(timezone.utc).isoformat()
+                try:
+                    refreshed, provider_health = crypto_market_universe()
+                    if refreshed:
+                        crypto = refreshed
+                        last_crypto_success_at = datetime.now(timezone.utc).isoformat()
+                        last_crypto_error = ""
+                    elif os.getenv("MULTI_WEEK_CRYPTO_FEED_ENABLED", "true").lower() == "true":
+                        last_crypto_error = "crypto provider returned an empty universe"
+                except Exception as crypto_exc:
+                    last_crypto_error = f"{type(crypto_exc).__name__}: {str(crypto_exc)[:500]}"
+                    print(json.dumps({"event": "MULTI_WEEK_CRYPTO_FEED_WARNING",
+                                      "error": type(crypto_exc).__name__,
+                                      "detail": str(crypto_exc)[:500],
+                                      "retained_universe_count": len(crypto)}), flush=True)
+            for item in rejected:
+                print(json.dumps({"event": "FOREX_SYMBOL_REJECTED", **item}), flush=True)
+            crypto_enabled = os.getenv("MULTI_WEEK_CRYPTO_FEED_ENABLED", "true").lower() == "true"
+            crypto_status = "READY" if crypto else ("DEGRADED" if crypto_enabled else "DISABLED")
+            with LOCK: STATE.update(ok=True, scanned_at=datetime.now(timezone.utc).isoformat(), snapshots=snapshots,
+                crypto_universe=crypto, error="", forex_health={"status": "READY", "snapshot_count": len(snapshots)},
+                crypto_health={"status": crypto_status, "universe_count": len(crypto),
+                    "last_attempt_at": last_crypto_attempt_at, "last_success_at": last_crypto_success_at,
+                    "last_error": last_crypto_error, "refresh_interval_seconds": crypto_refresh,
+                    **provider_health})
+            print(json.dumps({"event": "MULTI_ASSET_FEED_SCAN", "paper_only": True, "snapshot_count": len(snapshots), "crypto_universe_count": len(crypto)}), flush=True)
+        except Exception as exc:
+            with LOCK: STATE.update(ok=False, error=str(exc)[:500])
+            print(json.dumps({"event": "MULTI_ASSET_FEED_ERROR", "error": type(exc).__name__, "detail": str(exc)[:500]}), flush=True)
+        time.sleep(interval)
+
+
+if __name__ == "__main__": main()
