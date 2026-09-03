@@ -246,6 +246,9 @@ const UNIFIED_CRYPTO_PAPER_STARTED_AT =
   process.env.UNIFIED_CRYPTO_PAPER_STARTED_AT || "2026-09-03T00:12:17Z";
 const currentUnifiedCryptoFill = (fill) =>
   Date.parse(fill?.at || "") >= Date.parse(UNIFIED_CRYPTO_PAPER_STARTED_AT);
+const currentUnifiedCryptoHandoff = (handoff) =>
+  Date.parse(handoff?.at || handoff?.scanAt || "") >=
+  Date.parse(UNIFIED_CRYPTO_PAPER_STARTED_AT);
 function paperStats() {
   const done = closed(),
     adjusted = done.reduce(
@@ -2387,7 +2390,9 @@ http
                   (state.watchedWallets || []).length > 0
                     ? "CONFIGURED_COLLECTING_EVIDENCE"
                     : "NO_REVIEWED_WALLETS_CONFIGURED_NO_PREDICTIVE_CREDIT",
-                candidateHandoffs: (state.candidateHandoffs || []).slice(0, 100),
+                candidateHandoffs: (state.candidateHandoffs || [])
+                  .filter(currentUnifiedCryptoHandoff)
+                  .slice(0, 100),
                 lastSuccessfulDiscoveryAt: p.lastSuccessfulDiscoveryAt,
                 discoveryError: p.discoveryError,
                 recentActions: state.paperFills

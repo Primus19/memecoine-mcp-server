@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from app.forex_executor import (UNIFIED_FOREX_PAPER_SERVICE,
                                 UNIFIED_FOREX_PAPER_STARTED_AT,
@@ -12,6 +13,9 @@ class ForexReportTests(unittest.TestCase):
         self.assertEqual("UNIFIED_FOREX_PAPER", UNIFIED_FOREX_PAPER_SERVICE)
         self.assertEqual("UNIFIED_FOREX_PAPER_V1", UNIFIED_FOREX_PAPER_VERSION)
         self.assertEqual("2026-09-03T00:12:17+00:00", UNIFIED_FOREX_PAPER_STARTED_AT)
+        source = (Path(__file__).parents[1] / "app/forex_executor.py").read_text()
+        self.assertIn("current_report_cutoff", source)
+        self.assertIn("for item in current_intents", source)
     def test_report_is_email_safe_and_contains_required_sections(self):
         body = render_forex_report({
             "generated_at": "2026-08-24T03:00:00+00:00", "mode": "PRACTICE_ARMED",

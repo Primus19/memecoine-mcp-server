@@ -1788,6 +1788,10 @@ class Executor:
                   },
                   "capital_baseline_nav": float(os.getenv("FOREX_LIVE_BASELINE_USD", "0") or 0),
                   "daily_baseline_nav": float(self.ledger.setting("daily_baseline_nav", str(reconciliation["summary"]["nav"])))}
+        current_report_cutoff = datetime.fromisoformat(UNIFIED_FOREX_PAPER_STARTED_AT)
+        current_intents = [item for item in report["intents"] if datetime.fromisoformat(
+            str(item.get("closed_at") or item.get("created_at") or "1970-01-01T00:00:00+00:00")
+            .replace("Z", "+00:00")) >= current_report_cutoff]
         report["recentActions"] = [{
             "action": ("PAPER CLOSED" if item.get("status") == "PAPER_CLOSED" else
                        f"PAPER {item.get('side')}" if str(item.get("status") or "").startswith("PAPER_") else
@@ -1798,7 +1802,7 @@ class Executor:
             "strategy": item.get("strategy"),
             "reason": item.get("close_reason") or item.get("entry_reason") or "Trade ledger action",
             "realizedPnlUsd": item.get("realized_pnl_usd"),
-        } for item in report["intents"]]
+        } for item in current_intents]
         trade_actions = confirmed_trade_actions(
             reconciliation["transactions"], reconciliation["summary"],
             reconciliation["open_trades"], reconciliation["pending_orders"],

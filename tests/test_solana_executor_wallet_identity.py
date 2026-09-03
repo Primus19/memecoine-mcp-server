@@ -48,6 +48,7 @@ def test_crypto_paper_strategies_have_one_aggregate_service():
     assert "done.length >= 100 && stressed > 0" in SOURCE
     assert 'scope: "CURRENT_VERSION_ONLY"' in SOURCE
     assert ".filter(currentUnifiedCryptoFill)" in SOURCE
+    assert ".filter(currentUnifiedCryptoHandoff)" in SOURCE
     assert "divineV2Performance:" not in SOURCE
     assert "x.qualified===true" in SOURCE
     assert "SOLANA_PAPER_MAX_HOLD_MINUTES" in SOURCE
