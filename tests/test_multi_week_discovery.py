@@ -58,3 +58,14 @@ def test_discovers_every_asset_in_upstream_universe():
         two = {**one, "chain": "solana", "contract": "mint-two", "symbol": "SECOND"}
         values = discover({"crypto_universe": [one, two]}, ledger)
         assert {row["contract"] for row in values} == {"0xabc", "mint-two"}
+
+
+def test_cex_confirmation_uses_execution_evidence_not_unavailable_holder_metrics():
+    with tempfile.TemporaryDirectory() as directory:
+        ledger = ConfirmationLedger(directory + "/confirmations.json")
+        value = {**asset("2026-09-03T00:00:00Z"),
+                 "chain": "coinbase-spot", "contract": "BTC-USD",
+                 "execution_evidence_mode": "CEX_ORDER_BOOK", "venue_operational": True,
+                 "security_verified": False, "holder_growth_7d_pct": 0}
+        result = derive_snapshot(value, ledger)
+        assert result["confirmation_count"] == 1

@@ -92,12 +92,14 @@ def derive_snapshot(asset: dict[str, Any], ledger: ConfirmationLedger) -> dict[s
     consolidation = 0 <= pullback <= .15 and range3 <= .12 and extension <= .20
     observed_at = str(asset.get("observed_at") or datetime.now(UTC).isoformat())
     identity = f"{str(asset.get('chain') or '').lower()}:{str(asset.get('contract') or '').lower()}"
+    cex_mode = asset.get("execution_evidence_mode") == "CEX_ORDER_BOOK"
     preliminary = all((
         len(closes) >= 20, price > average20 > 0, higher_highs, higher_lows,
         relative7 > 0, volume_ratio >= 1.10,
-        _number(asset.get("holder_growth_7d_pct")) > 0,
+        (_number(asset.get("holder_growth_7d_pct")) > 0 or cex_mode),
         asset.get("sell_route_ok") is True,
-        asset.get("security_verified") is True,
+        (asset.get("security_verified") is True or
+         (cex_mode and asset.get("venue_operational") is True)),
     ))
     confirmations = ledger.observe(identity, observed_at, preliminary)
     return {

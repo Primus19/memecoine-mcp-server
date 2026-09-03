@@ -59,18 +59,20 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
     confirmations = int(_number(candidate.get("confirmation_count")))
     confirmation_span = _number(candidate.get("confirmation_span_hours"))
 
+    cex_mode = candidate.get("execution_evidence_mode") == "CEX_ORDER_BOOK"
     hard_checks = (
         (candidate.get("sell_route_ok") is not True, "full-position sell route unavailable"),
-        (candidate.get("security_verified") is not True, "contract safety not verified"),
+        (not cex_mode and candidate.get("security_verified") is not True, "contract safety not verified"),
+        (cex_mode and candidate.get("venue_operational") is not True, "execution venue unavailable"),
         (age < policy.minimum_age_days, "token is too new for a multi-week model"),
         (liquidity < policy.minimum_liquidity_usd, "liquidity below multi-week floor"),
         (volume < policy.minimum_volume_24h_usd, "volume below multi-week floor"),
         (recovery < policy.minimum_round_trip_recovery, "round-trip recovery below minimum"),
         (impact > policy.maximum_sell_impact_bps, "sell impact above maximum"),
-        (top10 is None, "top-10 concentration unavailable"),
-        (top10 is not None and _number(top10) > policy.maximum_top10_fraction, "top-10 concentration too high"),
-        (creator is None, "creator concentration unavailable"),
-        (creator is not None and _number(creator) > policy.maximum_creator_fraction, "creator concentration too high"),
+        (not cex_mode and top10 is None, "top-10 concentration unavailable"),
+        (not cex_mode and top10 is not None and _number(top10) > policy.maximum_top10_fraction, "top-10 concentration too high"),
+        (not cex_mode and creator is None, "creator concentration unavailable"),
+        (not cex_mode and creator is not None and _number(creator) > policy.maximum_creator_fraction, "creator concentration too high"),
     )
     failures.extend(message for failed, message in hard_checks if failed)
 
@@ -81,6 +83,7 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
         "positive_weekly_strength": _number(candidate.get("relative_strength_7d_pct")) > 0,
         "persistent_volume": _number(candidate.get("volume_7d_vs_prior_ratio")) >= 1.10,
         "holder_growth": _number(candidate.get("holder_growth_7d_pct")) > 0,
+        "venue_liquidity_persistence": cex_mode and candidate.get("venue_operational") is True,
     }
     trend_points = sum(trend_flags.values()) * 8.0
     execution_points = 0.0
@@ -158,7 +161,9 @@ def manage_position(position: dict[str, Any], market: dict[str, Any]) -> dict[st
     hard_exit = (
         market.get("sell_route_ok") is not True or
         _number(market.get("round_trip_recovery"), -1) < 0.95 or
-        market.get("security_verified") is not True
+        (market.get("security_verified") is not True and not (
+            market.get("execution_evidence_mode") == "CEX_ORDER_BOOK" and
+            market.get("venue_operational") is True))
     )
     trend_break = sum((
         market.get("price_above_20d_average") is not True,

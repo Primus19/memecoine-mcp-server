@@ -24,6 +24,25 @@ def test_qualifies_persistent_executable_candidate_for_paper_only():
     assert result["checkpoint_days"] == list(CHECKPOINT_DAYS)
 
 
+def test_cex_order_book_evidence_replaces_inapplicable_contract_concentration_checks():
+    result = evaluate_candidate(candidate(
+        chain="coinbase-spot", contract="BTC-USD", execution_evidence_mode="CEX_ORDER_BOOK",
+        venue_operational=True, security_verified=False, top10_holder_fraction=None,
+        creator_fraction=None, holder_growth_7d_pct=0,
+    ))
+    assert result["qualified"] is True
+    assert "contract safety not verified" not in result["hard_gate_failures"]
+
+
+def test_cex_candidate_fails_closed_when_venue_is_unavailable():
+    result = evaluate_candidate(candidate(
+        execution_evidence_mode="CEX_ORDER_BOOK", venue_operational=False,
+        security_verified=False, top10_holder_fraction=None, creator_fraction=None,
+    ))
+    assert result["qualified"] is False
+    assert "execution venue unavailable" in result["hard_gate_failures"]
+
+
 def test_rejects_unsellable_vertical_runner_even_with_good_trend():
     result = evaluate_candidate(candidate(
         sell_route_ok=False, round_trip_recovery=.20, sell_impact_bps=9_999,

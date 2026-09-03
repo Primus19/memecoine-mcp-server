@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from app.market_feed import (Handler, LOCK, STATE, ThreadingHTTPServer,
                              calendar_evidence, configured_symbols,
+                             _coinbase_execution, coinbase_crypto_market_universe,
                              crypto_market_universe, scan_symbols)
 
 
@@ -21,12 +22,36 @@ class MarketFeedCalendarTests(unittest.TestCase):
                    "total_volumes": [[1_700_000_000_000, 900_000],
                                      [1_700_086_400_000, 1_000_000]]}
         with patch.dict(os.environ, {"MULTI_WEEK_CRYPTO_UNIVERSE_SIZE": "5",
+                                    "MULTI_WEEK_CRYPTO_PROVIDERS": "coingecko",
                                     "MULTI_WEEK_CRYPTO_REQUEST_SPACING_SECONDS": "0"}, clear=False), \
              patch("app.market_feed.fetch_json", side_effect=[markets, history]):
-            rows = crypto_market_universe()
+            rows, health = crypto_market_universe()
         self.assertEqual("alpha", rows[0]["contract"])
         self.assertEqual(2, len(rows[0]["daily_candles"]))
         self.assertFalse(rows[0]["sell_route_ok"])
+        self.assertFalse(rows[0]["security_verified"])
+        self.assertEqual("coingecko", health["provider"])
+
+    def test_coinbase_order_book_calculates_cost_stressed_recovery(self):
+        result = _coinbase_execution(
+            {"asks": [["100.00", "5"]], "bids": [["99.90", "5"]]}, 100, 20)
+        self.assertTrue(result["sell_route_ok"])
+        self.assertGreater(result["round_trip_recovery"], .99)
+        self.assertLess(result["spread_bps"], 20)
+
+    def test_coinbase_universe_has_execution_evidence_without_claiming_contract_safety(self):
+        products = [{"id": "BTC-USD", "base_currency": "BTC", "quote_currency": "USD",
+                     "status": "online", "volume_24h": "1000"}]
+        candles = [[1_700_000_000 + day * 86400, 90 + day, 101 + day,
+                    95 + day, 100 + day, 1000] for day in range(30)]
+        book = {"asks": [["130.1", "10"]], "bids": [["130", "10"]]}
+        with patch.dict(os.environ, {"MULTI_WEEK_CRYPTO_UNIVERSE_SIZE": "5",
+                                    "MULTI_WEEK_CRYPTO_REQUEST_SPACING_SECONDS": "0"}, clear=False), \
+             patch("app.market_feed.fetch_json", side_effect=[products, candles, book]):
+            rows = coinbase_crypto_market_universe()
+        self.assertEqual("CEX_ORDER_BOOK", rows[0]["execution_evidence_mode"])
+        self.assertTrue(rows[0]["venue_operational"])
+        self.assertTrue(rows[0]["sell_route_ok"])
         self.assertFalse(rows[0]["security_verified"])
 
     def test_health_is_process_liveness_while_status_remains_fail_closed(self):

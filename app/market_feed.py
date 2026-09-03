@@ -33,7 +33,129 @@ def fetch_json(url: str) -> object:
         return json.loads(response.read().decode())
 
 
-def crypto_market_universe() -> list[dict]:
+def _coinbase_candles(base: str, product_id: str) -> list[dict]:
+    rows = fetch_json(f"{base}/products/{urllib.parse.quote(product_id)}/candles?granularity=86400")
+    if not isinstance(rows, list):
+        return []
+    candles = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) < 6:
+            continue
+        stamp, low, high, opening, close, base_volume = row[:6]
+        close = float(close or 0)
+        if close > 0:
+            candles.append({"observed_at": datetime.fromtimestamp(float(stamp), timezone.utc).isoformat(),
+                            "open": float(opening), "high": float(high), "low": float(low), "close": close,
+                            "volume_usd": float(base_volume or 0) * close})
+    return sorted(candles, key=lambda item: item["observed_at"])[-90:]
+
+
+def _walk_book(levels: list, amount: float, *, buying: bool) -> tuple[float, float]:
+    base_quantity = quote_total = 0.0
+    for level in levels:
+        if not isinstance(level, list) or len(level) < 2:
+            continue
+        price, available = float(level[0] or 0), float(level[1] or 0)
+        if price <= 0 or available <= 0:
+            continue
+        if buying:
+            quote_here = min(amount - quote_total, price * available)
+            base_quantity += quote_here / price
+            quote_total += quote_here
+            if quote_total >= amount - 1e-9:
+                break
+        else:
+            take = min(available, amount - base_quantity)
+            base_quantity += take
+            quote_total += take * price
+            if base_quantity >= amount - 1e-12:
+                break
+    return base_quantity, quote_total
+
+
+def _coinbase_execution(book: object, probe_usd: float, fee_bps_per_side: float) -> dict:
+    unavailable = {"sell_route_ok": False, "round_trip_recovery": -1.0,
+                   "sell_impact_bps": 10_000.0, "spread_bps": 10_000.0, "liquidity_usd": 0.0}
+    if not isinstance(book, dict):
+        return unavailable
+    asks, bids = list(book.get("asks") or []), list(book.get("bids") or [])
+    if not asks or not bids:
+        return unavailable
+    best_ask, best_bid = float(asks[0][0]), float(bids[0][0])
+    midpoint = (best_ask + best_bid) / 2
+    acquired, spent = _walk_book(asks, probe_usd, buying=True)
+    sold, received = _walk_book(bids, acquired, buying=False)
+    fee_fraction = max(0.0, fee_bps_per_side) / 10_000
+    recovery = received * (1 - fee_fraction) / (spent * (1 + fee_fraction)) \
+        if spent > 0 and sold >= acquired * .999 else -1.0
+    average_sell = received / sold if sold > 0 else 0.0
+    impact = (best_bid - average_sell) / best_bid * 10_000 if best_bid > 0 and average_sell > 0 else 10_000.0
+    bid_depth = sum(float(row[0]) * float(row[1]) for row in bids if len(row) >= 2 and float(row[0]) >= midpoint * .98)
+    ask_depth = sum(float(row[0]) * float(row[1]) for row in asks if len(row) >= 2 and float(row[0]) <= midpoint * 1.02)
+    return {"price": best_ask, "executable_buy_price": best_ask,
+            "executable_sell_price": best_bid, "mid_price": midpoint,
+            "bid": best_bid, "ask": best_ask,
+            "spread_bps": (best_ask - best_bid) / midpoint * 10_000,
+            "estimated_slippage_bps": max(0.0, impact), "sell_route_ok": recovery > 0,
+            "round_trip_recovery": recovery, "sell_impact_bps": max(0.0, impact),
+            "liquidity_usd": min(bid_depth, ask_depth), "execution_probe_usd": probe_usd,
+            "modeled_fee_bps_per_side": fee_bps_per_side}
+
+
+def coinbase_crypto_market_universe() -> list[dict]:
+    """Build an executable, paper-only universe from public Coinbase order books."""
+    base = os.getenv("COINBASE_EXCHANGE_BASE_URL", "https://api.exchange.coinbase.com").rstrip("/")
+    limit = max(5, min(50, int(os.getenv("MULTI_WEEK_CRYPTO_UNIVERSE_SIZE", "20"))))
+    probe = max(10.0, float(os.getenv("MULTI_WEEK_EXECUTION_PROBE_USD", "100")))
+    fee_bps = max(0.0, float(os.getenv("MULTI_WEEK_MODELED_FEE_BPS_PER_SIDE", "60")))
+    excluded = {item.strip().upper() for item in os.getenv(
+        "MULTI_WEEK_CRYPTO_EXCLUDED_BASES", "USDT,USDC,DAI,PYUSD,EURC").split(",") if item.strip()}
+    products = fetch_json(f"{base}/products")
+    if not isinstance(products, list):
+        return []
+    eligible = []
+    for product in products:
+        product_id = str(product.get("id") or "")
+        base_currency = str(product.get("base_currency") or "").upper()
+        quote_currency = str(product.get("quote_currency") or "").upper()
+        if (product_id and quote_currency in {"USD", "USDC"} and base_currency not in excluded and
+                product.get("status") == "online" and product.get("trading_disabled") is not True and
+                product.get("cancel_only") is not True and product.get("post_only") is not True):
+            eligible.append((float(product.get("volume_24h") or 0), product_id, base_currency))
+    eligible.sort(reverse=True)
+    result, now = [], datetime.now(timezone.utc)
+    spacing = max(0.0, float(os.getenv("MULTI_WEEK_CRYPTO_REQUEST_SPACING_SECONDS", "0.15")))
+    for _, product_id, symbol in eligible[:limit * 2]:
+        try:
+            candles = _coinbase_candles(base, product_id)
+            book = fetch_json(f"{base}/products/{urllib.parse.quote(product_id)}/book?level=2")
+            execution = _coinbase_execution(book, probe, fee_bps)
+            if len(candles) < 20 or execution.get("price", 0) <= 0:
+                continue
+            listing_age = max(0.0, (now - datetime.fromisoformat(candles[0]["observed_at"])).total_seconds() / 86400)
+            result.append({"chain": "coinbase-spot", "contract": product_id, "symbol": symbol,
+                           "name": product_id, "market_cap_usd": 0.0,
+                           "volume_24h_usd": float(candles[-1].get("volume_usd") or 0),
+                           "benchmark_return_7d_pct": 0.0, "daily_candles": candles,
+                           "token_age_days": listing_age, "listing_age_observed_days": listing_age,
+                           "security_verified": False, "top10_holder_fraction": None,
+                           "creator_fraction": None, "holder_growth_7d_pct": 0.0,
+                           "venue_operational": True, "execution_evidence_mode": "CEX_ORDER_BOOK",
+                           "tradable": True, "market_veto": False, "quote_age_seconds": 0.0,
+                           "initial_stop_fraction": 0.10, "observed_at": now.isoformat(),
+                           "source_urls": [f"https://exchange.coinbase.com/trade/{product_id}"],
+                           "evidence_status": "PUBLIC_CEX_ORDER_BOOK_COST_STRESSED_PAPER_ONLY", **execution})
+            if len(result) >= limit:
+                break
+        except Exception as exc:
+            print(json.dumps({"event": "COINBASE_CRYPTO_ASSET_WARNING", "product": product_id,
+                              "error": type(exc).__name__, "detail": str(exc)[:300]}), flush=True)
+        if spacing:
+            time.sleep(spacing)
+    return result
+
+
+def coingecko_crypto_market_universe() -> list[dict]:
     """Publish a broad, auditable research universe without inventing safety facts.
 
     CoinGecko supplies market and daily price/volume history.  Contract safety,
@@ -94,6 +216,25 @@ def crypto_market_universe() -> list[dict]:
         })
         time.sleep(max(0.0, float(os.getenv("MULTI_WEEK_CRYPTO_REQUEST_SPACING_SECONDS", "0.35"))))
     return result
+
+
+def crypto_market_universe() -> tuple[list[dict], dict]:
+    """Prefer executable venue data; retain CoinGecko as history-only fallback."""
+    if os.getenv("MULTI_WEEK_CRYPTO_FEED_ENABLED", "true").lower() != "true":
+        return [], {"provider": "disabled", "provider_errors": []}
+    providers = [item.strip().lower() for item in os.getenv(
+        "MULTI_WEEK_CRYPTO_PROVIDERS", "coinbase,coingecko").split(",") if item.strip()]
+    errors = []
+    for provider in providers:
+        try:
+            rows = (coinbase_crypto_market_universe() if provider == "coinbase" else
+                    coingecko_crypto_market_universe() if provider == "coingecko" else [])
+            if rows:
+                return rows, {"provider": provider, "provider_errors": errors}
+            errors.append({"provider": provider, "error": "empty universe"})
+        except Exception as exc:
+            errors.append({"provider": provider, "error": f"{type(exc).__name__}: {str(exc)[:300]}"})
+    return [], {"provider": "none", "provider_errors": errors}
 
 
 def pct(a: float, b: float) -> float: return 0.0 if a == 0 else (b - a) / a * 100
@@ -250,6 +391,7 @@ def main():
     last_crypto_attempt_at = ""
     last_crypto_success_at = ""
     last_crypto_error = ""
+    provider_health: dict = {}
     symbols = configured_symbols()
     while True:
         try:
@@ -261,7 +403,7 @@ def main():
                 last_crypto_attempt = time.monotonic()
                 last_crypto_attempt_at = datetime.now(timezone.utc).isoformat()
                 try:
-                    refreshed = crypto_market_universe()
+                    refreshed, provider_health = crypto_market_universe()
                     if refreshed:
                         crypto = refreshed
                         last_crypto_success_at = datetime.now(timezone.utc).isoformat()
@@ -282,7 +424,8 @@ def main():
                 crypto_universe=crypto, error="", forex_health={"status": "READY", "snapshot_count": len(snapshots)},
                 crypto_health={"status": crypto_status, "universe_count": len(crypto),
                     "last_attempt_at": last_crypto_attempt_at, "last_success_at": last_crypto_success_at,
-                    "last_error": last_crypto_error, "refresh_interval_seconds": crypto_refresh})
+                    "last_error": last_crypto_error, "refresh_interval_seconds": crypto_refresh,
+                    **provider_health})
             print(json.dumps({"event": "MULTI_ASSET_FEED_SCAN", "paper_only": True, "snapshot_count": len(snapshots), "crypto_universe_count": len(crypto)}), flush=True)
         except Exception as exc:
             with LOCK: STATE.update(ok=False, error=str(exc)[:500])

@@ -275,6 +275,12 @@ runs independent paper sleeves, including:
   from the verified maximum loss per complete spread (including multiplier and
   estimated fees).
 - `MULTI_WEEK_CRYPTO_MOMENTUM_V1`: chain-neutral 3–12 week trend research.
+
+The multi-asset feed attempts public Coinbase spot order books before its CoinGecko
+fallback. Coinbase candidates use executable ask/bid depth and a configurable,
+fee-stressed round-trip probe. They do not claim unavailable on-chain holder or
+creator evidence. CoinGecko-only candidates remain forward-tracking controls until
+an execution and contract-safety adapter supplies the missing facts.
   It requires verified full-size sellability, contract/distribution evidence,
   two confirmations at least 12 hours apart, daily higher highs and lows,
   positive weekly relative strength, persistent volume, holder growth, and a

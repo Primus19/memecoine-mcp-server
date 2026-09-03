@@ -61,7 +61,8 @@ def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int 
     closes = []
     for position in ledger.positions():
         snapshot = current.get(str(position.get("contract") or position.get("symbol") or "").lower())
-        price = float((snapshot or {}).get("price") or 0)
+        price = float((snapshot or {}).get("executable_sell_price") or
+                      (snapshot or {}).get("price") or 0)
         try:
             opened = datetime.fromisoformat(str(position["recorded_at"]).replace("Z", "+00:00"))
             position_max_hold = max_hold_minutes
