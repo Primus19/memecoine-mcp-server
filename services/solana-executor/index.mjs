@@ -338,6 +338,47 @@ function strategyPerformance() {
     },
   };
 }
+function unifiedCryptoPaperPerformance() {
+  const componentStrategies = [
+      "SOLANA_EARLY_CONTROL",
+      "SOLANA_PUMPFUN_EV_EXPERIMENT",
+      "SOLANA_MICROCAP_LAUNCH_MOMENTUM",
+      "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
+      "SOLANA_MICROCAP_RUNNER_CAPTURE",
+    ],
+    fills = state.paperFills.filter((f) =>
+      componentStrategies.includes(f.strategy || "SOLANA_EARLY_CONTROL"),
+    ),
+    done = fills.filter((f) => f.action === "SELL"),
+    open = state.paperPositions.filter((p) =>
+      componentStrategies.includes(p.strategy || "SOLANA_EARLY_CONTROL"),
+    ),
+    wins = done.filter((f) => num(f.realizedPnlUsd) > 0).length,
+    raw = done.reduce((n, f) => n + num(f.realizedPnlUsd), 0),
+    stressed = done.reduce(
+      (n, f) => n + num(f.costStressedPnlUsd, f.realizedPnlUsd),
+      0,
+    );
+  return {
+    service: "UNIFIED_CRYPTO_PAPER",
+    version: "UNIFIED_CRYPTO_PAPER_V1",
+    mode: "PAPER_AND_SHADOW_ONLY",
+    componentStrategies,
+    actions: fills.length,
+    opened: fills.filter((f) => f.action === "BUY").length,
+    closed: done.length,
+    open: open.length,
+    wins,
+    losses: done.length - wins,
+    winRatePct: done.length ? (wins / done.length) * 100 : 0,
+    rawPnlUsd: raw,
+    costStressedPnlUsd: stressed,
+    expectancyUsd: done.length ? stressed / done.length : 0,
+    promotionEligible: done.length >= 100 && stressed > 0,
+    promotionGate:
+      "100 independent cost-stressed closes with positive expectancy; live services remain separate",
+  };
+}
 function liveShadowStats() {
   const done = shadowClosed(),
     raw = done.reduce((n, f) => n + num(f.realizedPnlUsd), 0),
@@ -2302,6 +2343,7 @@ http
                 containsRealMoneyProbe: true,
                 emailMode: "TRADE_EVENTS_ONLY",
                 strategyPerformance: p.strategyPerformance,
+                unifiedCryptoPaper: unifiedCryptoPaperPerformance(),
                 divineV2Performance: strategyVersionStats(
                   "SOLANA_PUMPFUN_EV_EXPERIMENT",
                   "DIVINE_V2",

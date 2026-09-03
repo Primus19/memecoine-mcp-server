@@ -74,6 +74,8 @@ FIVE_STREAK_FILTERED_V3_STRATEGY = "FOREX_FIVE_STREAK_FILTERED_V3"
 FIVE_STREAK_FILTERED_STRATEGY = "FOREX_FIVE_STREAK_FILTERED_V4_RATCHET"
 BRYNE_LIQUIDITY_V5_STRATEGY = "FOREX_BRYNE_LIQUIDITY_RANGE_V5"
 FIVE_STREAK_DISPLAY_NAME = "Bryne and Lot-Bill Strategy"
+UNIFIED_FOREX_PAPER_SERVICE = "UNIFIED_FOREX_PAPER"
+UNIFIED_FOREX_PAPER_VERSION = "UNIFIED_FOREX_PAPER_V1"
 
 
 def five_streak_position_pnl(position: dict, price: float) -> float:
@@ -1691,6 +1693,24 @@ class Executor:
                   "trade_checkpoints": self.ledger.trade_checkpoints(),
                   "live_trade_checkpoints": self.ledger.live_trade_checkpoints(),
                   "shadow_exit_observations": self.ledger.shadow_exit_observations(),
+                  "forex_paper_service": {
+                      "service": UNIFIED_FOREX_PAPER_SERVICE,
+                      "version": UNIFIED_FOREX_PAPER_VERSION,
+                      "display_name": "Unified Forex Paper Strategy",
+                      "mode": "PAPER_ONLY",
+                      "active_component": BRYNE_LIQUIDITY_V5_STRATEGY,
+                      "archived_components": [FIVE_STREAK_FILTERED_STRATEGY,
+                                              FIVE_STREAK_FILTERED_V3_STRATEGY,
+                                              FIVE_STREAK_STRATEGY],
+                      "performance": self.ledger.strategy_stats(BRYNE_LIQUIDITY_V5_STRATEGY),
+                      "open_positions": len([position for position in self.ledger.paper_positions()
+                                             if position.get("strategy") == BRYNE_LIQUIDITY_V5_STRATEGY]),
+                      "promotion_gate": (
+                          "100 independent cost-stressed closes with positive expectancy; "
+                          "exit changes require 30-50 closes"
+                      ),
+                      "live_execution_separate": True,
+                  },
                   "five_streak": {"name": FIVE_STREAK_DISPLAY_NAME, "mode": "PAPER_ONLY",
                                   "version": "Liquidity Range V5", "timeframe": "H1 structure / executable quote entry",
                                   "enabled": five_streak_enabled(),

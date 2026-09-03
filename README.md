@@ -245,7 +245,23 @@ entry drift, one-position maximum, capital limits, the $2.50 loss cap, attached
 exit protection, or circuit breakers. Set `LIVE_REQUIRE_NEWS_CATALYST=true` to
 restore the event-driven catalyst requirement without changing code.
 
-## Paper-only multi-asset engines
+## Two consolidated paper services
+
+Production exposes exactly two logical paper portfolios:
+
+- `UNIFIED_FOREX_PAPER_V1` owns the active Bryne and Lot-Bill V5 paper lifecycle.
+  Earlier V2/V3/V4 variants remain read-only historical component evidence and
+  cannot generate entries.
+- `UNIFIED_CRYPTO_PAPER_V1` combines Solana Early, Divine, Microcap, the
+  executable sub-$1M shadow cohort, and Runner Capture under one paper ledger,
+  one position owner, and one aggregate performance/promotion gate.
+
+Component strategy identifiers are deliberately retained on every observation
+and fill. They are attribution labels, not separately deployed paper services.
+The Coinbase, Solana and Forex live executors remain independent and unchanged;
+paper evidence can never promote or alter live risk automatically.
+
+## Legacy paper-only multi-asset engines
 
 `python -m app.asset_worker` consumes normalized, source-linked snapshots and
 runs three independent paper sleeves:

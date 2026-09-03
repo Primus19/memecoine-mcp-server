@@ -39,6 +39,13 @@ def test_new_probe_fees_are_valued_and_reported_net_in_usd():
 
 def test_paper_exploration_is_separate_from_live_qualification():
     assert "x.paper_qualified===true" in SOURCE
+
+
+def test_crypto_paper_strategies_have_one_aggregate_service():
+    assert 'service: "UNIFIED_CRYPTO_PAPER"' in SOURCE
+    assert 'version: "UNIFIED_CRYPTO_PAPER_V1"' in SOURCE
+    assert "unifiedCryptoPaper: unifiedCryptoPaperPerformance()" in SOURCE
+    assert "done.length >= 100 && stressed > 0" in SOURCE
     assert "x.qualified===true" in SOURCE
     assert "SOLANA_PAPER_MAX_HOLD_MINUTES" in SOURCE
     assert "live-strategy shadow cost-stressed expectancy is not positive" in SOURCE
