@@ -7,10 +7,28 @@ import urllib.request
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-from app.market_feed import Handler, LOCK, STATE, ThreadingHTTPServer, calendar_evidence, configured_symbols, scan_symbols
+from app.market_feed import (Handler, LOCK, STATE, ThreadingHTTPServer,
+                             calendar_evidence, configured_symbols,
+                             crypto_market_universe, scan_symbols)
 
 
 class MarketFeedCalendarTests(unittest.TestCase):
+    def test_crypto_universe_publishes_market_history_without_inventing_safety(self):
+        markets = [{"id": "alpha", "symbol": "alp", "name": "Alpha",
+                    "current_price": 2, "market_cap": 5_000_000,
+                    "total_volume": 1_000_000}]
+        history = {"prices": [[1_700_000_000_000, 1.5], [1_700_086_400_000, 2.0]],
+                   "total_volumes": [[1_700_000_000_000, 900_000],
+                                     [1_700_086_400_000, 1_000_000]]}
+        with patch.dict(os.environ, {"MULTI_WEEK_CRYPTO_UNIVERSE_SIZE": "5",
+                                    "MULTI_WEEK_CRYPTO_REQUEST_SPACING_SECONDS": "0"}, clear=False), \
+             patch("app.market_feed.fetch_json", side_effect=[markets, history]):
+            rows = crypto_market_universe()
+        self.assertEqual("alpha", rows[0]["contract"])
+        self.assertEqual(2, len(rows[0]["daily_candles"]))
+        self.assertFalse(rows[0]["sell_route_ok"])
+        self.assertFalse(rows[0]["security_verified"])
+
     def test_health_is_process_liveness_while_status_remains_fail_closed(self):
         with LOCK:
             original = dict(STATE)

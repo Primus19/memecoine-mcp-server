@@ -5,6 +5,7 @@ import os
 import statistics
 import threading
 import time
+import urllib.parse
 import urllib.request
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -14,12 +15,83 @@ from .broker_adapters import OandaAdapter
 from .quant import average_true_range, ewma_volatility, horizon_return, liquidity_quality, multi_horizon_consensus
 
 LOCK = threading.RLock()
-STATE = {"ok": False, "scanned_at": "", "snapshots": [], "error": "not scanned"}
+STATE = {"ok": False, "scanned_at": "", "snapshots": [], "crypto_universe": [], "error": "not scanned"}
 SPREAD_HISTORY: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=240))
 CORE_FOREX_SYMBOLS = (
     "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD",
     "USD_CHF", "NZD_USD", "EUR_JPY", "GBP_JPY", "EUR_GBP", "XAU_USD", "XAG_USD",
 )
+
+
+def fetch_json(url: str) -> object:
+    request = urllib.request.Request(url, headers={
+        "Accept": "application/json", "User-Agent": "primus-multi-asset-feed/1.0",
+    })
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode())
+
+
+def crypto_market_universe() -> list[dict]:
+    """Publish a broad, auditable research universe without inventing safety facts.
+
+    CoinGecko supplies market and daily price/volume history.  Contract safety,
+    holder concentration and executable round-trip evidence remain explicitly
+    unverified so the paper engine forward-tracks these assets but cannot open a
+    position until an execution/safety adapter supplies those facts.
+    """
+    if os.getenv("MULTI_WEEK_CRYPTO_FEED_ENABLED", "true").lower() != "true":
+        return []
+    base = os.getenv("COINGECKO_BASE_URL", "https://api.coingecko.com/api/v3").rstrip("/")
+    limit = max(5, min(50, int(os.getenv("MULTI_WEEK_CRYPTO_UNIVERSE_SIZE", "20"))))
+    query = urllib.parse.urlencode({
+        "vs_currency": "usd", "order": "market_cap_desc", "per_page": limit,
+        "page": 1, "sparkline": "false", "price_change_percentage": "7d",
+    })
+    markets = fetch_json(f"{base}/coins/markets?{query}")
+    if not isinstance(markets, list):
+        return []
+    result = []
+    for market in markets:
+        coin_id = str(market.get("id") or "").strip()
+        if not coin_id:
+            continue
+        history = fetch_json(f"{base}/coins/{urllib.parse.quote(coin_id)}/market_chart?vs_currency=usd&days=30&interval=daily")
+        if not isinstance(history, dict):
+            continue
+        prices = history.get("prices") or []
+        volumes = {int(row[0]): float(row[1]) for row in (history.get("total_volumes") or [])
+                   if isinstance(row, list) and len(row) >= 2}
+        candles = []
+        for row in prices:
+            if not isinstance(row, list) or len(row) < 2 or float(row[1] or 0) <= 0:
+                continue
+            stamp, close = int(row[0]), float(row[1])
+            candles.append({
+                "observed_at": datetime.fromtimestamp(stamp / 1000, timezone.utc).isoformat(),
+                "open": close, "high": close, "low": close, "close": close,
+                "volume_usd": volumes.get(stamp, 0.0),
+            })
+        result.append({
+            "chain": "coingecko", "contract": coin_id,
+            "symbol": str(market.get("symbol") or coin_id).upper(),
+            "name": str(market.get("name") or coin_id),
+            "price": float(market.get("current_price") or 0),
+            "market_cap_usd": float(market.get("market_cap") or 0),
+            "liquidity_usd": 0.0,
+            "volume_24h_usd": float(market.get("total_volume") or 0),
+            "benchmark_return_7d_pct": 0.0,
+            "daily_candles": candles,
+            "token_age_days": 7.0,
+            "sell_route_ok": False, "security_verified": False,
+            "round_trip_recovery": -1.0, "sell_impact_bps": 10_000.0,
+            "top10_holder_fraction": None, "creator_fraction": None,
+            "holder_growth_7d_pct": 0.0, "initial_stop_fraction": 0.10,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "source_urls": [f"https://www.coingecko.com/en/coins/{coin_id}"],
+            "evidence_status": "MARKET_HISTORY_ONLY_EXECUTION_AND_SAFETY_PENDING",
+        })
+        time.sleep(max(0.0, float(os.getenv("MULTI_WEEK_CRYPTO_REQUEST_SPACING_SECONDS", "0.35"))))
+    return result
 
 
 def pct(a: float, b: float) -> float: return 0.0 if a == 0 else (b - a) / a * 100
@@ -152,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path not in {"/health", "/snapshots", "/status"}: self.send_error(404); return
         with LOCK: value = dict(STATE)
         if self.path == "/health": value = {"ok": value["ok"], "service": "multi-asset-market-feed", "scanned_at": value["scanned_at"], "error": value["error"]}
-        elif self.path == "/snapshots": value = {"snapshots": value["snapshots"], "scanned_at": value["scanned_at"]}
+        elif self.path == "/snapshots": value = {"snapshots": value["snapshots"], "crypto_universe": value.get("crypto_universe", []), "scanned_at": value["scanned_at"]}
         # Railway's health check proves that the process is listening.  Market
         # readiness remains fail-closed on /status so an upstream OANDA or
         # calendar delay cannot turn into a trading signal, but it must not
@@ -172,10 +244,11 @@ def main():
         try:
             adapter = OandaAdapter()
             snapshots, rejected = scan_symbols(adapter, symbols)
+            crypto = crypto_market_universe()
             for item in rejected:
                 print(json.dumps({"event": "FOREX_SYMBOL_REJECTED", **item}), flush=True)
-            with LOCK: STATE.update(ok=True, scanned_at=datetime.now(timezone.utc).isoformat(), snapshots=snapshots, error="")
-            print(json.dumps({"event": "MULTI_ASSET_FEED_SCAN", "paper_only": True, "snapshot_count": len(snapshots)}), flush=True)
+            with LOCK: STATE.update(ok=True, scanned_at=datetime.now(timezone.utc).isoformat(), snapshots=snapshots, crypto_universe=crypto, error="")
+            print(json.dumps({"event": "MULTI_ASSET_FEED_SCAN", "paper_only": True, "snapshot_count": len(snapshots), "crypto_universe_count": len(crypto)}), flush=True)
         except Exception as exc:
             with LOCK: STATE.update(ok=False, error=str(exc)[:500])
             print(json.dumps({"event": "MULTI_ASSET_FEED_ERROR", "error": type(exc).__name__, "detail": str(exc)[:500]}), flush=True)
