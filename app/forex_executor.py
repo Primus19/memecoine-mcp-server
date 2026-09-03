@@ -76,6 +76,7 @@ BRYNE_LIQUIDITY_V5_STRATEGY = "FOREX_BRYNE_LIQUIDITY_RANGE_V5"
 FIVE_STREAK_DISPLAY_NAME = "Bryne and Lot-Bill Strategy"
 UNIFIED_FOREX_PAPER_SERVICE = "UNIFIED_FOREX_PAPER"
 UNIFIED_FOREX_PAPER_VERSION = "UNIFIED_FOREX_PAPER_V1"
+UNIFIED_FOREX_PAPER_STARTED_AT = "2026-09-03T00:12:17+00:00"
 
 
 def five_streak_position_pnl(position: dict, price: float) -> float:
@@ -590,6 +591,20 @@ class Ledger:
         return {"strategy": strategy, "opened": len(rows), "open": sum(row["status"] == "PAPER_OPEN" for row in rows),
                 "closed": len(closed), "wins": wins, "losses": len(closed) - wins,
                 "win_rate": wins / len(closed) if closed else None, "net_pnl_usd": round(sum(closed), 8),
+                "expectancy_usd": sum(closed) / len(closed) if closed else None}
+
+    def strategy_stats_since(self, strategy: str, started_at: str) -> dict:
+        rows = [dict(row) for row in self.db.execute(
+            "SELECT status,realized_pnl_usd FROM intents WHERE strategy=? AND created_at>=?",
+            (strategy, started_at)).fetchall()]
+        closed = [float(row["realized_pnl_usd"]) for row in rows
+                  if row["realized_pnl_usd"] is not None]
+        wins = sum(value > 0 for value in closed)
+        return {"strategy": strategy, "scope": "CURRENT_VERSION_ONLY", "opened": len(rows),
+                "open": sum(row["status"] == "PAPER_OPEN" for row in rows),
+                "closed": len(closed), "wins": wins, "losses": len(closed) - wins,
+                "win_rate": wins / len(closed) if closed else None,
+                "net_pnl_usd": round(sum(closed), 8),
                 "expectancy_usd": sum(closed) / len(closed) if closed else None}
 
     def strategy_intents(self, strategy: str, limit: int = 50) -> list[dict]:
@@ -1696,13 +1711,13 @@ class Executor:
                   "forex_paper_service": {
                       "service": UNIFIED_FOREX_PAPER_SERVICE,
                       "version": UNIFIED_FOREX_PAPER_VERSION,
+                      "started_at": UNIFIED_FOREX_PAPER_STARTED_AT,
+                      "scope": "CURRENT_VERSION_ONLY",
                       "display_name": "Unified Forex Paper Strategy",
                       "mode": "PAPER_ONLY",
                       "active_component": BRYNE_LIQUIDITY_V5_STRATEGY,
-                      "archived_components": [FIVE_STREAK_FILTERED_STRATEGY,
-                                              FIVE_STREAK_FILTERED_V3_STRATEGY,
-                                              FIVE_STREAK_STRATEGY],
-                      "performance": self.ledger.strategy_stats(BRYNE_LIQUIDITY_V5_STRATEGY),
+                      "performance": self.ledger.strategy_stats_since(
+                          BRYNE_LIQUIDITY_V5_STRATEGY, UNIFIED_FOREX_PAPER_STARTED_AT),
                       "open_positions": len([position for position in self.ledger.paper_positions()
                                              if position.get("strategy") == BRYNE_LIQUIDITY_V5_STRATEGY]),
                       "promotion_gate": (
@@ -1752,15 +1767,7 @@ class Executor:
                                       } for position in self.ledger.paper_positions()
                                        if position.get("strategy") == BRYNE_LIQUIDITY_V5_STRATEGY],
                                   },
-                                  "v4_ratchet_archived": {"new_entries_enabled": False,
-                                      "performance": self.ledger.strategy_stats(FIVE_STREAK_FILTERED_STRATEGY),
-                                      "trades": self.ledger.strategy_intents(FIVE_STREAK_FILTERED_STRATEGY)},
-                                  "filtered_v3_archived": {"new_entries_enabled": False,
-                                      "performance": self.ledger.strategy_stats(FIVE_STREAK_FILTERED_V3_STRATEGY),
-                                      "trades": self.ledger.strategy_intents(FIVE_STREAK_FILTERED_V3_STRATEGY)},
-                                  "baseline_v2_archived": {"new_entries_enabled": False,
-                                      "performance": self.ledger.strategy_stats(FIVE_STREAK_STRATEGY),
-                                      "trades": self.ledger.strategy_intents(FIVE_STREAK_STRATEGY)}},
+                                  "historical_components_visible": False},
                   "intents": self.ledger.recent_intents(), "events": self.ledger.recent_events(),
                   "realized_pnl_usd": self.ledger.realized_pnl(),
                   "model_review": self.ledger.model_review(self.engine.policy.minimum_score),

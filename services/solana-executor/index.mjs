@@ -242,6 +242,10 @@ const walletAddress = () => wallet?.publicKey.toString() || "",
 const exposure = (a) => a.reduce((n, p) => n + p.entryUsd, 0),
   closed = () => state.paperFills.filter((f) => f.action === "SELL"),
   shadowClosed = () => state.liveShadowFills.filter((f) => f.action === "SELL");
+const UNIFIED_CRYPTO_PAPER_STARTED_AT =
+  process.env.UNIFIED_CRYPTO_PAPER_STARTED_AT || "2026-09-03T00:12:17Z";
+const currentUnifiedCryptoFill = (fill) =>
+  Date.parse(fill?.at || "") >= Date.parse(UNIFIED_CRYPTO_PAPER_STARTED_AT);
 function paperStats() {
   const done = closed(),
     adjusted = done.reduce(
@@ -346,8 +350,10 @@ function unifiedCryptoPaperPerformance() {
       "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
       "SOLANA_MICROCAP_RUNNER_CAPTURE",
     ],
-    fills = state.paperFills.filter((f) =>
-      componentStrategies.includes(f.strategy || "SOLANA_EARLY_CONTROL"),
+    fills = state.paperFills.filter(
+      (f) =>
+        currentUnifiedCryptoFill(f) &&
+        componentStrategies.includes(f.strategy || "SOLANA_EARLY_CONTROL"),
     ),
     done = fills.filter((f) => f.action === "SELL"),
     open = state.paperPositions.filter((p) =>
@@ -362,6 +368,8 @@ function unifiedCryptoPaperPerformance() {
   return {
     service: "UNIFIED_CRYPTO_PAPER",
     version: "UNIFIED_CRYPTO_PAPER_V1",
+    startedAt: UNIFIED_CRYPTO_PAPER_STARTED_AT,
+    scope: "CURRENT_VERSION_ONLY",
     mode: "PAPER_AND_SHADOW_ONLY",
     componentStrategies,
     actions: fills.length,
@@ -1932,6 +1940,28 @@ function reportV3() {
     summary + probeSummary + "<h3>Recent actions</h3>",
   );
 }
+function currentPaperReport() {
+  const performance = unifiedCryptoPaperPerformance(),
+    rows = state.paperFills
+      .filter(currentUnifiedCryptoFill)
+      .slice(0, 50)
+      .map(
+        (fill) =>
+          `<tr><td>${esc(fill.at)}</td><td>${esc(fill.symbol || fill.mint)}</td>` +
+          `<td>${esc(fill.action)}</td><td>${esc(fill.strategyVersion || fill.strategy)}</td>` +
+          `<td>${fill.realizedPnlUsd == null ? "-" : `$${num(fill.realizedPnlUsd).toFixed(4)}`}</td></tr>`,
+      )
+      .join("");
+  return `<div style="font-family:Arial,sans-serif;color:#172033;max-width:860px;margin:auto">
+  <h2>Unified Crypto Paper V1</h2>
+  <p><b>Current-version results only.</b> Started ${esc(performance.startedAt)}. Historical component results are intentionally hidden.</p>
+  <p>${performance.closed} closed • ${performance.wins} wins • ${performance.losses} losses •
+  $${performance.costStressedPnlUsd.toFixed(4)} cost-stressed P&amp;L •
+  $${performance.expectancyUsd.toFixed(4)} expectancy per close • ${performance.open} open.</p>
+  <table cellspacing="0" cellpadding="7" style="border-collapse:collapse;width:100%">
+  <tr><th>UTC</th><th>Asset</th><th>Action</th><th>Component</th><th>Realized P&amp;L</th></tr>
+  ${rows || '<tr><td colspan="5">No current-version actions yet.</td></tr>'}</table></div>`;
+}
 function runnerProbeEmailReport() {
   const lastSent = Date.parse(state.email.lastSentAt || 0),
     newest =
@@ -2060,7 +2090,7 @@ async function email(hasTradeEvent = false) {
       "MIME-Version: 1.0",
       "Content-Type: text/html; charset=UTF-8",
       "",
-      probeNew ? runnerProbeEmailReport() : reportV3(),
+      probeNew ? runnerProbeEmailReport() : currentPaperReport(),
     ].join("\r\n");
   const sentMessage = await json("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
     method: "POST",
@@ -2322,7 +2352,7 @@ http
         "content-type": "text/html; charset=UTF-8",
         "cache-control": "no-store",
       });
-      res.end(reportV3());
+      res.end(currentPaperReport());
       return;
     }
     const p = publicState(),
@@ -2342,32 +2372,7 @@ http
                 paperOnly: false,
                 containsRealMoneyProbe: true,
                 emailMode: "TRADE_EVENTS_ONLY",
-                strategyPerformance: p.strategyPerformance,
                 unifiedCryptoPaper: unifiedCryptoPaperPerformance(),
-                divineV2Performance: strategyVersionStats(
-                  "SOLANA_PUMPFUN_EV_EXPERIMENT",
-                  "DIVINE_V2",
-                ),
-                divineV3Performance: strategyVersionStats(
-                  "SOLANA_PUMPFUN_EV_EXPERIMENT",
-                  "DIVINE_V3",
-                ),
-                controlV2Performance: strategyVersionStats(
-                  "SOLANA_EARLY_CONTROL",
-                  "CONTROL_V2",
-                ),
-                microcapLaunchV2Performance: strategyVersionStats(
-                  "SOLANA_MICROCAP_LAUNCH_MOMENTUM",
-                  "MICROCAP_LAUNCH_V2",
-                ),
-                microcapSub1mShadowPerformance: strategyVersionStats(
-                  "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
-                  "MICROCAP_SUB_1M_SHADOW_V1",
-                ),
-                runnerCaptureV1Performance: strategyVersionStats(
-                  "SOLANA_MICROCAP_RUNNER_CAPTURE",
-                  "RUNNER_CAPTURE_V1",
-                ),
                 runnerLiveProbePerformance: probePerformance(),
                 runnerLiveProbe: p.runnerLiveProbe,
                 discoveryDiagnostics: p.discoveryDiagnostics,
@@ -2385,7 +2390,9 @@ http
                 candidateHandoffs: (state.candidateHandoffs || []).slice(0, 100),
                 lastSuccessfulDiscoveryAt: p.lastSuccessfulDiscoveryAt,
                 discoveryError: p.discoveryError,
-                recentActions: state.paperFills.slice(0, 20),
+                recentActions: state.paperFills
+                  .filter(currentUnifiedCryptoFill)
+                  .slice(0, 20),
                 postExitCounterfactuals: (state.postExitFollowups || []).slice(
                   0,
                   20,

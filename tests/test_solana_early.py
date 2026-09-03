@@ -680,7 +680,7 @@ class SolanaEarlyTests(unittest.TestCase):
         compact = "".join(source.split())
         for expected in ("MICROCAP_DOWNTREND", "MICROCAP_PROFIT_PROTECTION",
                          "MAX_HOLD_20M", 'isMicrocap?0.08', 'isMicrocap?0.2',
-                         'strategyName(f.strategy)', "microcapLaunchV2Performance"):
+                         'strategyName(f.strategy)'):
             self.assertTrue(expected in source or "".join(expected.split()) in compact)
 
     def test_runner_capture_has_isolated_capped_live_probe_and_tiered_paper_exits(self):
@@ -689,7 +689,7 @@ class SolanaEarlyTests(unittest.TestCase):
         for expected in ("RUNNER_CAPTURE_V1", "RUNNER_TIERED_PROFIT", "RUNNER_DOWNTREND",
                          "MAX_HOLD_30M_NO_LIQUID_CONTINUATION",
                          "MAX_HOLD_60M_LIQUID_CONTINUATION", "Runner Capture Experiment",
-                         "runnerCaptureV1Performance", "CYAN • Runner Capture V1",
+                         "CYAN • Runner Capture V1",
                          "target=isRunner?5.0", "stop=isRunner?0.1",
                          "SOLANA_RUNNER_LIVE_PROBE_ENABLED",
                          "I_ACCEPT_THE_0_50_USD_RUNNER_LIQUIDITY_PROBE",
@@ -728,7 +728,6 @@ class SolanaEarlyTests(unittest.TestCase):
         for expected in (
             "MICROCAP_SUB_1M_SHADOW_V1",
             "SHADOW_ENTRY_CAPTURED",
-            "microcapSub1mShadowPerformance",
             "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
         ):
             self.assertIn("".join(expected.split()), compact)

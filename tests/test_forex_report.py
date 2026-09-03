@@ -1,6 +1,8 @@
 import unittest
 
-from app.forex_executor import UNIFIED_FOREX_PAPER_SERVICE, UNIFIED_FOREX_PAPER_VERSION
+from app.forex_executor import (UNIFIED_FOREX_PAPER_SERVICE,
+                                UNIFIED_FOREX_PAPER_STARTED_AT,
+                                UNIFIED_FOREX_PAPER_VERSION)
 
 from app.forex_report import render_forex_report
 
@@ -9,6 +11,7 @@ class ForexReportTests(unittest.TestCase):
     def test_unified_forex_paper_identity(self):
         self.assertEqual("UNIFIED_FOREX_PAPER", UNIFIED_FOREX_PAPER_SERVICE)
         self.assertEqual("UNIFIED_FOREX_PAPER_V1", UNIFIED_FOREX_PAPER_VERSION)
+        self.assertEqual("2026-09-03T00:12:17+00:00", UNIFIED_FOREX_PAPER_STARTED_AT)
     def test_report_is_email_safe_and_contains_required_sections(self):
         body = render_forex_report({
             "generated_at": "2026-08-24T03:00:00+00:00", "mode": "PRACTICE_ARMED",
