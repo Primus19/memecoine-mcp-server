@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .multi_asset import MultiAssetEngine, MultiAssetRejected, PaperLedger
+from .multi_week_crypto import STRATEGY as MULTI_WEEK_CRYPTO_STRATEGY, manage_position
+from .multi_week_discovery import ConfirmationLedger, discover
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -49,15 +51,20 @@ def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int 
     closing logic in the process that owns the ledger makes the paper sleeve
     durable and self-consistent even if the legacy supervisor is restarted.
     """
-    marks = {str(item.get("symbol") or "").upper(): float(item.get("price") or 0)
-             for item in snapshots if float(item.get("price") or 0) > 0}
+    current = {str(item.get("contract") or item.get("symbol") or "").lower(): item
+               for item in snapshots if float(item.get("price") or 0) > 0}
     now = datetime.now(timezone.utc)
     closes = []
     for position in ledger.positions():
-        price = marks.get(str(position.get("symbol") or "").upper())
+        snapshot = current.get(str(position.get("contract") or position.get("symbol") or "").lower())
+        price = float((snapshot or {}).get("price") or 0)
         try:
             opened = datetime.fromisoformat(str(position["recorded_at"]).replace("Z", "+00:00"))
-            expired = (now - opened).total_seconds() >= max_hold_minutes * 60
+            position_max_hold = max_hold_minutes
+            if position.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY:
+                position_max_hold = max(90 * 24 * 60,
+                                        float(position.get("expected_holding_days") or 21) * 24 * 60)
+            expired = (now - opened).total_seconds() >= position_max_hold * 60
         except (KeyError, ValueError):
             expired = False
         price_source = "CURRENT_EXECUTABLE_MARK"
@@ -68,6 +75,30 @@ def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int 
             price = float(retained.get("mark_price") or position.get("fill_price") or 0)
             price_source = "LAST_RETAINED_MARK" if retained else "ENTRY_FALLBACK_NO_MARK"
         else:
+            continue
+        if position.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY and snapshot:
+            stage = int(position.get("entry_stage") or 1)
+            if (stage == 1 and int(snapshot.get("confirmation_count") or 0) >= 3 and
+                    snapshot.get("daily_higher_lows") is True and
+                    float(snapshot.get("volume_7d_vs_prior_ratio") or 0) >= 1.10):
+                ledger.add_stage(str(position["proposal_id"]), price, 2)
+                position = next(item for item in ledger.positions()
+                                if item.get("proposal_id") == position.get("proposal_id"))
+                stage = 2
+            if (stage == 2 and snapshot.get("breakout_confirmed") is True and
+                    snapshot.get("sell_route_ok") is True and
+                    float(snapshot.get("round_trip_recovery") or 0) >= .97):
+                ledger.add_stage(str(position["proposal_id"]), price, 3)
+                position = next(item for item in ledger.positions()
+                                if item.get("proposal_id") == position.get("proposal_id"))
+            management = manage_position(position, {**snapshot, "executable_price": price})
+            if management["action"] == "EXIT":
+                closes.append(ledger.close(str(position["proposal_id"]), price,
+                                           management["reason"], price_source=price_source))
+            elif management["action"] == "TAKE_PROFIT":
+                closes.append(ledger.partial_close(
+                    str(position["proposal_id"]), price, float(management["fraction"]),
+                    management["reason"], price_source=price_source))
             continue
         side = str(position["side"])
         stop, target = float(position["stop_price"]), float(position["target_price"])
@@ -88,6 +119,8 @@ def main() -> None:
     token = os.getenv("MULTI_ASSET_FEED_TOKEN", "")
     interval = max(15, min(300, int(os.getenv("MULTI_ASSET_SCAN_INTERVAL_SECONDS", "60"))))
     ledger = PaperLedger(os.getenv("MULTI_ASSET_LEDGER_PATH", "/app/data/multi_asset.jsonl"))
+    confirmations = ConfirmationLedger(os.getenv(
+        "MULTI_WEEK_CONFIRMATION_PATH", "/app/data/multi_week_confirmations.json"))
     engine = MultiAssetEngine(ledger)
     HealthHandler.ledger = ledger
     server = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), HealthHandler)
@@ -96,6 +129,7 @@ def main() -> None:
         try:
             payload = fetch(feed_url, token)
             snapshots = list(payload.get("snapshots", []))
+            snapshots.extend(discover(payload, confirmations))
             closes = supervise(ledger, snapshots, max(15, int(os.getenv("ASSET_MAX_HOLD_MINUTES", "240"))))
             outcomes = []
             for snapshot in snapshots:

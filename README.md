@@ -264,7 +264,7 @@ paper evidence can never promote or alter live risk automatically.
 ## Legacy paper-only multi-asset engines
 
 `python -m app.asset_worker` consumes normalized, source-linked snapshots and
-runs three independent paper sleeves:
+runs independent paper sleeves, including:
 
 - `FOREX_TREND`: aligned 1h/24h trend, liquid session, spread and economic-event
   distance checks;
@@ -274,6 +274,14 @@ runs three independent paper sleeves:
   legs, minimum open interest, IV context, expiry and whole-contract sizing
   from the verified maximum loss per complete spread (including multiplier and
   estimated fees).
+- `MULTI_WEEK_CRYPTO_MOMENTUM_V1`: chain-neutral 3–12 week trend research.
+  It requires verified full-size sellability, contract/distribution evidence,
+  two confirmations at least 12 hours apart, daily higher highs and lows,
+  positive weekly relative strength, persistent volume, holder growth, and a
+  controlled pullback or consolidation. It opens only a 25% paper stage,
+  records partial profit at 2R, protects larger favorable excursions, and exits
+  on multi-factor trend or execution deterioration. Candidate discovery is
+  universe-driven; example contracts are never treated as a fixed watchlist.
 
 The worker writes an append-only JSONL ledger. It has no broker adapter and
 cannot submit a live forex, equity or option order in this release. This is
@@ -288,6 +296,7 @@ MULTI_ASSET_FEED_URL=https://your-normalized-feed.example/snapshots
 FOREX_ENGINE_ENABLED=true
 EQUITY_ENGINE_ENABLED=true
 OPTION_ENGINE_ENABLED=true
+CRYPTO_ENGINE_ENABLED=true
 MULTI_ASSET_LEDGER_PATH=/app/data/multi_asset.jsonl
 ASSET_MAX_OPEN_POSITIONS=3
 ASSET_MAX_HOLD_MINUTES=240

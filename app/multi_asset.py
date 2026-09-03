@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from .quant import conservative_probability, expected_net_value, multi_horizon_consensus
+from .multi_week_crypto import STRATEGY as MULTI_WEEK_CRYPTO_STRATEGY, evaluate_candidate
 
 UTC = timezone.utc
-SUPPORTED_ASSET_CLASSES = {"FOREX", "EQUITY", "OPTION"}
+SUPPORTED_ASSET_CLASSES = {"FOREX", "EQUITY", "OPTION", "CRYPTO"}
 
 
 def now_utc() -> datetime:
@@ -72,6 +73,11 @@ class Proposal:
     signal_probability: float = 0.0
     horizon_agreement: float = 0.0
     volatility_stop_distance: float = 0.0
+    chain: str = ""
+    contract: str = ""
+    expected_holding_days: float = 0.0
+    entry_stage: int = 1
+    planned_full_quantity: float = 0.0
 
 
 class MultiAssetRejected(ValueError):
@@ -153,6 +159,10 @@ class StrategyEngine:
             signal_probability=round(probability, 6),
             horizon_agreement=round(agreement, 6),
             volatility_stop_distance=round(stop_distance, 10),
+            chain=str(snapshot.get("chain") or ""),
+            contract=str(snapshot.get("contract") or ""),
+            expected_holding_days=float(snapshot.get("expected_holding_days") or 0),
+            planned_full_quantity=quantity,
         )
 
 
@@ -253,6 +263,38 @@ class EquityEngine(StrategyEngine):
         return self.proposal(snapshot, strategy="EQUITY_MOMENTUM", score=score, side="BUY")
 
 
+class MultiWeekCryptoEngine(StrategyEngine):
+    asset_class = "CRYPTO"
+
+    def evaluate(self, snapshot: dict[str, Any]) -> Proposal:
+        failures = self.common_checks(snapshot)
+        normalized = {
+            **snapshot,
+            "sell_impact_bps": snapshot.get("sell_impact_bps", snapshot.get("spread_bps")),
+        }
+        decision = evaluate_candidate(normalized)
+        failures.extend(decision["hard_gate_failures"])
+        stop_fraction = float(snapshot.get("initial_stop_fraction") or 0)
+        if not .05 <= stop_fraction <= .25:
+            failures.append("verified volatility stop must be between 5% and 25%")
+        if failures:
+            raise MultiAssetRejected("; ".join(dict.fromkeys(failures)))
+        prepared = {
+            **snapshot,
+            "stop_distance": float(snapshot["price"]) * stop_fraction,
+            "reward_multiple": max(3.0, float(snapshot.get("reward_multiple") or 3.0)),
+            "expected_holding_days": max(21.0, float(snapshot.get("expected_holding_days") or 21)),
+        }
+        proposal = self.proposal(
+            prepared, strategy=MULTI_WEEK_CRYPTO_STRATEGY,
+            score=float(decision["score"]), side="BUY")
+        return replace(
+            proposal, quantity=proposal.quantity * .25,
+            maximum_loss_usd=proposal.maximum_loss_usd * .25,
+            entry_stage=1,
+        )
+
+
 class DefinedRiskOptionsEngine(StrategyEngine):
     asset_class = "OPTION"
     ALLOWED_STRUCTURES = {"CALL_DEBIT_SPREAD", "PUT_DEBIT_SPREAD"}
@@ -343,6 +385,34 @@ class PaperLedger:
             proposal_id = str(record.get("proposal_id", ""))
             if record.get("type") == "PAPER_FILL":
                 positions[proposal_id] = record
+            elif record.get("type") == "PAPER_ADD" and proposal_id in positions:
+                prior = positions[proposal_id]
+                prior_quantity = float(prior.get("quantity") or 0)
+                added_quantity = float(record.get("added_quantity") or 0)
+                total = prior_quantity + added_quantity
+                positions[proposal_id] = {
+                    **prior,
+                    "quantity": total,
+                    "fill_price": ((float(prior.get("fill_price") or 0) * prior_quantity +
+                                    float(record.get("fill_price") or 0) * added_quantity) /
+                                   max(total, 1e-30)),
+                    "entry_stage": int(record.get("entry_stage") or prior.get("entry_stage") or 1),
+                }
+            elif record.get("type") == "PAPER_MARK" and proposal_id in positions:
+                positions[proposal_id]["peak_executable_price"] = max(
+                    float(positions[proposal_id].get("peak_executable_price") or
+                          positions[proposal_id].get("fill_price") or 0),
+                    float(record.get("mark_price") or 0),
+                )
+            elif record.get("type") == "PAPER_PARTIAL_CLOSE" and proposal_id in positions:
+                positions[proposal_id] = {
+                    **positions[proposal_id],
+                    "quantity": float(record.get("remaining_quantity") or 0),
+                    "took_2r_profit": (positions[proposal_id].get("took_2r_profit") is True or
+                                       record.get("profit_tier") == "2R"),
+                    "took_3r_profit": (positions[proposal_id].get("took_3r_profit") is True or
+                                       record.get("profit_tier") == "3R_GIVEBACK"),
+                }
             elif record.get("type") == "PAPER_CLOSE":
                 positions.pop(proposal_id, None)
         return list(positions.values())
@@ -359,6 +429,26 @@ class PaperLedger:
                             "symbol": position["symbol"], "proposal_id": position["proposal_id"],
                             "mark_price": price, "unrealized_pnl_usd": round(pnl, 8),
                             "price_source": source})
+
+    def add_stage(self, proposal_id: str, price: float, stage: int) -> dict[str, Any]:
+        position = next((item for item in self.positions() if item.get("proposal_id") == proposal_id), None)
+        if not position:
+            raise MultiAssetRejected("paper position is not open")
+        current_stage = int(position.get("entry_stage") or 1)
+        if stage != current_stage + 1 or stage not in {2, 3}:
+            raise MultiAssetRejected("paper add must advance exactly one entry stage")
+        full = float(position.get("planned_full_quantity") or 0)
+        if full <= 0:
+            raise MultiAssetRejected("planned full quantity unavailable")
+        added = full * (.25 if stage == 2 else .50)
+        return self.append({
+            "type": "PAPER_ADD", "mode": "PAPER_ONLY",
+            "asset_class": position["asset_class"], "strategy": position["strategy"],
+            "symbol": position["symbol"], "proposal_id": proposal_id,
+            "fill_price": price, "added_quantity": added, "entry_stage": stage,
+            "reason": ("higher low and renewed volume confirmed" if stage == 2
+                       else "breakout and execution safety reconfirmed"),
+        })
 
     def latest_marks(self) -> dict[str, dict[str, Any]]:
         marks: dict[str, dict[str, Any]] = {}
@@ -421,31 +511,61 @@ class PaperLedger:
                             "quantity": quantity, "reason": reason, "realized_pnl_usd": round(pnl, 8),
                             "price_source": price_source})
 
+    def partial_close(self, proposal_id: str, price: float, fraction: float, reason: str,
+                      *, price_source: str = "CURRENT_EXECUTABLE_MARK") -> dict[str, Any]:
+        position = next((item for item in self.positions() if item.get("proposal_id") == proposal_id), None)
+        if not position:
+            raise MultiAssetRejected("paper position is not open")
+        fraction = max(0.0, min(1.0, float(fraction)))
+        if not 0 < fraction < 1:
+            raise MultiAssetRejected("partial close fraction must be between zero and one")
+        quantity = float(position["quantity"])
+        closed_quantity = quantity * fraction
+        pnl = (price - float(position["fill_price"])) * closed_quantity
+        return self.append({
+            "type": "PAPER_PARTIAL_CLOSE", "mode": "PAPER_ONLY",
+            "asset_class": position["asset_class"], "strategy": position["strategy"],
+            "symbol": position["symbol"], "proposal_id": proposal_id,
+            "entry_price": position["fill_price"], "fill_price": price,
+            "closed_quantity": closed_quantity, "remaining_quantity": quantity - closed_quantity,
+            "fraction": fraction, "reason": reason, "realized_pnl_usd": round(pnl, 8),
+            "profit_tier": ("3R_GIVEBACK" if "3R" in reason else "2R" if "2R" in reason else "OTHER"),
+            "price_source": price_source,
+        })
+
     def report(self) -> dict[str, Any]:
         records = self.records()
         closes = [item for item in records if item.get("type") == "PAPER_CLOSE"]
+        partials = [item for item in records if item.get("type") == "PAPER_PARTIAL_CLOSE"]
         pnls = [float(item.get("realized_pnl_usd") or 0) for item in closes]
+        all_realized = [float(item.get("realized_pnl_usd") or 0) for item in [*closes, *partials]]
         by_strategy: dict[str, dict[str, Any]] = {}
         for item in records:
-            if item.get("type") not in {"PAPER_FILL", "PAPER_CLOSE"}:
+            if item.get("type") not in {"PAPER_FILL", "PAPER_ADD", "PAPER_CLOSE", "PAPER_PARTIAL_CLOSE"}:
                 continue
             strategy = str(item.get("strategy") or "UNKNOWN")
             bucket = by_strategy.setdefault(strategy, {"opened": 0, "closed": 0, "wins": 0,
                                                         "losses": 0, "net_pnl_usd": 0.0})
             if item.get("type") == "PAPER_FILL":
                 bucket["opened"] += 1
-            else:
+            elif item.get("type") == "PAPER_ADD":
+                pass
+            elif item.get("type") == "PAPER_CLOSE":
                 pnl = float(item.get("realized_pnl_usd") or 0)
                 bucket["closed"] += 1
                 bucket["wins" if pnl > 0 else "losses"] += 1
                 bucket["net_pnl_usd"] = round(bucket["net_pnl_usd"] + pnl, 8)
+            elif item.get("type") == "PAPER_PARTIAL_CLOSE":
+                bucket["net_pnl_usd"] = round(
+                    bucket["net_pnl_usd"] + float(item.get("realized_pnl_usd") or 0), 8)
         return {
             "paper_only": True,
             "open_positions": self.position_diagnostics(),
             "closed": len(closes),
             "wins": sum(value > 0 for value in pnls),
             "losses": sum(value <= 0 for value in pnls),
-            "realized_pnl_usd": round(sum(pnls), 8),
+            "realized_pnl_usd": round(sum(all_realized), 8),
+            "partial_profit_actions": len(partials),
             "by_strategy": by_strategy,
             "recent_closes": list(reversed(closes[-25:])),
         }
@@ -459,6 +579,7 @@ class MultiAssetEngine:
             "FOREX": ForexEngine(self.policy),
             "EQUITY": EquityEngine(self.policy),
             "OPTION": DefinedRiskOptionsEngine(self.policy),
+            "CRYPTO": MultiWeekCryptoEngine(self.policy),
         }
 
     def enabled(self, asset_class: str) -> bool:

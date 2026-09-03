@@ -120,6 +120,55 @@ class MultiAssetTests(unittest.TestCase):
             with self.assertRaisesRegex(MultiAssetRejected, "already has an open paper position"):
                 engine.process(snapshot)
 
+    def test_multi_week_crypto_opens_only_first_stage(self):
+        snapshot = {**self.base("CRYPTO", "DURABLE"),
+                    "chain": "base", "contract": "0xabc", "token_age_days": 30,
+                    "liquidity_usd": 2_000_000, "volume_24h_usd": 3_000_000,
+                    "round_trip_recovery": .995, "sell_impact_bps": 40,
+                    "sell_route_ok": True, "security_verified": True,
+                    "top10_holder_fraction": .35, "creator_fraction": .02,
+                    "confirmation_count": 2, "confirmation_span_hours": 24,
+                    "price_above_20d_average": True, "daily_higher_highs": True,
+                    "daily_higher_lows": True, "relative_strength_7d_pct": 12,
+                    "volume_7d_vs_prior_ratio": 1.4, "holder_growth_7d_pct": 8,
+                    "controlled_pullback_or_consolidation": True,
+                    "extension_from_20d_fraction": .08, "initial_stop_fraction": .10,
+                    "expected_holding_days": 21}
+        with patch.dict(os.environ, {"CRYPTO_ENGINE_ENABLED": "true"}):
+            result = MultiAssetEngine(self.ledger, self.policy).process(snapshot)
+        self.assertEqual("MULTI_WEEK_CRYPTO_MOMENTUM_V1", result["strategy"])
+        self.assertEqual(1, result["entry_stage"])
+        self.assertEqual(.625, result["maximum_loss_usd"])
+        self.assertEqual("0xabc", result["contract"])
+
+    def test_partial_close_preserves_residual_position(self):
+        position = self.ledger.append({"type": "PAPER_FILL", "mode": "PAPER_ONLY",
+            "proposal_id": "crypto-1", "asset_class": "CRYPTO",
+            "strategy": "MULTI_WEEK_CRYPTO_MOMENTUM_V1", "symbol": "RUN",
+            "side": "BUY", "fill_price": 1.0, "quantity": 100,
+            "stop_price": .9, "target_price": 1.3, "maximum_loss_usd": 10})
+        event = self.ledger.partial_close(position["proposal_id"], 1.2, .25, "2R")
+        self.assertEqual("PAPER_PARTIAL_CLOSE", event["type"])
+        self.assertEqual(75, self.ledger.positions()[0]["quantity"])
+        self.assertEqual(5, event["realized_pnl_usd"])
+        report = self.ledger.report()
+        self.assertEqual(0, report["closed"])
+        self.assertEqual(1, report["partial_profit_actions"])
+        self.assertEqual(5, report["realized_pnl_usd"])
+
+    def test_multi_week_position_adds_in_order(self):
+        position = self.ledger.append({"type": "PAPER_FILL", "mode": "PAPER_ONLY",
+            "proposal_id": "crypto-stage", "asset_class": "CRYPTO",
+            "strategy": "MULTI_WEEK_CRYPTO_MOMENTUM_V1", "symbol": "RUN",
+            "side": "BUY", "fill_price": 1.0, "quantity": 25,
+            "planned_full_quantity": 100, "entry_stage": 1,
+            "stop_price": .9, "target_price": 1.3, "maximum_loss_usd": 2.5})
+        self.ledger.add_stage(position["proposal_id"], 1.1, 2)
+        self.ledger.add_stage(position["proposal_id"], 1.2, 3)
+        current = self.ledger.positions()[0]
+        self.assertEqual(3, current["entry_stage"])
+        self.assertEqual(100, current["quantity"])
+
     def test_three_distinct_positions_can_collect_evidence_concurrently(self):
         policy = AssetPolicy(minimum_score=75, max_risk_usd=2.5,
                              max_open_positions_per_sleeve=3)
