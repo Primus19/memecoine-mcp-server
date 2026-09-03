@@ -44,7 +44,15 @@ def test_email_content_contains_position_and_paper_warning():
         "open": 1, "closed": 0, "realized_pnl_usd": 0,
         "open_positions": [{"symbol": "RUN", "entry_price": 1, "current_mark_price": 1.2,
                             "current_unrealized_pnl_usd": 2, "mfe_usd": 3, "mae_usd": -1,
-                            "age_minutes": 2880}]}}, {"feed_health": {"status": "READY", "universe_count": 20}}, True)
+                            "age_minutes": 2880}]}}, {
+        "feed_health": {"status": "READY", "universe_count": 20},
+        "emerging_discovery": {"candidate_count": 1, "qualified_count": 0,
+            "candidates": [{"chain": "robinhood", "symbol": "RUN", "score": 55,
+                            "confirmation_count": 1, "security_verified": False,
+                            "failures": ["chain safety adapter unavailable"]}]},
+    }, True)
     assert "RUN" in content["html"]
     assert "PAPER ONLY" in content["html"]
     assert "Universe: 20" in content["text"]
+    assert "emerging tracked: 1" in content["text"]
+    assert "chain safety adapter unavailable" in content["html"]

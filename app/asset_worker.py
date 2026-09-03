@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .multi_asset import MultiAssetEngine, MultiAssetRejected, PaperLedger
-from .multi_week_crypto import STRATEGY as MULTI_WEEK_CRYPTO_STRATEGY, manage_position
+from .multi_week_crypto import (STRATEGY as MULTI_WEEK_CRYPTO_STRATEGY,
+                                evaluate_candidate, manage_position)
 from .multi_week_discovery import ConfirmationLedger, discover
 from .multi_asset_email import MultiWeekCryptoEmailer
 
@@ -137,6 +138,22 @@ def main() -> None:
             payload = fetch(feed_url, token)
             snapshots = list(payload.get("snapshots", []))
             crypto_snapshots = discover(payload, confirmations)
+            emerging_candidates = []
+            for item in crypto_snapshots:
+                if str(item.get("chain") or "") == "coinbase-spot":
+                    continue
+                decision = evaluate_candidate(item)
+                emerging_candidates.append({
+                    "chain": item.get("chain"), "symbol": item.get("symbol"),
+                    "contract": item.get("contract"), "score": decision["score"],
+                    "qualified": decision["qualified"], "liquidity_usd": item.get("liquidity_usd"),
+                    "volume_24h_usd": item.get("volume_24h_usd"),
+                    "confirmation_count": item.get("confirmation_count"),
+                    "security_verified": item.get("security_verified"),
+                    "failures": decision["hard_gate_failures"][:8],
+                    "source_urls": item.get("source_urls") or [],
+                })
+            emerging_candidates.sort(key=lambda item: float(item.get("score") or 0), reverse=True)
             snapshots.extend(crypto_snapshots)
             closes = supervise(ledger, snapshots, max(15, int(os.getenv("ASSET_MAX_HOLD_MINUTES", "240"))))
             outcomes = []
@@ -165,7 +182,10 @@ def main() -> None:
                 feed_health.setdefault("last_error", "crypto universe is empty")
             runtime = {"last_scan": datetime.now(timezone.utc).isoformat(), "last_error": "",
                        "last_outcomes": outcomes[-25:], "last_closes": closes[-25:],
-                       "multi_week_crypto": crypto_bucket, "feed_health": feed_health}
+                       "multi_week_crypto": crypto_bucket, "feed_health": feed_health,
+                       "emerging_discovery": {"candidate_count": len(emerging_candidates),
+                           "qualified_count": sum(bool(item["qualified"]) for item in emerging_candidates),
+                           "candidates": emerging_candidates[:20]}}
             runtime["email_delivery"] = emailer.maybe_send(events, {**report, "multi_week_crypto": crypto_bucket}, runtime)
             HealthHandler.runtime = runtime
             print(json.dumps({"event": "MULTI_ASSET_SCAN", "paper_only": True,

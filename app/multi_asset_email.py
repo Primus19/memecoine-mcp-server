@@ -93,12 +93,14 @@ class MultiWeekCryptoEmailer:
         now = datetime.now(UTC).astimezone(cls._timezone())
         crypto = report.get("multi_week_crypto") or {}
         feed = runtime.get("feed_health") or {}
+        emerging = runtime.get("emerging_discovery") or {}
         if summary:
             subject = f"[PAPER] Multi-Week Crypto Status | {now:%Y-%m-%d %H:%M} ET"
             heading = "FOUR-HOUR STRATEGY STATUS"
             detail = (f"Universe: {feed.get('universe_count', 0)}; open: {crypto.get('open', 0)}; "
                       f"closed: {crypto.get('closed', 0)}; realized P&L: ${float(crypto.get('realized_pnl_usd') or 0):+.4f}; "
-                      f"feed: {feed.get('status', 'UNKNOWN')}.")
+                      f"feed: {feed.get('status', 'UNKNOWN')}; emerging tracked: {emerging.get('candidate_count', 0)}; "
+                      f"emerging qualified: {emerging.get('qualified_count', 0)}.")
         else:
             kind = str((event or {}).get("type") or "ACTION").replace("PAPER_", "")
             symbol = str((event or {}).get("symbol") or "CRYPTO")
@@ -116,12 +118,21 @@ class MultiWeekCryptoEmailer:
                 round(float(p.get("age_minutes") or 0) / 1440, 2))) + "</tr>"
             for p in positions
         ) or "<tr><td colspan='7' style='padding:10px'>No open multi-week positions.</td></tr>"
+        emerging_rows = "".join(
+            "<tr>" + "".join(f"<td style='padding:7px;border-bottom:1px solid #ddd'>{html.escape(str(v))}</td>" for v in (
+                item.get("chain"), item.get("symbol"), item.get("score"), item.get("confirmation_count"),
+                "YES" if item.get("security_verified") else "NO",
+                "; ".join(item.get("failures") or [])[:240])) + "</tr>"
+            for item in (emerging.get("candidates") or [])[:10]
+        ) or "<tr><td colspan='6' style='padding:10px'>No emerging candidates met the discovery floors.</td></tr>"
         body = f"""<!doctype html><html><body style='font-family:Arial;color:#172033;background:#f5f7fb;padding:20px'>
 <div style='max-width:820px;margin:auto;background:white;border-radius:12px;overflow:hidden'>
 <div style='padding:22px;background:#123a63;color:white'><small>MULTI-WEEK CRYPTO — PAPER ONLY</small><h2>{html.escape(heading)}</h2></div>
 <div style='padding:22px'><p>{html.escape(detail)}</p><p><b>Last scan:</b> {html.escape(str(runtime.get('last_scan') or 'not available'))}<br>
 <b>Feed detail:</b> {html.escape(str(feed.get('last_error') or 'none'))}</p>
 <table width='100%' cellspacing='0'><tr style='background:#e8eef5'><th>Coin</th><th>Entry</th><th>Mark</th><th>Open P&amp;L</th><th>MFE</th><th>MAE</th><th>Days</th></tr>{rows}</table>
+<h3>Emerging on-chain research</h3>
+<table width='100%' cellspacing='0'><tr style='background:#e8eef5'><th>Chain</th><th>Coin</th><th>Score</th><th>Confirmations</th><th>Safety</th><th>Why not entered</th></tr>{emerging_rows}</table>
 <p style='color:#64748b;font-size:12px'>Research portfolio only. No live cryptocurrency purchase is authorized by this report.</p></div></div></body></html>"""
         return {"subject": subject, "text": detail, "html": body}
 

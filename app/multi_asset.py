@@ -98,7 +98,8 @@ class StrategyEngine:
             failures.append("symbol missing")
         if float(snapshot.get("price") or 0) <= 0:
             failures.append("price is not positive")
-        if float(snapshot.get("spread_bps") or 9999) > self.policy.max_spread_bps:
+        spread = snapshot.get("spread_bps")
+        if float(9999 if spread is None else spread) > self.policy.max_spread_bps:
             failures.append("spread above policy maximum")
         if snapshot.get("tradable") is not True:
             failures.append("instrument not tradable")

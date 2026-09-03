@@ -23,6 +23,7 @@ class MarketFeedCalendarTests(unittest.TestCase):
                                      [1_700_086_400_000, 1_000_000]]}
         with patch.dict(os.environ, {"MULTI_WEEK_CRYPTO_UNIVERSE_SIZE": "5",
                                     "MULTI_WEEK_CRYPTO_PROVIDERS": "coingecko",
+                                    "EMERGING_CRYPTO_DISCOVERY_ENABLED": "false",
                                     "MULTI_WEEK_CRYPTO_REQUEST_SPACING_SECONDS": "0"}, clear=False), \
              patch("app.market_feed.fetch_json", side_effect=[markets, history]):
             rows, health = crypto_market_universe()

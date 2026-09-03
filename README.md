@@ -281,6 +281,14 @@ fallback. Coinbase candidates use executable ask/bid depth and a configurable,
 fee-stressed round-trip probe. They do not claim unavailable on-chain holder or
 creator evidence. CoinGecko-only candidates remain forward-tracking controls until
 an execution and contract-safety adapter supplies the missing facts.
+
+The same consolidated paper sleeve also discovers emerging Base, Solana and
+Robinhood-chain tokens dynamically from DEX Screener profiles and boosts. It
+retrieves daily pool candles from GeckoTerminal, applies a fee- and AMM-impact
+stressed round trip, and requests GoPlus contract and concentration evidence for
+Base and Solana. Unsupported-chain assets remain visible forward-tracking controls
+and cannot enter, rather than receiving invented safety approval. DEX execution is
+modeled for research only and cannot authorize a live order.
   It requires verified full-size sellability, contract/distribution evidence,
   two confirmations at least 12 hours apart, daily higher highs and lows,
   positive weekly relative strength, persistent volume, holder growth, and a
