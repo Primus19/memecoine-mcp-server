@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .multi_asset import MultiAssetEngine, MultiAssetRejected, PaperLedger
 from .multi_week_crypto import STRATEGY as MULTI_WEEK_CRYPTO_STRATEGY, manage_position
 from .multi_week_discovery import ConfirmationLedger, discover
+from .multi_asset_email import MultiWeekCryptoEmailer
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -20,6 +21,9 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path not in {"/health", "/status", "/report.json"}:
             self.send_error(404); return
+        token = os.getenv("MULTI_ASSET_REPORT_TOKEN", "").strip()
+        if self.path != "/health" and token and self.headers.get("Authorization") != f"Bearer {token}":
+            self.send_error(401); return
         report = self.ledger.report() if self.ledger else {}
         payload = {"ok": True, "service": "multi-asset-paper-worker", "paper_only": True,
                    **self.runtime}
@@ -81,14 +85,14 @@ def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int 
             if (stage == 1 and int(snapshot.get("confirmation_count") or 0) >= 3 and
                     snapshot.get("daily_higher_lows") is True and
                     float(snapshot.get("volume_7d_vs_prior_ratio") or 0) >= 1.10):
-                ledger.add_stage(str(position["proposal_id"]), price, 2)
+                closes.append(ledger.add_stage(str(position["proposal_id"]), price, 2))
                 position = next(item for item in ledger.positions()
                                 if item.get("proposal_id") == position.get("proposal_id"))
                 stage = 2
             if (stage == 2 and snapshot.get("breakout_confirmed") is True and
                     snapshot.get("sell_route_ok") is True and
                     float(snapshot.get("round_trip_recovery") or 0) >= .97):
-                ledger.add_stage(str(position["proposal_id"]), price, 3)
+                closes.append(ledger.add_stage(str(position["proposal_id"]), price, 3))
                 position = next(item for item in ledger.positions()
                                 if item.get("proposal_id") == position.get("proposal_id"))
             management = manage_position(position, {**snapshot, "executable_price": price})
@@ -119,6 +123,8 @@ def main() -> None:
     token = os.getenv("MULTI_ASSET_FEED_TOKEN", "")
     interval = max(15, min(300, int(os.getenv("MULTI_ASSET_SCAN_INTERVAL_SECONDS", "60"))))
     ledger = PaperLedger(os.getenv("MULTI_ASSET_LEDGER_PATH", "/app/data/multi_asset.jsonl"))
+    emailer = MultiWeekCryptoEmailer(os.getenv(
+        "MULTI_WEEK_EMAIL_STATE_PATH", "/app/data/multi_week_email_state.json"))
     confirmations = ConfirmationLedger(os.getenv(
         "MULTI_WEEK_CONFIRMATION_PATH", "/app/data/multi_week_confirmations.json"))
     engine = MultiAssetEngine(ledger)
@@ -129,17 +135,35 @@ def main() -> None:
         try:
             payload = fetch(feed_url, token)
             snapshots = list(payload.get("snapshots", []))
-            snapshots.extend(discover(payload, confirmations))
+            crypto_snapshots = discover(payload, confirmations)
+            snapshots.extend(crypto_snapshots)
             closes = supervise(ledger, snapshots, max(15, int(os.getenv("ASSET_MAX_HOLD_MINUTES", "240"))))
             outcomes = []
+            events = list(closes)
             for snapshot in snapshots:
                 try:
                     result = engine.process(snapshot)
+                    events.append(result)
                     outcomes.append({"symbol": snapshot.get("symbol"), "status": "PAPER_FILL", "event_id": result["event_id"]})
                 except MultiAssetRejected as exc:
                     outcomes.append({"symbol": snapshot.get("symbol"), "status": "REJECTED", "reason": str(exc)})
-            HealthHandler.runtime = {"last_scan": datetime.now(timezone.utc).isoformat(), "last_error": "",
-                                     "last_outcomes": outcomes[-25:], "last_closes": closes[-25:]}
+            report = ledger.report()
+            crypto_bucket = dict((report.get("by_strategy") or {}).get(MULTI_WEEK_CRYPTO_STRATEGY) or {})
+            crypto_positions = [item for item in report.get("open_positions", [])
+                                if item.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY]
+            crypto_events = [item for item in reversed(ledger.records())
+                             if item.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY and
+                             item.get("type") in {"PAPER_FILL", "PAPER_ADD", "PAPER_PARTIAL_CLOSE", "PAPER_CLOSE"}]
+            crypto_bucket.update(open=len(crypto_positions), open_positions=crypto_positions,
+                                 realized_pnl_usd=crypto_bucket.get("net_pnl_usd", 0),
+                                 recent_actions=crypto_events[:25])
+            feed_health = dict(payload.get("crypto_health") or {})
+            feed_health.setdefault("universe_count", len(payload.get("crypto_universe") or []))
+            runtime = {"last_scan": datetime.now(timezone.utc).isoformat(), "last_error": "",
+                       "last_outcomes": outcomes[-25:], "last_closes": closes[-25:],
+                       "multi_week_crypto": crypto_bucket, "feed_health": feed_health}
+            runtime["email_delivery"] = emailer.maybe_send(events, {**report, "multi_week_crypto": crypto_bucket}, runtime)
+            HealthHandler.runtime = runtime
             print(json.dumps({"event": "MULTI_ASSET_SCAN", "paper_only": True,
                               "closes": closes, "outcomes": outcomes}), flush=True)
         except Exception as exc:

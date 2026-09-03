@@ -87,4 +87,4 @@ def test_strategy_action_reporting_is_separate_and_trade_triggered():
     assert "FAILED_MOMENTUM_15M" in SOURCE
     assert "TRAILING_PROFIT" in SOURCE
     assert "Divine V2 forward sample" in SOURCE
-    assert "res.end(reportV3())" in SOURCE
+    assert "res.end(currentPaperReport())" in SOURCE

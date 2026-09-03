@@ -15,7 +15,9 @@ from .broker_adapters import OandaAdapter
 from .quant import average_true_range, ewma_volatility, horizon_return, liquidity_quality, multi_horizon_consensus
 
 LOCK = threading.RLock()
-STATE = {"ok": False, "scanned_at": "", "snapshots": [], "crypto_universe": [], "error": "not scanned"}
+STATE = {"ok": False, "scanned_at": "", "snapshots": [], "crypto_universe": [], "error": "not scanned",
+         "forex_health": {"status": "STARTING"},
+         "crypto_health": {"status": "STARTING", "universe_count": 0, "last_error": ""}}
 SPREAD_HISTORY: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=240))
 CORE_FOREX_SYMBOLS = (
     "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD",
@@ -241,6 +243,9 @@ def main():
     interval = max(30, int(os.getenv("MULTI_ASSET_FEED_INTERVAL_SECONDS", "60")))
     crypto_refresh = max(1800, int(os.getenv("MULTI_WEEK_CRYPTO_REFRESH_SECONDS", "21600")))
     last_crypto_attempt = 0.0
+    last_crypto_attempt_at = ""
+    last_crypto_success_at = ""
+    last_crypto_error = ""
     symbols = configured_symbols()
     while True:
         try:
@@ -250,18 +255,30 @@ def main():
                 crypto = list(STATE.get("crypto_universe", []))
             if time.monotonic() - last_crypto_attempt >= crypto_refresh:
                 last_crypto_attempt = time.monotonic()
+                last_crypto_attempt_at = datetime.now(timezone.utc).isoformat()
                 try:
                     refreshed = crypto_market_universe()
                     if refreshed:
                         crypto = refreshed
+                        last_crypto_success_at = datetime.now(timezone.utc).isoformat()
+                        last_crypto_error = ""
+                    elif os.getenv("MULTI_WEEK_CRYPTO_FEED_ENABLED", "true").lower() == "true":
+                        last_crypto_error = "crypto provider returned an empty universe"
                 except Exception as crypto_exc:
+                    last_crypto_error = f"{type(crypto_exc).__name__}: {str(crypto_exc)[:500]}"
                     print(json.dumps({"event": "MULTI_WEEK_CRYPTO_FEED_WARNING",
                                       "error": type(crypto_exc).__name__,
                                       "detail": str(crypto_exc)[:500],
                                       "retained_universe_count": len(crypto)}), flush=True)
             for item in rejected:
                 print(json.dumps({"event": "FOREX_SYMBOL_REJECTED", **item}), flush=True)
-            with LOCK: STATE.update(ok=True, scanned_at=datetime.now(timezone.utc).isoformat(), snapshots=snapshots, crypto_universe=crypto, error="")
+            crypto_enabled = os.getenv("MULTI_WEEK_CRYPTO_FEED_ENABLED", "true").lower() == "true"
+            crypto_status = "READY" if crypto else ("DEGRADED" if crypto_enabled else "DISABLED")
+            with LOCK: STATE.update(ok=True, scanned_at=datetime.now(timezone.utc).isoformat(), snapshots=snapshots,
+                crypto_universe=crypto, error="", forex_health={"status": "READY", "snapshot_count": len(snapshots)},
+                crypto_health={"status": crypto_status, "universe_count": len(crypto),
+                    "last_attempt_at": last_crypto_attempt_at, "last_success_at": last_crypto_success_at,
+                    "last_error": last_crypto_error, "refresh_interval_seconds": crypto_refresh})
             print(json.dumps({"event": "MULTI_ASSET_FEED_SCAN", "paper_only": True, "snapshot_count": len(snapshots), "crypto_universe_count": len(crypto)}), flush=True)
         except Exception as exc:
             with LOCK: STATE.update(ok=False, error=str(exc)[:500])

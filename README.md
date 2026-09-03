@@ -323,6 +323,14 @@ option order. `MULTI_ASSET_LIVE_ENABLED` defaults to false. A separately
 reviewed execution adapter must add idempotent submission, reconciliation,
 attached protection, and emergency exits before live use.
 
+The paper worker exposes `/report.json` and `/status`; set
+`MULTI_ASSET_REPORT_TOKEN` to require a bearer token on both routes while
+leaving `/health` available to Railway. Multi-week crypto entries, staged
+adds, partial profits and exits generate immediate paper-trade email alerts.
+An additional current-state summary is sent every four hours, including the
+universe/feed state, open positions, MFE/MAE and realized P&L. Delivery is
+restart-safe and its status/error is published as `email_delivery`.
+
 Required Forex feed variables:
 
 ```text
