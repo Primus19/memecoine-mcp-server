@@ -7,22 +7,12 @@
   ],
   "events": [
     {
-      "blackout_after_minutes": 90,
-      "blackout_before_minutes": 60,
-      "currency": "USD",
-      "event": "U.S. International Trade in Goods and Services, July 2026",
-      "impact": "HIGH",
-      "minutes_until": 473,
-      "source_url": "https://www.bea.gov/news/schedule",
-      "time": "2026-09-03T12:30:00+00:00"
-    },
-    {
       "blackout_after_minutes": 60,
       "blackout_before_minutes": 60,
       "currency": "USD",
       "event": "Employment Situation",
       "impact": "HIGH",
-      "minutes_until": 1913,
+      "minutes_until": 1201,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-09-04T12:30:00+00:00"
     },
@@ -32,7 +22,7 @@
       "currency": "EUR",
       "event": "ECB monetary policy decision and press conference",
       "impact": "HIGH",
-      "minutes_until": 10538,
+      "minutes_until": 9826,
       "source_url": "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html",
       "time": "2026-09-10T12:15:00+00:00"
     },
@@ -42,7 +32,7 @@
       "currency": "USD",
       "event": "Producer Price Index",
       "impact": "HIGH",
-      "minutes_until": 10553,
+      "minutes_until": 9841,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-09-10T12:30:00+00:00"
     },
@@ -52,7 +42,7 @@
       "currency": "USD",
       "event": "Consumer Price Index",
       "impact": "HIGH",
-      "minutes_until": 11993,
+      "minutes_until": 11281,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-09-11T12:30:00+00:00"
     },
@@ -62,7 +52,7 @@
       "currency": "USD",
       "event": "FOMC monetary policy decision",
       "impact": "HIGH",
-      "minutes_until": 19523,
+      "minutes_until": 18811,
       "source_url": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
       "time": "2026-09-16T18:00:00+00:00"
     },
@@ -72,7 +62,7 @@
       "currency": "JPY",
       "event": "Bank of Japan monetary policy decision window",
       "impact": "HIGH",
-      "minutes_until": 20063,
+      "minutes_until": 19351,
       "source_url": "https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm",
       "time": "2026-09-17T03:00:00+00:00"
     },
@@ -82,7 +72,7 @@
       "currency": "GBP",
       "event": "Bank of England MPC decision",
       "impact": "HIGH",
-      "minutes_until": 20543,
+      "minutes_until": 19831,
       "source_url": "https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates",
       "time": "2026-09-17T11:00:00+00:00"
     },
@@ -92,7 +82,7 @@
       "currency": "USD",
       "event": "GDP (Third Estimate), Industries, Corporate Profits, State GDP, and State Personal Income, 2nd Quarter 2026; State PCE, 2025",
       "impact": "HIGH",
-      "minutes_until": 39353,
+      "minutes_until": 38641,
       "source_url": "https://www.bea.gov/news/schedule",
       "time": "2026-09-30T12:30:00+00:00"
     },
@@ -102,7 +92,7 @@
       "currency": "USD",
       "event": "Personal Income and Outlays, August 2026",
       "impact": "HIGH",
-      "minutes_until": 39353,
+      "minutes_until": 38641,
       "source_url": "https://www.bea.gov/news/schedule",
       "time": "2026-09-30T12:30:00+00:00"
     },
@@ -112,14 +102,14 @@
       "currency": "USD",
       "event": "Employment Situation",
       "impact": "HIGH",
-      "minutes_until": 42233,
+      "minutes_until": 41521,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-10-02T12:30:00+00:00"
     }
   ],
-  "observed_at": "2026-09-03T04:37:29.063527+00:00",
+  "observed_at": "2026-09-03T16:29:00.494799+00:00",
   "provider": "official_composite",
-  "snapshot_generated_at": "2026-09-03T04:37:31.200468+00:00",
+  "snapshot_generated_at": "2026-09-03T16:29:03.445243+00:00",
   "source_url": "https://fred.stlouisfed.org/releases/calendar",
   "sources": [
     {
@@ -145,7 +135,7 @@
     },
     {
       "currency": "USD",
-      "event_count": 13,
+      "event_count": 12,
       "name": "bureau_economic_analysis",
       "ok": true,
       "url": "https://www.bea.gov/news/schedule"
