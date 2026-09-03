@@ -110,6 +110,11 @@ def coinbase_crypto_market_universe() -> list[dict]:
     fee_bps = max(0.0, float(os.getenv("MULTI_WEEK_MODELED_FEE_BPS_PER_SIDE", "60")))
     excluded = {item.strip().upper() for item in os.getenv(
         "MULTI_WEEK_CRYPTO_EXCLUDED_BASES", "USDT,USDC,DAI,PYUSD,EURC").split(",") if item.strip()}
+    priority = [item.strip().upper() for item in os.getenv(
+        "MULTI_WEEK_CRYPTO_PRIORITY_BASES",
+        "BTC,ETH,SOL,XRP,DOGE,ADA,AVAX,LINK,LTC,BCH,DOT,UNI,NEAR,APT,ARB,OP,SUI,INJ,FET,AAVE"
+    ).split(",") if item.strip()]
+    priority_rank = {symbol: index for index, symbol in enumerate(priority)}
     products = fetch_json(f"{base}/products")
     if not isinstance(products, list):
         return []
@@ -121,11 +126,19 @@ def coinbase_crypto_market_universe() -> list[dict]:
         if (product_id and quote_currency in {"USD", "USDC"} and base_currency not in excluded and
                 product.get("status") == "online" and product.get("trading_disabled") is not True and
                 product.get("cancel_only") is not True and product.get("post_only") is not True):
-            eligible.append((float(product.get("volume_24h") or 0), product_id, base_currency))
-    eligible.sort(reverse=True)
+            # /products does not publish comparable 24-hour volume. Prefer a
+            # configurable established-liquidity seed, then deterministically
+            # include the rest of the live venue universe for discovery.
+            eligible.append((priority_rank.get(base_currency, len(priority)),
+                             0 if quote_currency == "USD" else 1, product_id, base_currency))
+    eligible.sort()
     result, now = [], datetime.now(timezone.utc)
     spacing = max(0.0, float(os.getenv("MULTI_WEEK_CRYPTO_REQUEST_SPACING_SECONDS", "0.15")))
-    for _, product_id, symbol in eligible[:limit * 2]:
+    seen_bases = set()
+    for _, _, product_id, symbol in eligible:
+        if symbol in seen_bases:
+            continue
+        seen_bases.add(symbol)
         try:
             candles = _coinbase_candles(base, product_id)
             book = fetch_json(f"{base}/products/{urllib.parse.quote(product_id)}/book?level=2")

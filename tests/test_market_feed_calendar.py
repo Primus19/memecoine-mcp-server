@@ -41,7 +41,7 @@ class MarketFeedCalendarTests(unittest.TestCase):
 
     def test_coinbase_universe_has_execution_evidence_without_claiming_contract_safety(self):
         products = [{"id": "BTC-USD", "base_currency": "BTC", "quote_currency": "USD",
-                     "status": "online", "volume_24h": "1000"}]
+                     "status": "online"}]
         candles = [[1_700_000_000 + day * 86400, 90 + day, 101 + day,
                     95 + day, 100 + day, 1000] for day in range(30)]
         book = {"asks": [["130.1", "10"]], "bids": [["130", "10"]]}
