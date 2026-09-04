@@ -152,6 +152,7 @@ def main() -> None:
                 emerging_candidates.append({
                     "chain": item.get("chain"), "symbol": item.get("symbol"),
                     "contract": item.get("contract"), "score": decision["score"],
+                    "research_score": decision.get("research_score"),
                     "qualified": decision["qualified"], "liquidity_usd": item.get("liquidity_usd"),
                     "volume_24h_usd": item.get("volume_24h_usd"),
                     "confirmation_count": item.get("confirmation_count"),
@@ -159,7 +160,9 @@ def main() -> None:
                     "failures": decision["hard_gate_failures"][:8],
                     "source_urls": item.get("source_urls") or [],
                 })
-            emerging_candidates.sort(key=lambda item: float(item.get("score") or 0), reverse=True)
+            emerging_candidates.sort(key=lambda item: float(item.get("research_score") or 0), reverse=True)
+            crypto_snapshots.sort(
+                key=lambda item: float(evaluate_candidate(item).get("research_score") or 0), reverse=True)
             snapshots.extend(crypto_snapshots)
             closes = supervise(ledger, snapshots, max(15, int(os.getenv("ASSET_MAX_HOLD_MINUTES", "240"))))
             outcomes = []

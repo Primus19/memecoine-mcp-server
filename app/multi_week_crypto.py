@@ -8,6 +8,7 @@ selected because of a single five-minute candle.
 """
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 
@@ -153,6 +154,14 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
     )
     research_failures.extend(message for failed, message in research_checks if failed)
     research_eligible = not research_failures
+    size_headroom = 0.0 if market_cap <= 0 else max(0.0, min(
+        1.0, 1.0 - ((market_cap - policy.minimum_research_market_cap_usd) /
+                    (policy.maximum_research_market_cap_usd - policy.minimum_research_market_cap_usd))))
+    research_score = min(100.0,
+        40.0 * max(0.0, min(1.0, (recovery - policy.minimum_round_trip_recovery) / .03)) +
+        20.0 * max(0.0, min(1.0, liquidity / 1_000_000.0)) +
+        20.0 * max(0.0, min(1.0, volume / 2_000_000.0)) +
+        20.0 * size_headroom)
     if candidate.get("catalyst_verified") is not True:
         warnings.append("no verified catalyst; trend evidence must stand on its own")
 
@@ -163,6 +172,7 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
         "qualified": qualified,
         "research_eligible": research_eligible,
         "research_failures": research_failures,
+        "research_score": round(research_score, 2),
         "decision": ("PAPER_STAGE_1" if qualified else
                      "RESEARCH_PAPER_HOLD" if research_eligible else "FORWARD_TRACK"),
         "cohort": "QUALIFIED" if qualified else RESEARCH_COHORT if research_eligible else "TRACK_ONLY",

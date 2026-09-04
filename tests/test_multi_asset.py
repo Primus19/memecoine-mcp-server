@@ -156,6 +156,8 @@ class MultiAssetTests(unittest.TestCase):
         self.assertTrue(result["research_only"])
         self.assertEqual("EMERGING_FORWARD_PAPER_HOLD", result["research_cohort"])
         self.assertEqual(1.01, result["fill_price"])
+        self.assertAlmostEqual(50.0, result["fill_price"] * result["quantity"], places=4)
+        self.assertAlmostEqual(6.0, result["maximum_loss_usd"], places=4)
 
     def test_partial_close_preserves_residual_position(self):
         position = self.ledger.append({"type": "PAPER_FILL", "mode": "PAPER_ONLY",

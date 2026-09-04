@@ -294,7 +294,16 @@ class MultiWeekCryptoEngine(StrategyEngine):
         }
         proposal = self.proposal(
             prepared, strategy=MULTI_WEEK_CRYPTO_STRATEGY,
-            score=float(decision["score"]), side="BUY")
+            score=float(decision["research_score"] if research_only else decision["score"]), side="BUY")
+        if research_only:
+            budget = max(100.0, float(os.getenv("MULTI_WEEK_PAPER_BUDGET_USD", "1000")))
+            allocation = budget * min(.10, max(.01, float(os.getenv(
+                "MULTI_WEEK_RESEARCH_ALLOCATION_FRACTION", ".05"))))
+            proposal = replace(proposal, quantity=allocation / proposal.reference_price,
+                               maximum_loss_usd=allocation * stop_fraction)
+            return replace(proposal, entry_stage=1, research_only=True,
+                           research_cohort=str(decision.get("cohort") or ""),
+                           qualification_failures=tuple(decision["hard_gate_failures"]))
         return replace(
             proposal, quantity=proposal.quantity * .25,
             maximum_loss_usd=proposal.maximum_loss_usd * .25,
@@ -484,6 +493,12 @@ class PaperLedger:
                               if item.get("type") == "PAPER_MARK" and
                               str(item.get("proposal_id") or "") == proposal_id]
             pnls = [float(item.get("unrealized_pnl_usd") or 0) for item in position_marks]
+            entry_price = float(position.get("fill_price") or 0)
+            quantity = float(position.get("quantity") or 0)
+            entry_value = entry_price * quantity
+            mark_price = mark.get("mark_price")
+            current_value = float(mark_price) * quantity if mark_price is not None else None
+            current_pnl = mark.get("unrealized_pnl_usd")
             diagnostics.append({
                 "proposal_id": proposal_id,
                 "asset_class": position.get("asset_class"),
@@ -499,6 +514,10 @@ class PaperLedger:
                 "age_minutes": round(age_minutes, 2) if age_minutes is not None else None,
                 "current_mark_price": mark.get("mark_price"),
                 "current_unrealized_pnl_usd": mark.get("unrealized_pnl_usd"),
+                "entry_value_usd": round(entry_value, 4),
+                "current_value_usd": round(current_value, 4) if current_value is not None else None,
+                "return_pct": round(float(current_pnl) / entry_value * 100, 3)
+                              if current_pnl is not None and entry_value > 0 else None,
                 "last_mark_at": mark.get("recorded_at"),
                 "mfe_usd": round(max([0.0, *pnls]), 8),
                 "mae_usd": round(min([0.0, *pnls]), 8),
@@ -611,7 +630,18 @@ class MultiAssetEngine:
         open_count = self.ledger.open_positions(asset_class)
         capacity = self.policy.max_open_positions_per_sleeve
         if asset_class == "CRYPTO" and proposal.research_only:
-            capacity = max(capacity, int(os.getenv("MULTI_WEEK_RESEARCH_MAX_OPEN_POSITIONS", "10")))
+            capacity = max(1, int(os.getenv("MULTI_WEEK_RESEARCH_MAX_OPEN_POSITIONS", "3")))
+            budget = max(100.0, float(os.getenv("MULTI_WEEK_PAPER_BUDGET_USD", "1000")))
+            exposure_cap = budget * min(.50, max(.05, float(os.getenv(
+                "MULTI_WEEK_MAX_EXPOSURE_FRACTION", ".15"))))
+            open_exposure = sum(float(item.get("entry_value_usd") or 0)
+                                for item in self.ledger.position_diagnostics()
+                                if item.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY)
+            proposed_exposure = proposal.reference_price * proposal.quantity
+            if open_exposure + proposed_exposure > exposure_cap + .01:
+                raise MultiAssetRejected(
+                    f"research budget cap: ${open_exposure:.2f} open + ${proposed_exposure:.2f} proposed "
+                    f"exceeds ${exposure_cap:.2f}")
         if open_count >= capacity:
             blockers = ", ".join(str(item.get("symbol") or "UNKNOWN")
                                  for item in self.ledger.position_diagnostics()

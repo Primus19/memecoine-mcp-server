@@ -106,34 +106,56 @@ class MultiWeekCryptoEmailer:
             symbol = str((event or {}).get("symbol") or "CRYPTO")
             subject = f"[PAPER TRADE] Multi-Week Crypto {kind} | {symbol} | {now:%Y-%m-%d %H:%M} ET"
             heading = f"NEW {kind}: {symbol}"
-            detail = (f"Strategy: {STRATEGY}; price: {(event or {}).get('fill_price') or (event or {}).get('mark_price')}; "
-                      f"quantity: {(event or {}).get('quantity') or (event or {}).get('added_quantity') or (event or {}).get('closed_quantity')}; "
-                      f"reason: {(event or {}).get('reason') or (event or {}).get('thesis')}; "
+            event_price = (event or {}).get("fill_price") or (event or {}).get("mark_price")
+            event_quantity = ((event or {}).get("quantity") or (event or {}).get("added_quantity") or
+                              (event or {}).get("closed_quantity"))
+            detail = (f"Strategy: {STRATEGY}; cohort: {(event or {}).get('research_cohort') or 'QUALIFIED'}; "
+                      f"price: {float(event_price):.8g}; quantity: {float(event_quantity):.6g}; "
+                      f"reason: {(event or {}).get('reason') or (event or {}).get('thesis') or 'ranked research entry'}; "
                       f"realized P&L: ${float((event or {}).get('realized_pnl_usd') or 0):+.4f}.")
         positions = crypto.get("open_positions") or []
+        budget = max(100.0, float(os.getenv("MULTI_WEEK_PAPER_BUDGET_USD", "1000")))
+        exposure = sum(float(p.get("entry_value_usd") or 0) for p in positions)
+        open_pnl = sum(float(p.get("current_unrealized_pnl_usd") or 0) for p in positions)
+        portfolio_return = open_pnl / exposure * 100 if exposure else 0.0
+
+        def money(value):
+            return "Pending" if value is None else f"${float(value):,.2f}"
+
+        def price(value):
+            if value is None:
+                return "Pending"
+            number = float(value)
+            return f"{number:.8f}" if number < 1 else f"{number:,.4f}"
+
         rows = "".join(
-            "<tr>" + "".join(f"<td style='padding:7px;border-bottom:1px solid #ddd'>{html.escape(str(v))}</td>" for v in (
+            f"<tr style='background:{'#ecfdf5' if float(p.get('current_unrealized_pnl_usd') or 0) > 0 else '#fff7ed' if p.get('current_unrealized_pnl_usd') is not None else '#f8fafc'}'>" +
+            "".join(f"<td style='padding:9px 7px;border-bottom:1px solid #e2e8f0;white-space:nowrap'>{html.escape(str(v))}</td>" for v in (
                 (f"{p.get('symbol')} (RESEARCH)" if p.get("research_only") else p.get("symbol")),
-                p.get("entry_price"), p.get("current_mark_price"),
-                p.get("current_unrealized_pnl_usd"), p.get("mfe_usd"), p.get("mae_usd"),
+                money(p.get("entry_value_usd")), price(p.get("entry_price")), price(p.get("current_mark_price")),
+                money(p.get("current_value_usd")), money(p.get("current_unrealized_pnl_usd")),
+                "Pending" if p.get("return_pct") is None else f"{float(p.get('return_pct')):+.2f}%",
                 round(float(p.get("age_minutes") or 0) / 1440, 2))) + "</tr>"
             for p in positions
-        ) or "<tr><td colspan='7' style='padding:10px'>No open multi-week positions.</td></tr>"
+        ) or "<tr><td colspan='8' style='padding:14px'>No open multi-week positions.</td></tr>"
         emerging_rows = "".join(
             "<tr>" + "".join(f"<td style='padding:7px;border-bottom:1px solid #ddd'>{html.escape(str(v))}</td>" for v in (
-                item.get("chain"), item.get("symbol"), item.get("score"), item.get("confirmation_count"),
+                item.get("chain"), item.get("symbol"), item.get("research_score"), item.get("confirmation_count"),
                 "YES" if item.get("security_verified") else "NO",
                 "; ".join(item.get("failures") or [])[:240])) + "</tr>"
-            for item in (emerging.get("candidates") or [])[:10]
+            for item in (emerging.get("candidates") or [])[:3]
         ) or "<tr><td colspan='6' style='padding:10px'>No emerging candidates met the discovery floors.</td></tr>"
-        body = f"""<!doctype html><html><body style='font-family:Arial;color:#172033;background:#f5f7fb;padding:20px'>
-<div style='max-width:820px;margin:auto;background:white;border-radius:12px;overflow:hidden'>
-<div style='padding:22px;background:#123a63;color:white'><small>MULTI-WEEK CRYPTO — PAPER ONLY</small><h2>{html.escape(heading)}</h2></div>
-<div style='padding:22px'><p>{html.escape(detail)}</p><p><b>Last scan:</b> {html.escape(str(runtime.get('last_scan') or 'not available'))}<br>
-<b>Feed detail:</b> {html.escape(str(feed.get('last_error') or 'none'))}</p>
-<table width='100%' cellspacing='0'><tr style='background:#e8eef5'><th>Coin</th><th>Entry</th><th>Mark</th><th>Open P&amp;L</th><th>MFE</th><th>MAE</th><th>Days</th></tr>{rows}</table>
-<h3>Emerging on-chain research</h3>
-<table width='100%' cellspacing='0'><tr style='background:#e8eef5'><th>Chain</th><th>Coin</th><th>Score</th><th>Confirmations</th><th>Safety</th><th>Qualification gaps</th></tr>{emerging_rows}</table>
+        body = f"""<!doctype html><html><body style='font-family:Arial;color:#172033;background:#f1f5f9;padding:16px;margin:0'>
+<div style='max-width:760px;margin:auto;background:white;border-radius:14px;overflow:hidden;box-shadow:0 8px 24px #cbd5e1'>
+<div style='padding:22px;background:#0f5b62;color:white'><small>MULTI-WEEK CRYPTO - PAPER ONLY</small><h2 style='margin:8px 0 0'>{html.escape(heading)}</h2></div>
+<div style='padding:20px'><div style='display:flex;gap:8px;flex-wrap:wrap'>
+<span style='background:#e0f2fe;padding:8px 12px;border-radius:18px'>Budget <b>${budget:,.0f}</b></span>
+<span style='background:#ede9fe;padding:8px 12px;border-radius:18px'>Exposure <b>${exposure:,.2f} ({exposure/budget*100:.1f}%)</b></span>
+<span style='background:{'#dcfce7' if open_pnl >= 0 else '#fee2e2'};padding:8px 12px;border-radius:18px'>Open P&amp;L <b>${open_pnl:+.2f} ({portfolio_return:+.2f}%)</b></span></div>
+<p style='color:#475569'>{html.escape(detail)}</p><p style='font-size:12px;color:#64748b'><b>Last scan:</b> {html.escape(str(runtime.get('last_scan') or 'not available'))} | <b>Feed:</b> {html.escape(str(feed.get('status') or 'UNKNOWN'))}</p>
+<div style='overflow-x:auto'><table width='100%' cellspacing='0' style='font-size:13px'><tr style='background:#dbeafe'><th>Coin</th><th>Invested</th><th>Entry</th><th>Mark</th><th>Value</th><th>P&amp;L</th><th>Return</th><th>Days</th></tr>{rows}</table></div>
+<h3 style='color:#0f5b62'>Top 3 emerging candidates</h3>
+<div style='overflow-x:auto'><table width='100%' cellspacing='0' style='font-size:12px'><tr style='background:#e2e8f0'><th>Chain</th><th>Coin</th><th>Research score</th><th>Checks</th><th>Safety</th><th>Qualification gaps</th></tr>{emerging_rows}</table></div>
 <p style='color:#64748b;font-size:12px'>Research portfolio only. No live cryptocurrency purchase is authorized by this report.</p></div></div></body></html>"""
         return {"subject": subject, "text": detail, "html": body}
 
