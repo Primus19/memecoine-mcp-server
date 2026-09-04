@@ -60,7 +60,7 @@ def test_requires_temporal_confirmation_not_repeated_same_scan():
     assert "requires two confirmations at least 12 hours apart" in result["hard_gate_failures"]
 
 
-def test_executable_emerging_candidate_enters_research_cohort_before_full_history():
+def test_single_observation_emerging_candidate_is_tracked_without_spending_budget():
     result = evaluate_candidate(candidate(
         security_verified=False, top10_holder_fraction=None, creator_fraction=None,
         confirmation_count=1, confirmation_span_hours=0,
@@ -69,8 +69,38 @@ def test_executable_emerging_candidate_enters_research_cohort_before_full_histor
         holder_growth_7d_pct=0, controlled_pullback_or_consolidation=False,
     ))
     assert result["qualified"] is False
+    assert result["research_eligible"] is False
+    assert result["decision"] == "FORWARD_TRACK"
+    assert "research hold requires two independent observations at least 12 hours apart" in result["research_failures"]
+
+
+def test_confirmed_non_chased_emerging_candidate_can_enter_research_cohort():
+    result = evaluate_candidate(candidate(
+        security_verified=False, top10_holder_fraction=None, creator_fraction=None,
+        confirmation_count=2, confirmation_span_hours=13,
+        confirmation_return_pct=8, confirmation_drawdown_pct=-4,
+        price_above_20d_average=False, daily_higher_highs=False, daily_higher_lows=False,
+        relative_strength_7d_pct=0, volume_7d_vs_prior_ratio=0,
+        holder_growth_7d_pct=0, controlled_pullback_or_consolidation=False,
+    ))
+    assert result["qualified"] is False
     assert result["research_eligible"] is True
     assert result["decision"] == "RESEARCH_PAPER_HOLD"
+
+
+def test_confirmed_emerging_candidate_rejects_collapse_or_late_chase():
+    collapsed = evaluate_candidate(candidate(
+        security_verified=False, top10_holder_fraction=None, creator_fraction=None,
+        confirmation_return_pct=-12, confirmation_drawdown_pct=-15,
+    ))
+    chased = evaluate_candidate(candidate(
+        security_verified=False, top10_holder_fraction=None, creator_fraction=None,
+        confirmation_return_pct=80, confirmation_drawdown_pct=-5,
+    ))
+    assert collapsed["research_eligible"] is False
+    assert "candidate deteriorated more than 5% during confirmation" in collapsed["research_failures"]
+    assert chased["research_eligible"] is False
+    assert "candidate rose more than 50% during confirmation; late-chase risk" in chased["research_failures"]
 
 
 def test_established_cex_asset_does_not_consume_emerging_research_capacity():
@@ -111,6 +141,32 @@ def test_profit_manager_takes_partial_at_two_r():
     )
     assert result["action"] == "TAKE_PROFIT"
     assert result["fraction"] == .20
+    assert result["profit_tier"] == "2R"
+
+
+def test_profit_manager_stop_dominates_an_uncaptured_historical_profit_peak():
+    result = manage_position(
+        {"entry_price": 100, "initial_stop_price": 90, "peak_executable_price": 125},
+        {"executable_price": 88, "sell_route_ok": True, "round_trip_recovery": .99,
+         "security_verified": True, "price_above_20d_average": True,
+         "daily_higher_lows": True, "relative_strength_7d_pct": 5,
+         "volume_7d_vs_prior_ratio": 1.1},
+    )
+    assert result["action"] == "EXIT"
+    assert result["reason"] == "initial risk stop reached"
+    assert result["profit_tier"] == ""
+
+
+def test_profit_manager_does_not_fill_a_tier_from_peak_when_current_quote_is_below_it():
+    result = manage_position(
+        {"entry_price": 100, "initial_stop_price": 90, "peak_executable_price": 125},
+        {"executable_price": 115, "sell_route_ok": True, "round_trip_recovery": .99,
+         "security_verified": True, "price_above_20d_average": True,
+         "daily_higher_lows": True, "relative_strength_7d_pct": 5,
+         "volume_7d_vs_prior_ratio": 1.1},
+    )
+    assert result["action"] == "HOLD"
+    assert result["profit_tier"] == ""
 
 
 def test_profit_manager_exits_on_multi_factor_deterioration():

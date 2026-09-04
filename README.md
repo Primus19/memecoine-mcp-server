@@ -288,7 +288,10 @@ retrieves daily pool candles from GeckoTerminal, applies a fee- and AMM-impact
 stressed round trip, and requests GoPlus contract and concentration evidence for
 Base and Solana. Unsupported-chain assets remain visible forward-tracking controls
 and cannot enter, rather than receiving invented safety approval. DEX execution is
-modeled for research only and cannot authorize a live order.
+modeled for research only and cannot authorize a live order. Emerging research
+holds also require two independent observations at least 12 hours apart. A coin
+that falls more than 5%, draws down more than 20%, or rises more than 50% during
+that confirmation window remains tracked but does not consume paper budget.
   It requires verified full-size sellability, contract/distribution evidence,
   two confirmations at least 12 hours apart, daily higher highs and lows,
   positive weekly relative strength, persistent volume, holder growth, and a
@@ -344,6 +347,14 @@ adds, partial profits and exits generate immediate paper-trade email alerts.
 An additional current-state summary is sent every four hours, including the
 universe/feed state, open positions, MFE/MAE and realized P&L. Delivery is
 restart-safe and its status/error is published as `email_delivery`.
+
+The central trading dashboard reads this report through
+`DASHBOARD_MULTI_ASSET_URLS` and displays the multi-week ledger as a first-class
+paper portfolio: invested/current USD, unrealized USD and percentage P&L,
+MFE/MAE, monitoring freshness, stop state and recent actions. Multi-week risk
+decisions use current executable marks. Hard exits and initial stops take
+precedence over partial-profit tiers; an uncaptured historical peak is recorded
+as missed profit and can never be presented as an executable profit fill.
 
 Required Forex feed variables:
 

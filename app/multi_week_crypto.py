@@ -65,6 +65,8 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
     creator = candidate.get("creator_fraction")
     confirmations = int(_number(candidate.get("confirmation_count")))
     confirmation_span = _number(candidate.get("confirmation_span_hours"))
+    confirmation_return = candidate.get("confirmation_return_pct")
+    confirmation_drawdown = candidate.get("confirmation_drawdown_pct")
 
     cex_mode = candidate.get("execution_evidence_mode") == "CEX_ORDER_BOOK"
     hard_checks = (
@@ -151,17 +153,32 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
          "volume is too weak relative to market cap"),
         (recovery < policy.minimum_round_trip_recovery, "round-trip recovery below minimum"),
         (impact > policy.maximum_sell_impact_bps, "sell impact above maximum"),
+        (confirmations < policy.minimum_confirmations or
+         confirmation_span < policy.minimum_confirmation_span_hours,
+         "research hold requires two independent observations at least 12 hours apart"),
+        (confirmation_return is None, "research persistence return unavailable"),
+        (confirmation_return is not None and _number(confirmation_return) < -5,
+         "candidate deteriorated more than 5% during confirmation"),
+        (confirmation_return is not None and _number(confirmation_return) > 50,
+         "candidate rose more than 50% during confirmation; late-chase risk"),
+        (confirmation_drawdown is not None and _number(confirmation_drawdown) < -20,
+         "candidate confirmation path drawdown exceeds 20%"),
     )
     research_failures.extend(message for failed, message in research_checks if failed)
     research_eligible = not research_failures
     size_headroom = 0.0 if market_cap <= 0 else max(0.0, min(
         1.0, 1.0 - ((market_cap - policy.minimum_research_market_cap_usd) /
                     (policy.maximum_research_market_cap_usd - policy.minimum_research_market_cap_usd))))
+    persistence_score = 0.0
+    if confirmations >= policy.minimum_confirmations and confirmation_span >= policy.minimum_confirmation_span_hours:
+        persistence_score += 10
+    if confirmation_return is not None and 0 <= _number(confirmation_return) <= 30:
+        persistence_score += 10
     research_score = min(100.0,
-        40.0 * max(0.0, min(1.0, (recovery - policy.minimum_round_trip_recovery) / .03)) +
-        20.0 * max(0.0, min(1.0, liquidity / 1_000_000.0)) +
-        20.0 * max(0.0, min(1.0, volume / 2_000_000.0)) +
-        20.0 * size_headroom)
+        35.0 * max(0.0, min(1.0, (recovery - policy.minimum_round_trip_recovery) / .03)) +
+        15.0 * max(0.0, min(1.0, liquidity / 1_000_000.0)) +
+        15.0 * max(0.0, min(1.0, volume / 2_000_000.0)) +
+        15.0 * size_headroom + persistence_score)
     if candidate.get("catalyst_verified") is not True:
         warnings.append("no verified catalyst; trend evidence must stand on its own")
 
@@ -231,22 +248,31 @@ def manage_position(position: dict[str, Any], market: dict[str, Any]) -> dict[st
         _number(market.get("volume_7d_vs_prior_ratio")) < 0.8,
     )) >= 3
 
+    profit_tier = ""
     if hard_exit:
         action, fraction, reason = "EXIT", 1.0, "execution, safety, or asymmetry gate failed"
     elif trend_break:
         action, fraction, reason = "EXIT", 1.0, "multi-factor trend deterioration"
-    elif peak_r >= 10 and not position.get("took_10r_profit"):
-        action, fraction, reason = "TAKE_PROFIT", 0.20, "10R moonshot profit tier"
-    elif peak_r >= 5 and not position.get("took_5r_profit"):
-        action, fraction, reason = "TAKE_PROFIT", 0.20, "5R runner profit tier"
-    elif peak_r >= 2 and not position.get("took_2r_profit"):
-        action, fraction, reason = "TAKE_PROFIT", 0.20, "first 2R profit tier"
+    # Risk exits dominate historical profit observations. A delayed monitor
+    # must never call a below-stop quote a profit-taking opportunity merely
+    # because the position touched a tier earlier.
+    elif price <= stop:
+        action, fraction, reason = "EXIT", 1.0, "initial risk stop reached"
     elif peak_r >= 5 and giveback >= 0.35:
         action, fraction, reason = "EXIT", 1.0, "runner surrendered 35% of favorable excursion"
     elif peak_r >= 1 and r_multiple <= 0.10:
         action, fraction, reason = "EXIT", 1.0, "1R winner returned to cost-aware breakeven"
-    elif price <= stop:
-        action, fraction, reason = "EXIT", 1.0, "initial risk stop reached"
+    # Partial tiers require the current executable mark to remain at the tier;
+    # an uncaptured historical peak is missed profit, not an executable fill.
+    elif r_multiple >= 10 and not position.get("took_10r_profit"):
+        action, fraction, reason, profit_tier = (
+            "TAKE_PROFIT", 0.20, "10R moonshot profit tier", "10R")
+    elif r_multiple >= 5 and not position.get("took_5r_profit"):
+        action, fraction, reason, profit_tier = (
+            "TAKE_PROFIT", 0.20, "5R runner profit tier", "5R")
+    elif r_multiple >= 2 and not position.get("took_2r_profit"):
+        action, fraction, reason, profit_tier = (
+            "TAKE_PROFIT", 0.20, "first 2R profit tier", "2R")
     else:
         action, fraction, reason = "HOLD", 0.0, "trend and executable liquidity remain intact"
 
@@ -254,6 +280,7 @@ def manage_position(position: dict[str, Any], market: dict[str, Any]) -> dict[st
         "action": action,
         "fraction": fraction,
         "reason": reason,
+        "profit_tier": profit_tier,
         "r_multiple": round(r_multiple, 4),
         "peak_r_multiple": round(peak_r, 4),
         "profit_giveback_fraction": round(max(0.0, giveback), 4),

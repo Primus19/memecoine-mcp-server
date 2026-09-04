@@ -35,16 +35,20 @@ class ConfirmationLedger:
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
-    def observe(self, identity: str, observed_at: str, preliminary_pass: bool) -> dict[str, Any]:
+    def observe(self, identity: str, observed_at: str, preliminary_pass: bool,
+                price: float = 0.0) -> dict[str, Any]:
         values = self._read()
         if not preliminary_pass:
             values.pop(identity, None)
             self._write(values)
-            return {"confirmation_count": 0, "confirmation_span_hours": 0.0}
+            return {"confirmation_count": 0, "confirmation_span_hours": 0.0,
+                    "confirmation_return_pct": None, "confirmation_drawdown_pct": None}
         now = datetime.fromisoformat(observed_at.replace("Z", "+00:00")).astimezone(UTC)
         row = values.get(identity)
         if not row:
-            row = {"first": now.isoformat(), "last": now.isoformat(), "count": 1}
+            row = {"first": now.isoformat(), "last": now.isoformat(), "count": 1,
+                   "first_price": price, "last_price": price,
+                   "maximum_price": price, "minimum_price": price}
         else:
             first = datetime.fromisoformat(str(row["first"]).replace("Z", "+00:00"))
             last = datetime.fromisoformat(str(row["last"]).replace("Z", "+00:00"))
@@ -53,12 +57,26 @@ class ConfirmationLedger:
             if (now - first).total_seconds() >= 12 * 3600 and (now - last).total_seconds() >= 3600:
                 row["count"] = max(2, int(row.get("count") or 1) + 1)
                 row["last"] = now.isoformat()
+            if price > 0:
+                row.setdefault("first_price", price)
+                row["last_price"] = price
+                row["maximum_price"] = max(_number(row.get("maximum_price"), price), price)
+                minimum = _number(row.get("minimum_price"), price)
+                row["minimum_price"] = min(minimum if minimum > 0 else price, price)
         values[identity] = row
         self._write(values)
         first = datetime.fromisoformat(str(row["first"]).replace("Z", "+00:00"))
+        first_price = _number(row.get("first_price"))
+        last_price = _number(row.get("last_price"))
+        maximum_price = _number(row.get("maximum_price"))
+        minimum_price = _number(row.get("minimum_price"))
         return {
             "confirmation_count": int(row["count"]),
             "confirmation_span_hours": round(max(0.0, (now - first).total_seconds() / 3600), 4),
+            "confirmation_return_pct": (round((last_price / first_price - 1) * 100, 6)
+                                        if first_price > 0 and last_price > 0 else None),
+            "confirmation_drawdown_pct": (round((minimum_price / maximum_price - 1) * 100, 6)
+                                          if maximum_price > 0 and minimum_price > 0 else None),
         }
 
     def _write(self, values: dict[str, dict[str, Any]]) -> None:
@@ -93,7 +111,7 @@ def derive_snapshot(asset: dict[str, Any], ledger: ConfirmationLedger) -> dict[s
     observed_at = str(asset.get("observed_at") or datetime.now(UTC).isoformat())
     identity = f"{str(asset.get('chain') or '').lower()}:{str(asset.get('contract') or '').lower()}"
     cex_mode = asset.get("execution_evidence_mode") == "CEX_ORDER_BOOK"
-    preliminary = all((
+    fully_verified_preliminary = all((
         len(closes) >= 20, price > average20 > 0, higher_highs, higher_lows,
         relative7 > 0, volume_ratio >= 1.10,
         (_number(asset.get("holder_growth_7d_pct")) > 0 or cex_mode),
@@ -101,7 +119,21 @@ def derive_snapshot(asset: dict[str, Any], ledger: ConfirmationLedger) -> dict[s
         (asset.get("security_verified") is True or
          (cex_mode and asset.get("venue_operational") is True)),
     ))
-    confirmations = ledger.observe(identity, observed_at, preliminary)
+    # Emerging pools often lack third-party daily OHLCV.  They still earn a
+    # second independent paper-research observation when identity, liquidity,
+    # volume and full-position exitability persist for at least twelve hours.
+    # This never satisfies the qualified/live contract-safety path.
+    emerging_preliminary = all((
+        price > 0,
+        _number(asset.get("token_age_days"), -1) >= 7,
+        _number(asset.get("liquidity_usd")) >= 250_000,
+        _number(asset.get("volume_24h_usd")) >= 500_000,
+        asset.get("sell_route_ok") is True,
+        _number(asset.get("round_trip_recovery"), -1) >= .97,
+        _number(asset.get("sell_impact_bps"), 10_000) <= 150,
+    ))
+    confirmations = ledger.observe(
+        identity, observed_at, fully_verified_preliminary or emerging_preliminary, price)
     return {
         **asset,
         "asset_class": "CRYPTO", "price": price, "observed_at": observed_at,

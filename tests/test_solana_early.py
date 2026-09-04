@@ -327,7 +327,50 @@ class SolanaEarlyTests(unittest.TestCase):
         summary = self.ledger.matched_control_summary("TEST")
         self.assertEqual(1, summary["rejected_controls"])
         self.assertEqual(1, summary["horizons_minutes"]["15"]["sample"])
-        self.assertEqual(10.0, summary["horizons_minutes"]["15"]["mean_return_pct"])
+        self.assertEqual(10.0, summary["horizons_minutes"]["15"]["median_return_pct"])
+
+    def test_matched_control_retains_initial_cohort_when_status_changes(self):
+        first = candidate(mint="cohort", pool="pool", price_usd=1,
+                          observed_at="2026-09-01T00:00:00+00:00")
+        later = {**first, "price_usd": 1.1,
+                 "observed_at": "2026-09-01T00:15:00+00:00"}
+        self.ledger.upsert_watch_candidate(first, "TEST", "REJECTED")
+        self.ledger.upsert_watch_candidate(later, "TEST", "WATCHING")
+        summary = self.ledger.matched_control_summary("TEST")
+        self.assertEqual(1, summary["rejected_controls"])
+        self.assertEqual(0, summary["paper_or_shadow_eligible"])
+
+    def test_pool_change_resets_price_baseline_and_checkpoints(self):
+        first = candidate(mint="migrated", pool="old", price_usd=.000001,
+                          observed_at="2026-09-01T00:00:00+00:00")
+        old_later = {**first, "price_usd": .000002,
+                     "observed_at": "2026-09-01T00:15:00+00:00"}
+        migrated = {**first, "pool": "new", "price_usd": 2,
+                    "observed_at": "2026-09-01T00:16:00+00:00"}
+        new_later = {**migrated, "price_usd": 2.2,
+                     "observed_at": "2026-09-01T00:31:00+00:00"}
+        for item in (first, old_later, migrated, new_later):
+            self.ledger.upsert_watch_candidate(item, "TEST", "REJECTED")
+        row = self.ledger.watchlist_snapshot("TEST")[0]
+        self.assertEqual("new", row["pool"])
+        self.assertEqual(1, row["pool_reset_count"])
+        self.assertAlmostEqual(2, row["initial_price"])
+        self.assertAlmostEqual(.1, row["checkpoints"]["15"]["mark_return"])
+        self.assertIn("POOL_CHANGED_BASELINE_RESET", row["data_quality_flags"])
+
+    def test_extreme_forward_discontinuity_is_quarantined(self):
+        first = candidate(mint="bad-mark", pool="same", price_usd=.001,
+                          observed_at="2026-09-01T00:00:00+00:00")
+        later = {**first, "price_usd": 1,
+                 "observed_at": "2026-09-01T00:15:00+00:00"}
+        self.ledger.upsert_watch_candidate(first, "TEST", "REJECTED")
+        self.ledger.upsert_watch_candidate(later, "TEST", "REJECTED")
+        summary = self.ledger.matched_control_summary("TEST")
+        horizon = summary["horizons_minutes"]["15"]
+        self.assertEqual(1, horizon["observed_sample"])
+        self.assertEqual(0, horizon["executable_sample"])
+        self.assertEqual(1, horizon["quarantined_sample"])
+        self.assertIsNone(horizon["median_return_pct"])
 
     def test_sub_million_microcap_shadow_keeps_sellability_and_safety_hard(self):
         result = score_microcap_sub_million_shadow(

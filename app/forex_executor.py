@@ -449,14 +449,33 @@ def trend_continuation_signals(snapshot: dict) -> list[dict]:
     distance = max(atr * 1.5, entry * spread / 10_000 * 3)
     stop = entry - distance if side == "BUY" else entry + distance
     target = entry + distance * 1.5 if side == "BUY" else entry - distance * 1.5
-    signal_time = str((snapshot.get("five_streak_candles") or [{}])[-1].get("time") or
-                      snapshot.get("observed_at") or utcnow())
+    candles = snapshot.get("five_streak_candles") or []
+    if not candles or not str(candles[-1].get("time") or ""):
+        raise MultiAssetRejected("Trend sleeve lacks a completed M5 signal candle")
+    signal_time = str(candles[-1]["time"])
+    evaluation_time = str(snapshot.get("observed_at") or signal_time)
+    try:
+        signal_at = datetime.fromisoformat(signal_time.replace("Z", "+00:00"))
+        evaluated_at = datetime.fromisoformat(evaluation_time.replace("Z", "+00:00"))
+        if signal_at.tzinfo is None:
+            signal_at = signal_at.replace(tzinfo=UTC)
+        if evaluated_at.tzinfo is None:
+            evaluated_at = evaluated_at.replace(tzinfo=UTC)
+        signal_latency_seconds = max(0.0, (evaluated_at - signal_at).total_seconds())
+    except ValueError as exc:
+        raise MultiAssetRejected("Trend sleeve signal timestamp is invalid") from exc
+    maximum_signal_age = max(300, int(os.getenv("FOREX_TREND_MAX_SIGNAL_AGE_SECONDS", "900")))
+    if signal_latency_seconds > maximum_signal_age:
+        raise MultiAssetRejected("Trend sleeve completed-candle signal is stale")
     key = f"{TREND_CONTINUATION_V1_STRATEGY}:{snapshot.get('symbol')}:{signal_time}:{side}"
     return [{"proposal_id": hashlib.sha256(key.encode()).hexdigest(), "expires_at": utcnow(),
              "symbol": snapshot["symbol"], "side": side, "reference_price": entry,
              "quantity": 1.0, "stop_price": stop, "target_price": target,
              "maximum_loss_usd": 0.0, "score": ForexEngine.score(snapshot),
              "strategy": TREND_CONTINUATION_V1_STRATEGY, "signal_time": signal_time,
+             "signal_closed_at": signal_time,
+             "evaluation_latency_seconds": round(signal_latency_seconds, 3),
+             "entry_spread_bps": round(spread, 4),
              "model_version": "trend-continuation-v1-paper",
              "entry_reason": (f"Independent trend continuation: {agreement:.0%} horizon agreement, "
                               f"trend {trend:.4f}, 1h {move:.3f}%, spread {spread:.2f} bps.")}]
@@ -1659,6 +1678,12 @@ class Executor:
                                  "reason": "no aligned, liquid, cost-covered continuation"})
             for proposal in signals:
                 if self.ledger.has_intent(proposal["proposal_id"]):
+                    continue
+                cooldown = max(900, int(os.getenv("FOREX_TREND_COOLDOWN_SECONDS", "3600")))
+                if self.ledger.symbol_in_cooldown(proposal["symbol"], cooldown):
+                    outcomes.append({"symbol": proposal["symbol"], "status": "COOLDOWN_REJECTED",
+                                     "reason": ("Trend sleeve permits one fresh signal per symbol "
+                                                f"within {cooldown // 60} minutes")})
                     continue
                 open_rows = [item for item in self.ledger.paper_positions()
                              if item.get("strategy") == TREND_CONTINUATION_V1_STRATEGY]
