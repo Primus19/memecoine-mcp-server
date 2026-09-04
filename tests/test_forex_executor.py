@@ -36,7 +36,44 @@ class Adapter:
     def instrument(self, _symbol): return {"marginRate":"0.02"}
 
 
+class LockedReconciliationAdapter(Adapter):
+    def preflight(self):
+        return {"nav": 50.0, "balance": 50.0, "margin_used": 0.0,
+                "last_transaction_id": "71"}
+
+    def open_trades(self): return []
+    def pending_orders(self): return []
+    def transactions_since(self, _transaction_id): return {"transactions": []}
+
+    def trade(self, trade_id):
+        assert str(trade_id) == "67"
+        return {"trade": {"realizedPL": "-0.08", "financing": "0.01",
+                          "dividendAdjustment": "0"}}
+
+
 class ForexExecutorTests(unittest.TestCase):
+    def test_profitability_lock_still_reconciles_a_broker_closed_live_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(directory + "/forex.sqlite3")
+            proposal = {"proposal_id": "stale-live", "expires_at": "2026-09-02T21:26:00Z",
+                        "symbol": "USD_JPY", "reference_price": 158.68, "side": "SELL",
+                        "quantity": 49, "stop_price": 159.14, "target_price": 157.77,
+                        "maximum_loss_usd": .49, "score": 81, "strategy": "FOREX_CONTROL"}
+            ledger.add_intent(proposal, "LIVE", "OPEN")
+            ledger.update_intent("stale-live", "OPEN", order_id="66", trade_id="67")
+            executor = object.__new__(Executor)
+            executor.adapter = LockedReconciliationAdapter()
+            executor.ledger = ledger
+            executor.base_risk_pct = .01
+            with patch.dict(os.environ, {"FOREX_EXECUTION_ENABLED": "false",
+                                         "FOREX_PROFITABILITY_GATE_PASSED": "false"}, clear=False):
+                result = executor.reconcile()
+            intent = ledger.recent_intents(1)[0]
+            self.assertEqual([], result["open_trades"])
+            self.assertEqual("BROKER_CLOSED", intent["status"])
+            self.assertAlmostEqual(-.07, intent["realized_pnl_usd"])
+            self.assertEqual(0, ledger.open_risk())
+
     def test_trend_continuation_is_independent_and_paper_only(self):
         signals = trend_continuation_signals({
             "symbol": "EUR_USD", "calendar_verified": True,
