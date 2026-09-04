@@ -184,6 +184,7 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
 
 def manage_position(position: dict[str, Any], market: dict[str, Any]) -> dict[str, Any]:
     """Prospective profit management based only on information available now."""
+    policy = MultiWeekPolicy()
     entry = _number(position.get("entry_price"))
     stop = _number(position.get("initial_stop_price"))
     price = _number(market.get("executable_price"))
@@ -194,7 +195,19 @@ def manage_position(position: dict[str, Any], market: dict[str, Any]) -> dict[st
     giveback = (peak - price) / max(peak - entry, risk)
 
     research_only = position.get("research_only") is True
+    market_cap = _number(market.get("market_cap_usd"))
+    liquidity = _number(market.get("liquidity_usd"))
+    volume = _number(market.get("volume_24h_usd"))
+    research_asymmetry_failed = research_only and (
+        market_cap < policy.minimum_research_market_cap_usd or
+        market_cap > policy.maximum_research_market_cap_usd or
+        liquidity < policy.minimum_liquidity_usd or
+        volume < policy.minimum_volume_24h_usd or
+        (market_cap > 0 and liquidity / market_cap < policy.minimum_research_liquidity_to_cap) or
+        (market_cap > 0 and volume / market_cap < policy.minimum_research_volume_to_cap)
+    )
     hard_exit = (
+        research_asymmetry_failed or
         market.get("sell_route_ok") is not True or
         _number(market.get("round_trip_recovery"), -1) < 0.95 or
         (not research_only and market.get("security_verified") is not True and not (
@@ -209,7 +222,7 @@ def manage_position(position: dict[str, Any], market: dict[str, Any]) -> dict[st
     )) >= 3
 
     if hard_exit:
-        action, fraction, reason = "EXIT", 1.0, "execution or safety gate failed"
+        action, fraction, reason = "EXIT", 1.0, "execution, safety, or asymmetry gate failed"
     elif trend_break:
         action, fraction, reason = "EXIT", 1.0, "multi-factor trend deterioration"
     elif peak_r >= 3 and giveback >= 0.25 and not position.get("took_3r_profit"):

@@ -139,6 +139,19 @@ def test_research_hold_does_not_exit_only_because_history_is_incomplete():
         {"entry_price": 100, "initial_stop_price": 88, "peak_executable_price": 100,
          "research_only": True},
         {"executable_price": 99, "sell_route_ok": True, "round_trip_recovery": .98,
-         "security_verified": False, "daily_candle_count": 1},
+         "security_verified": False, "daily_candle_count": 1, "market_cap_usd": 5_000_000,
+         "liquidity_usd": 1_000_000, "volume_24h_usd": 2_000_000},
     )
     assert result["action"] == "HOLD"
+
+
+def test_research_hold_exits_when_asymmetric_upside_disappears():
+    result = manage_position(
+        {"entry_price": 100, "initial_stop_price": 88, "peak_executable_price": 100,
+         "research_only": True},
+        {"executable_price": 99, "sell_route_ok": True, "round_trip_recovery": .98,
+         "security_verified": False, "daily_candle_count": 1, "market_cap_usd": 50_000_000,
+         "liquidity_usd": 1_000_000, "volume_24h_usd": 2_000_000},
+    )
+    assert result["action"] == "EXIT"
+    assert "asymmetry" in result["reason"]
