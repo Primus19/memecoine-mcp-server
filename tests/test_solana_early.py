@@ -51,6 +51,12 @@ class SolanaEarlyTests(unittest.TestCase):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         self.ledger = Ledger(self.tmp.name)
         self.policy = EarlyPolicy()
+        self.forward_evidence = patch.dict(
+            os.environ, {"SOLANA_FORWARD_EVIDENCE_STARTED_AT": "2026-09-01T00:00:00+00:00"})
+        self.forward_evidence.start()
+
+    def tearDown(self):
+        self.forward_evidence.stop()
 
     def test_strong_acceleration_qualifies(self):
         result = score_candidate(candidate(), self.ledger, self.policy)
@@ -328,6 +334,19 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertEqual(1, summary["rejected_controls"])
         self.assertEqual(1, summary["horizons_minutes"]["15"]["sample"])
         self.assertEqual(10.0, summary["horizons_minutes"]["15"]["median_return_pct"])
+
+    def test_matched_control_summary_excludes_pre_method_rows(self):
+        first = candidate(mint="legacy", pool="pool", price_usd=1,
+                          observed_at="2026-08-31T23:30:00+00:00")
+        later = {**first, "price_usd": 2,
+                 "observed_at": "2026-09-01T00:15:00+00:00"}
+        self.ledger.upsert_watch_candidate(first, "TEST", "REJECTED")
+        self.ledger.upsert_watch_candidate(later, "TEST", "REJECTED")
+        summary = self.ledger.matched_control_summary("TEST")
+        self.assertEqual("CURRENT_FORWARD_METHOD_ONLY", summary["scope"])
+        self.assertEqual(1, summary["pre_cutoff_rows_excluded"])
+        self.assertEqual(0, summary["tracked"])
+        self.assertEqual(0, summary["horizons_minutes"]["15"]["sample"])
 
     def test_matched_control_retains_initial_cohort_when_status_changes(self):
         first = candidate(mint="cohort", pool="pool", price_usd=1,
