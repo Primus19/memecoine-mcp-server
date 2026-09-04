@@ -5,6 +5,7 @@ import os
 import time
 import urllib.request
 import threading
+from pathlib import Path
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -163,7 +164,8 @@ def main() -> None:
     feed_url = os.environ["MULTI_ASSET_FEED_URL"]
     token = os.getenv("MULTI_ASSET_FEED_TOKEN", "")
     interval = max(15, min(300, int(os.getenv("MULTI_ASSET_SCAN_INTERVAL_SECONDS", "60"))))
-    ledger = PaperLedger(os.getenv("MULTI_ASSET_LEDGER_PATH", "/app/data/multi_asset.jsonl"))
+    ledger_path = os.getenv("MULTI_ASSET_LEDGER_PATH", "/app/data/multi_asset.jsonl")
+    ledger = PaperLedger(ledger_path)
     emailer = MultiWeekCryptoEmailer(os.getenv(
         "MULTI_WEEK_EMAIL_STATE_PATH", "/app/data/multi_week_email_state.json"))
     confirmations = ConfirmationLedger(os.getenv(
@@ -175,10 +177,16 @@ def main() -> None:
     last_held_quote_refresh_at = ""
     held_quotes: list[dict] = []
     held_quote_errors: list[dict] = []
+    service_started_at = datetime.now(timezone.utc)
+    restored_records = len(ledger.records())
+    restored_open_positions = len(ledger.positions())
+    cycle_count = 0
+    failed_cycle_count = 0
     HealthHandler.ledger = ledger
     server = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     while True:
+        cycle_started_at = datetime.now(timezone.utc)
         try:
             payload = fetch(feed_url, token)
             snapshots = list(payload.get("snapshots", []))
@@ -255,8 +263,22 @@ def main() -> None:
             feed_health.setdefault("status", "READY" if feed_health["universe_count"] else "DEGRADED")
             if not feed_health["universe_count"]:
                 feed_health.setdefault("last_error", "crypto universe is empty")
+            cycle_count += 1
             runtime = {"last_scan": datetime.now(timezone.utc).isoformat(), "last_error": "",
                        "last_outcomes": outcomes[-25:], "last_closes": closes[-25:],
+                       "worker_state": {
+                           "service_started_at": service_started_at.isoformat(),
+                           "uptime_seconds": round((datetime.now(timezone.utc) - service_started_at).total_seconds(), 1),
+                           "cycle_count": cycle_count,
+                           "failed_cycle_count": failed_cycle_count,
+                           "last_cycle_started_at": cycle_started_at.isoformat(),
+                           "last_successful_cycle_at": datetime.now(timezone.utc).isoformat(),
+                           "ledger_file": Path(ledger_path).name,
+                           "restored_record_count": restored_records,
+                           "restored_open_position_count": restored_open_positions,
+                           "persistence_configured": bool(ledger_path),
+                       },
+                       "position_monitoring": ledger.position_diagnostics(),
                        "multi_week_crypto": crypto_bucket, "feed_health": feed_health,
                        "held_position_monitor": {
                            "status": "READY" if not held_quote_errors and len(held_quotes) >= len([
@@ -276,7 +298,18 @@ def main() -> None:
             print(json.dumps({"event": "MULTI_ASSET_SCAN", "paper_only": True,
                               "closes": closes, "outcomes": outcomes}), flush=True)
         except Exception as exc:
-            HealthHandler.runtime = {**HealthHandler.runtime, "last_error": f"{type(exc).__name__}: {str(exc)[:500]}"}
+            failed_cycle_count += 1
+            HealthHandler.runtime = {**HealthHandler.runtime,
+                "last_error": f"{type(exc).__name__}: {str(exc)[:500]}",
+                "worker_state": {**HealthHandler.runtime.get("worker_state", {}),
+                    "service_started_at": service_started_at.isoformat(),
+                    "cycle_count": cycle_count, "failed_cycle_count": failed_cycle_count,
+                    "last_cycle_started_at": cycle_started_at.isoformat(),
+                    "last_failed_cycle_at": datetime.now(timezone.utc).isoformat(),
+                    "ledger_file": Path(ledger_path).name,
+                    "restored_record_count": restored_records,
+                    "restored_open_position_count": restored_open_positions,
+                    "persistence_configured": bool(ledger_path)}}
             print(json.dumps({"event": "MULTI_ASSET_SCAN_ERROR", "error": type(exc).__name__, "detail": str(exc)[:500]}), flush=True)
         time.sleep(interval)
 
