@@ -366,6 +366,30 @@ class Ledger:
             "checkpoints": json.loads(row["checkpoints"] or "{}"),
         }
 
+    def matched_control_summary(self, strategy: str) -> dict[str, Any]:
+        """Summarize forward outcomes without pretending rejected rows were trades."""
+        rows = self.watchlist_snapshot(strategy, limit=500)
+        horizons: dict[str, dict[str, Any]] = {}
+        for minute in (5, 15, 30, 60, 120, 240):
+            values = [float(item["checkpoints"][str(minute)]["mark_return"])
+                      for item in rows if str(minute) in item.get("checkpoints", {})]
+            horizons[str(minute)] = {
+                "sample": len(values),
+                "mean_return_pct": round(sum(values) / len(values) * 100, 3) if values else None,
+                "positive_rate_pct": round(sum(value > 0 for value in values) / len(values) * 100, 1)
+                                     if values else None,
+            }
+        return {
+            "strategy": strategy,
+            "tracked": len(rows),
+            "paper_or_shadow_eligible": sum(item.get("status") in {
+                "PAPER_QUALIFIED", "RESEARCH_SHADOW", "NEAR_MISS_SHADOW"
+            } for item in rows),
+            "rejected_controls": sum(item.get("status") == "REJECTED" for item in rows),
+            "horizons_minutes": horizons,
+            "interpretation": "Forward marks are controls, not executable fills or realized P&L.",
+        }
+
     def wallet_stats(self, wallet: str) -> dict[str, float]:
         with self.lock:
             rows = self.db.execute(
@@ -817,14 +841,17 @@ def score_microcap_sub_million_shadow(candidate: dict[str, Any],
         (candidate.get("sell_simulation_ok") is not True, "shadow full-size sell route unavailable"),
         (impact > policy.maximum_sell_price_impact_bps,
          "shadow executable sell impact above maximum"),
-        (top10 is None, "shadow top-10 concentration unavailable"),
         (top10 is not None and _number(top10) > policy.maximum_top10_holder_fraction,
          "shadow top-10 concentration too high"),
         (creator is not None and _number(creator) > policy.maximum_creator_fraction,
          "shadow creator concentration too high"),
     )
     failures.extend(reason for failed, reason in checks if failed)
-    warnings = (["shadow creator concentration unavailable"] if creator is None else [])
+    warnings = []
+    if top10 is None:
+        warnings.append("shadow top-10 concentration unavailable")
+    if creator is None:
+        warnings.append("shadow creator concentration unavailable")
     shadow_qualified = not failures
     return {
         "mint": str(candidate.get("mint") or ""),
@@ -838,6 +865,8 @@ def score_microcap_sub_million_shadow(candidate: dict[str, Any],
         "paper_qualified": False,
         "live_eligible": False,
         "shadow_qualified": shadow_qualified,
+        "zero_capital_research_only": True,
+        "ownership_evidence_required_before_paper_or_live": True,
         "paper_failures": list(dict.fromkeys(failures)),
         "evidence_warnings": warnings,
         "failures": ["shadow-only research cohort"],
@@ -1741,6 +1770,8 @@ def main() -> None:
                                        "SOLANA_MICROCAP_RUNNER_CAPTURE",
                                        "SOLANA_MICROCAP_SUB_1M_EXECUTABLE_SHADOW",
                                    )}
+            matched_controls = {strategy: ledger.matched_control_summary(strategy)
+                                for strategy in strategy_watchlists}
             with LOCK:
                 completed_at = utcnow()
                 completed_snapshot = {
@@ -1749,6 +1780,7 @@ def main() -> None:
                     "feed": feed,
                     "strategy_diagnostics": diagnostics,
                     "strategy_watchlists": strategy_watchlists,
+                    "matched_control_outcomes": matched_controls,
                 }
                 STATE.update(ok=True, scanned_at=completed_at, scan_status="COMPLETE",
                              # Five strategy evaluations are emitted per pool.
@@ -1757,6 +1789,7 @@ def main() -> None:
                              candidates=results[:240], error="", feed=feed,
                              strategy_diagnostics=diagnostics,
                              strategy_watchlists=strategy_watchlists,
+                             matched_control_outcomes=matched_controls,
                              intelligence_watchlist_summary={
                                  strategy: {"tracked": len(items),
                                             "with_checkpoints": sum(bool(item.get("checkpoints")) for item in items)}
