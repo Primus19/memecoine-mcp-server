@@ -49,6 +49,25 @@ def test_setup_becomes_confirmed_after_twelve_hours():
         result = derive_snapshot(asset("2026-09-03T13:00:00Z"), ledger)
         assert result["confirmation_count"] == 2
         assert result["confirmation_span_hours"] == 13
+        assert result["confirmation_return_pct"] == 0
+
+
+def test_emerging_pool_without_historical_candles_earns_honest_forward_confirmation():
+    with tempfile.TemporaryDirectory() as directory:
+        ledger = ConfirmationLedger(directory + "/confirmations.json")
+        base = {
+            "chain": "robinhood", "contract": "0xemerging", "symbol": "EARLY",
+            "token_age_days": 20, "price": 1.0, "daily_candles": [],
+            "liquidity_usd": 1_000_000, "volume_24h_usd": 2_000_000,
+            "sell_route_ok": True, "round_trip_recovery": .98,
+            "sell_impact_bps": 50, "security_verified": False,
+        }
+        first = derive_snapshot({**base, "observed_at": "2026-09-03T00:00:00Z"}, ledger)
+        second = derive_snapshot({**base, "price": 1.08,
+                                  "observed_at": "2026-09-03T13:00:00Z"}, ledger)
+        assert first["confirmation_count"] == 1
+        assert second["confirmation_count"] == 2
+        assert second["confirmation_return_pct"] == 8
 
 
 def test_discovers_every_asset_in_upstream_universe():

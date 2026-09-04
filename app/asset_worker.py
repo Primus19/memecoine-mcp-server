@@ -115,8 +115,7 @@ def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int 
                 closes.append(ledger.partial_close(
                     str(position["proposal_id"]), price, float(management["fraction"]),
                     management["reason"], price_source=price_source,
-                    profit_tier=("10R" if management["peak_r_multiple"] >= 10 else
-                                 "5R" if management["peak_r_multiple"] >= 5 else "2R")))
+                    profit_tier=str(management["profit_tier"])))
             continue
         side = str(position["side"])
         stop, target = float(position["stop_price"]), float(position["target_price"])

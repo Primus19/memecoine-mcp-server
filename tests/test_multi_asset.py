@@ -150,8 +150,9 @@ class MultiAssetTests(unittest.TestCase):
                     "volume_24h_usd": 2_000_000, "round_trip_recovery": .98,
                     "sell_impact_bps": 50, "sell_route_ok": True,
                     "security_verified": False, "top10_holder_fraction": None,
-                    "creator_fraction": None, "confirmation_count": 1,
-                    "confirmation_span_hours": 0, "expected_holding_days": 21}
+                    "creator_fraction": None, "confirmation_count": 2,
+                    "confirmation_span_hours": 13, "confirmation_return_pct": 6,
+                    "confirmation_drawdown_pct": -3, "expected_holding_days": 21}
         with patch.dict(os.environ, {"CRYPTO_ENGINE_ENABLED": "true"}):
             result = MultiAssetEngine(self.ledger, self.policy).process(snapshot)
         self.assertTrue(result["research_only"])

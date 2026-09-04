@@ -271,33 +271,65 @@ class Ledger:
         now = str(candidate.get("observed_at") or utcnow())
         with self.lock, self.db:
             row = self.db.execute(
-                "SELECT first_seen_at,initial_price,max_price,checkpoints,payload FROM candidate_watchlist WHERE strategy=? AND mint=?",
+                "SELECT first_seen_at,initial_price,max_price,checkpoints,payload,pool,status "
+                "FROM candidate_watchlist WHERE strategy=? AND mint=?",
                 (strategy, mint)).fetchone()
-            first, initial, maximum, checkpoints = (now, price, price, {}) if not row else (
-                str(row[0]), float(row[1]), max(float(row[2]), price), json.loads(row[3] or "{}"))
             prior_payload = json.loads(row[4] or "{}") if row else {}
-            first_candidate = (prior_payload.get("first_candidate")
+            # A mint can migrate to or be rediscovered through a different pool.
+            # Carrying the old pool's price baseline into the new pool produced
+            # fictitious multi-thousand-percent returns.  Start a new observation
+            # epoch whenever the executable venue changes.
+            pool_changed = bool(row and str(row[5] or "") != pool)
+            prior_reset_count = int(prior_payload.get("pool_reset_count") or 0)
+            prior_quality_flags = list(prior_payload.get("data_quality_flags") or [])
+            first, initial, maximum, checkpoints = ((now, price, price, {})
+                if not row or pool_changed else
+                (str(row[0]), float(row[1]), max(float(row[2]), price),
+                 json.loads(row[3] or "{}")))
+            if pool_changed:
+                prior_payload = {}
+            first_candidate = (candidate if pool_changed else
+                               prior_payload.get("first_candidate")
                                if isinstance(prior_payload, dict) else None)
             if not isinstance(first_candidate, dict):
                 first_candidate = prior_payload if row and isinstance(prior_payload, dict) else candidate
-            retained_payload = {"first_candidate": first_candidate, "latest_candidate": candidate}
+            first_status = str(prior_payload.get("first_status") or
+                               ((row[6] if row and not pool_changed else status) or status))
+            pool_reset_count = prior_reset_count + int(pool_changed)
+            quality_flags = list(dict.fromkeys([
+                *prior_quality_flags,
+                *(["POOL_CHANGED_BASELINE_RESET"] if pool_changed else []),
+            ]))
+            retained_payload = {"first_candidate": first_candidate, "latest_candidate": candidate,
+                                "first_status": first_status,
+                                "pool_reset_count": pool_reset_count,
+                                "data_quality_flags": quality_flags}
             elapsed = max(0, (datetime.fromisoformat(now.replace("Z", "+00:00")) -
                               datetime.fromisoformat(first.replace("Z", "+00:00"))).total_seconds() / 60)
             for minute in (5, 15, 30, 60, 120, 240):
                 if elapsed >= minute and str(minute) not in checkpoints:
+                    mark_return = price / initial - 1
+                    checkpoint_flags: list[str] = []
+                    maximum_abs_return = max(10.0, float(os.getenv(
+                        "SOLANA_FORWARD_MAX_ABS_RETURN", "100")))
+                    if not math.isfinite(mark_return) or abs(mark_return) > maximum_abs_return:
+                        checkpoint_flags.append("EXTREME_PRICE_DISCONTINUITY")
                     checkpoints[str(minute)] = {
                         "observed_at": now,
-                        "mark_return": round(price / initial - 1, 6),
+                        "mark_return": round(mark_return, 6),
                         "price_usd": price,
                         "sell_route_ok": bool(candidate.get("sell_simulation_ok")),
                         "sell_price_impact_bps": candidate.get("sell_price_impact_bps"),
                         "liquidity_usd": candidate.get("liquidity_usd"),
                         "volume_24h_usd": candidate.get("volume_24h_usd"),
                         "market_cap_usd": candidate.get("market_cap_usd"),
+                        "data_quality_flags": checkpoint_flags,
                     }
             self.db.execute("""INSERT INTO candidate_watchlist VALUES(?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(strategy,mint) DO UPDATE SET pool=excluded.pool,last_seen_at=excluded.last_seen_at,
-                latest_price=excluded.latest_price,max_price=excluded.max_price,payload=excluded.payload,
+                ON CONFLICT(strategy,mint) DO UPDATE SET pool=excluded.pool,
+                first_seen_at=excluded.first_seen_at,last_seen_at=excluded.last_seen_at,
+                initial_price=excluded.initial_price,latest_price=excluded.latest_price,
+                max_price=excluded.max_price,payload=excluded.payload,
                 checkpoints=excluded.checkpoints,status=excluded.status""",
                 (strategy, mint, pool, first, now, initial, price, maximum,
                  json.dumps(retained_payload, sort_keys=True),
@@ -339,6 +371,9 @@ class Ledger:
             payload = json.loads(item.pop("payload") or "{}")
             item["first_candidate"] = payload.get("first_candidate", payload)
             item["latest_candidate"] = payload.get("latest_candidate", payload)
+            item["first_status"] = payload.get("first_status", item.get("status"))
+            item["pool_reset_count"] = int(payload.get("pool_reset_count") or 0)
+            item["data_quality_flags"] = payload.get("data_quality_flags") or []
             item["return_since_seen"] = round(float(row["latest_price"]) /
                                                max(float(row["initial_price"]), 1e-30) - 1, 6)
             item["retracement_from_high"] = round(
@@ -359,6 +394,9 @@ class Ledger:
             **dict(row),
             "first_candidate": payload.get("first_candidate", payload),
             "latest_candidate": payload.get("latest_candidate", payload),
+            "first_status": payload.get("first_status", row["status"]),
+            "pool_reset_count": int(payload.get("pool_reset_count") or 0),
+            "data_quality_flags": payload.get("data_quality_flags") or [],
             "return_since_seen": float(row["latest_price"]) / max(float(row["initial_price"]), 1e-30) - 1,
             "retracement_from_high": max(
                 0.0, 1 - float(row["latest_price"]) / max(float(row["max_price"]), 1e-30)
@@ -369,25 +407,47 @@ class Ledger:
     def matched_control_summary(self, strategy: str) -> dict[str, Any]:
         """Summarize forward outcomes without pretending rejected rows were trades."""
         rows = self.watchlist_snapshot(strategy, limit=500)
+        eligible_statuses = {"PAPER_QUALIFIED", "RESEARCH_SHADOW", "NEAR_MISS_SHADOW"}
         horizons: dict[str, dict[str, Any]] = {}
         for minute in (5, 15, 30, 60, 120, 240):
-            values = [float(item["checkpoints"][str(minute)]["mark_return"])
-                      for item in rows if str(minute) in item.get("checkpoints", {})]
+            observed = [item["checkpoints"][str(minute)] for item in rows
+                        if str(minute) in item.get("checkpoints", {})]
+            values = [float(point["mark_return"]) for point in observed
+                      if point.get("sell_route_ok") is True and
+                      not point.get("data_quality_flags") and
+                      math.isfinite(float(point.get("mark_return") or 0))]
+            ordered = sorted(values)
+            if ordered:
+                mid = len(ordered) // 2
+                median = (ordered[mid] if len(ordered) % 2 else
+                          (ordered[mid - 1] + ordered[mid]) / 2)
+                trim = int(len(ordered) * .10) if len(ordered) >= 10 else 0
+                trimmed = ordered[trim:len(ordered) - trim] if trim else ordered
+            else:
+                median, trimmed = None, []
             horizons[str(minute)] = {
                 "sample": len(values),
-                "mean_return_pct": round(sum(values) / len(values) * 100, 3) if values else None,
+                "observed_sample": len(observed),
+                "executable_sample": len(values),
+                "quarantined_sample": sum(bool(point.get("data_quality_flags"))
+                                           for point in observed),
+                "median_return_pct": round(median * 100, 3) if median is not None else None,
+                "trimmed_mean_return_pct": (round(sum(trimmed) / len(trimmed) * 100, 3)
+                                             if trimmed else None),
                 "positive_rate_pct": round(sum(value > 0 for value in values) / len(values) * 100, 1)
                                      if values else None,
             }
         return {
             "strategy": strategy,
             "tracked": len(rows),
-            "paper_or_shadow_eligible": sum(item.get("status") in {
-                "PAPER_QUALIFIED", "RESEARCH_SHADOW", "NEAR_MISS_SHADOW"
-            } for item in rows),
-            "rejected_controls": sum(item.get("status") == "REJECTED" for item in rows),
+            "paper_or_shadow_eligible": sum(item.get("first_status") in eligible_statuses
+                                             for item in rows),
+            "rejected_controls": sum(item.get("first_status") not in eligible_statuses
+                                     for item in rows),
+            "pool_baseline_resets": sum(int(item.get("pool_reset_count") or 0) for item in rows),
             "horizons_minutes": horizons,
-            "interpretation": "Forward marks are controls, not executable fills or realized P&L.",
+            "interpretation": ("Only sell-route-valid, non-quarantined forward marks enter robust "
+                               "statistics. They remain controls, not fills or realized P&L."),
         }
 
     def wallet_stats(self, wallet: str) -> dict[str, float]:
