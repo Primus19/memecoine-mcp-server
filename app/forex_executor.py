@@ -73,6 +73,7 @@ FIVE_STREAK_STRATEGY = "FOREX_FIVE_STREAK_EXPERIMENT"
 FIVE_STREAK_FILTERED_V3_STRATEGY = "FOREX_FIVE_STREAK_FILTERED_V3"
 FIVE_STREAK_FILTERED_STRATEGY = "FOREX_FIVE_STREAK_FILTERED_V4_RATCHET"
 BRYNE_LIQUIDITY_V5_STRATEGY = "FOREX_BRYNE_LIQUIDITY_RANGE_V5"
+TREND_CONTINUATION_V1_STRATEGY = "FOREX_TREND_CONTINUATION_V1"
 FIVE_STREAK_DISPLAY_NAME = "Bryne and Lot-Bill Strategy"
 UNIFIED_FOREX_PAPER_SERVICE = "UNIFIED_FOREX_PAPER"
 UNIFIED_FOREX_PAPER_VERSION = "UNIFIED_FOREX_PAPER_V1"
@@ -420,6 +421,47 @@ def bryne_liquidity_signals(snapshot: dict) -> list[dict]:
                               f"stop beyond sweep; target=2R; spread={spread:.2f}bps.")}]
 
 
+def trend_continuation_signals(snapshot: dict) -> list[dict]:
+    """Independent paper sleeve for persistent, cost-covered directional moves."""
+    if not calendar_execution_allowed(snapshot):
+        raise MultiAssetRejected("Trend sleeve calendar or market veto is active")
+    if snapshot.get("session_liquid") is not True or snapshot.get("tradable") is not True:
+        raise MultiAssetRejected("Trend sleeve requires a liquid tradable session")
+    if float(snapshot.get("quote_age_seconds") or 999) > 10:
+        raise MultiAssetRejected("Trend sleeve quote is stale")
+    spread = float(snapshot.get("spread_bps") or 999)
+    if spread > float(os.getenv("FOREX_TREND_MAX_SPREAD_BPS", "3")):
+        raise MultiAssetRejected("Trend sleeve executable spread is too wide")
+    alignment, _, side = ForexEngine.alignment(snapshot)
+    agreement = float(snapshot.get("horizon_agreement") or 0)
+    trend = float(snapshot.get("trend_strength") or 0)
+    move = float(snapshot.get("change_1h_pct") or 0)
+    atr = float(snapshot.get("atr_14") or 0)
+    if alignment == "CONTRADICTORY" or not side or agreement < .75:
+        return []
+    if abs(trend) < .05 or not .03 <= abs(move) <= .40 or atr <= 0:
+        return []
+    if (side == "BUY") != (trend > 0) or (side == "BUY") != (move > 0):
+        return []
+    entry = float(snapshot.get("ask") if side == "BUY" else snapshot.get("bid") or 0)
+    if entry <= 0:
+        raise MultiAssetRejected("Trend sleeve lacks executable bid/ask")
+    distance = max(atr * 1.5, entry * spread / 10_000 * 3)
+    stop = entry - distance if side == "BUY" else entry + distance
+    target = entry + distance * 1.5 if side == "BUY" else entry - distance * 1.5
+    signal_time = str((snapshot.get("five_streak_candles") or [{}])[-1].get("time") or
+                      snapshot.get("observed_at") or utcnow())
+    key = f"{TREND_CONTINUATION_V1_STRATEGY}:{snapshot.get('symbol')}:{signal_time}:{side}"
+    return [{"proposal_id": hashlib.sha256(key.encode()).hexdigest(), "expires_at": utcnow(),
+             "symbol": snapshot["symbol"], "side": side, "reference_price": entry,
+             "quantity": 1.0, "stop_price": stop, "target_price": target,
+             "maximum_loss_usd": 0.0, "score": ForexEngine.score(snapshot),
+             "strategy": TREND_CONTINUATION_V1_STRATEGY, "signal_time": signal_time,
+             "model_version": "trend-continuation-v1-paper",
+             "entry_reason": (f"Independent trend continuation: {agreement:.0%} horizon agreement, "
+                              f"trend {trend:.4f}, 1h {move:.3f}%, spread {spread:.2f} bps.")}]
+
+
 class Ledger:
     def __init__(self, path: str):
         self.db = sqlite3.connect(path, check_same_thread=False)
@@ -501,14 +543,14 @@ class Ledger:
             self.db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
     def open_count(self) -> int:
-        return int(self.db.execute("SELECT COUNT(*) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'') NOT IN (?,?,?)", (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY)).fetchone()[0])
+        return int(self.db.execute("SELECT COUNT(*) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'') NOT IN (?,?,?,?)", (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY, TREND_CONTINUATION_V1_STRATEGY)).fetchone()[0])
 
     def open_risk(self) -> float:
-        row = self.db.execute("SELECT COALESCE(SUM(maximum_loss_usd),0) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'') NOT IN (?,?,?)", (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY)).fetchone()
+        row = self.db.execute("SELECT COALESCE(SUM(maximum_loss_usd),0) FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'') NOT IN (?,?,?,?)", (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY, TREND_CONTINUATION_V1_STRATEGY)).fetchone()
         return float(row[0] or 0)
 
     def open_symbols(self) -> list[str]:
-        return [str(row[0]) for row in self.db.execute("SELECT symbol FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'') NOT IN (?,?,?)", (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY)).fetchall()]
+        return [str(row[0]) for row in self.db.execute("SELECT symbol FROM intents WHERE status IN ('PAPER_OPEN','SUBMITTING','SUBMITTED','OPEN') AND COALESCE(strategy,'') NOT IN (?,?,?,?)", (FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY, TREND_CONTINUATION_V1_STRATEGY)).fetchall()]
 
     def has_intent(self, intent_id: str) -> bool:
         return self.db.execute("SELECT 1 FROM intents WHERE id=?", (intent_id,)).fetchone() is not None
@@ -1088,7 +1130,7 @@ def five_streak_email_actions(outcomes: list[dict], closes: list[dict], intents:
             "warnings": ["Bryne and Lot-Bill Strategy is paper-only."],
         })
     for item in closes:
-        if item.get("strategy") not in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY}:
+        if item.get("strategy") not in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY, TREND_CONTINUATION_V1_STRATEGY}:
             continue
         intent = by_id.get(str(item.get("intent_id") or ""), {})
         close_price = item.get("fill_price")
@@ -1473,7 +1515,7 @@ class Executor:
             if position.get("status") != "PAPER_OPEN":
                 continue
             side = position["side"]; stop = float(position["stop_price"]); target = float(position["target_price"])
-            current_pnl = five_streak_position_pnl(position, price) if position.get("strategy") in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY} else 0.0
+            current_pnl = five_streak_position_pnl(position, price) if position.get("strategy") in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY, TREND_CONTINUATION_V1_STRATEGY} else 0.0
             with self.ledger.db:
                 self.ledger.db.execute("""UPDATE intents SET
                     max_favorable_pnl_usd=MAX(COALESCE(max_favorable_pnl_usd,0),?),
@@ -1493,7 +1535,7 @@ class Executor:
                 self.ledger.event("SHADOW_EARLY_THESIS_FAILURE", thesis)
             floor_r = five_streak_profit_floor_r(maximum_favorable / maximum_loss) if maximum_loss > 0 else 0
             profit_protection_strategies = {
-                FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY,
+                FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY, TREND_CONTINUATION_V1_STRATEGY,
             }
             if (not reason and position.get("strategy") in profit_protection_strategies
                     and os.getenv("FOREX_BRYNE_PROFIT_PROTECTION", "true").lower() == "true"
@@ -1501,7 +1543,7 @@ class Executor:
                 reason = f"PROFIT_PROTECTION_{floor_r:.2f}R"
             if reason:
                 direction = 1 if side == "BUY" else -1
-                if position.get("strategy") in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY}:
+                if position.get("strategy") in {FIVE_STREAK_STRATEGY, FIVE_STREAK_FILTERED_STRATEGY, BRYNE_LIQUIDITY_V5_STRATEGY, TREND_CONTINUATION_V1_STRATEGY}:
                     pnl = five_streak_position_pnl(position, price)
                 else:
                     pnl = (price - float(position["entry_price"])) * float(position["quantity"]) * direction
@@ -1597,6 +1639,46 @@ class Executor:
                                  "target": proposal["target_price"], "maximum_loss_usd": per_trade_risk})
         return outcomes
 
+    def process_trend_continuation_paper(self, snapshots: list[dict], nav: float) -> list[dict]:
+        """Run a separately attributable paper sleeve under a shared risk cap."""
+        outcomes = []
+        per_trade_risk = max(.01, nav * min(.001, max(.00025, float(os.getenv(
+            "FOREX_TREND_RISK_PCT", ".001")))))
+        max_open = max(1, min(4, int(os.getenv("FOREX_TREND_MAX_OPEN", "2"))))
+        all_paper = self.ledger.paper_positions()
+        shared_risk = sum(float(item.get("maximum_loss_usd") or 0) for item in all_paper)
+        shared_cap = nav * min(.01, max(.002, float(os.getenv("FOREX_PAPER_SHARED_RISK_PCT", ".005"))))
+        for snapshot in snapshots:
+            try:
+                signals = trend_continuation_signals(snapshot)
+            except Exception as exc:
+                outcomes.append({"symbol": snapshot.get("symbol"), "status": "REJECTED", "reason": str(exc)[:300]})
+                continue
+            if not signals:
+                outcomes.append({"symbol": snapshot.get("symbol"), "status": "NO_SIGNAL",
+                                 "reason": "no aligned, liquid, cost-covered continuation"})
+            for proposal in signals:
+                if self.ledger.has_intent(proposal["proposal_id"]):
+                    continue
+                open_rows = [item for item in self.ledger.paper_positions()
+                             if item.get("strategy") == TREND_CONTINUATION_V1_STRATEGY]
+                if len(open_rows) >= max_open or shared_risk + per_trade_risk > shared_cap:
+                    outcomes.append({"symbol": proposal["symbol"], "status": "SHARED_RISK_CAP_REJECTED"})
+                    continue
+                if any(item.get("symbol") == proposal["symbol"] for item in all_paper):
+                    outcomes.append({"symbol": proposal["symbol"], "status": "SYMBOL_EXPOSURE_REJECTED"})
+                    continue
+                proposal["maximum_loss_usd"] = per_trade_risk
+                self.ledger.add_intent(proposal, "PAPER_ONLY", "PAPER_OPEN")
+                self.ledger.event("TREND_CONTINUATION_PAPER_FILL", proposal)
+                shared_risk += per_trade_risk
+                all_paper.append(proposal)
+                outcomes.append({"symbol": proposal["symbol"], "side": proposal["side"],
+                                 "status": "PAPER_FILL", "intent_id": proposal["proposal_id"],
+                                 "entry": proposal["reference_price"], "stop": proposal["stop_price"],
+                                 "target": proposal["target_price"], "maximum_loss_usd": per_trade_risk})
+        return outcomes
+
     def scan(self) -> None:
         if not 0 <= self.engine.policy.minimum_score <= 100:
             raise BrokerError(f"FOREX_MIN_SCORE must be between 0 and 100; got {self.engine.policy.minimum_score:g}")
@@ -1608,6 +1690,8 @@ class Executor:
         five_streak_outcomes = [{"status": "ARCHIVED",
                                  "reason": "V4 new entries are permanently disabled"}]
         bryne_liquidity_outcomes = self.process_bryne_liquidity_paper(
+            snapshots, float(reconciliation["summary"]["nav"]))
+        trend_continuation_outcomes = self.process_trend_continuation_paper(
             snapshots, float(reconciliation["summary"]["nav"]))
         outcomes = []
         for snapshot in snapshots:
@@ -1715,11 +1799,22 @@ class Executor:
                       "scope": "CURRENT_VERSION_ONLY",
                       "display_name": "Unified Forex Paper Strategy",
                       "mode": "PAPER_ONLY",
-                      "active_component": BRYNE_LIQUIDITY_V5_STRATEGY,
-                      "performance": self.ledger.strategy_stats_since(
-                          BRYNE_LIQUIDITY_V5_STRATEGY, UNIFIED_FOREX_PAPER_STARTED_AT),
+                      "active_components": [BRYNE_LIQUIDITY_V5_STRATEGY,
+                                            TREND_CONTINUATION_V1_STRATEGY],
+                      "components": {
+                          BRYNE_LIQUIDITY_V5_STRATEGY: {
+                              "outcomes": bryne_liquidity_outcomes,
+                              "performance": self.ledger.strategy_stats_since(
+                                  BRYNE_LIQUIDITY_V5_STRATEGY, UNIFIED_FOREX_PAPER_STARTED_AT)},
+                          TREND_CONTINUATION_V1_STRATEGY: {
+                              "outcomes": trend_continuation_outcomes,
+                              "performance": self.ledger.strategy_stats_since(
+                                  TREND_CONTINUATION_V1_STRATEGY, UNIFIED_FOREX_PAPER_STARTED_AT)},
+                      },
                       "open_positions": len([position for position in self.ledger.paper_positions()
-                                             if position.get("strategy") == BRYNE_LIQUIDITY_V5_STRATEGY]),
+                                             if position.get("strategy") in {
+                                                 BRYNE_LIQUIDITY_V5_STRATEGY,
+                                                 TREND_CONTINUATION_V1_STRATEGY}]),
                       "promotion_gate": (
                           "100 independent cost-stressed closes with positive expectancy; "
                           "exit changes require 30-50 closes"
