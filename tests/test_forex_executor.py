@@ -12,6 +12,7 @@ from app.forex_executor import (Handler, LOCK, STATE, Ledger, ThreadingHTTPServe
                                 FIVE_STREAK_STRATEGY,
                                 five_streak_email_actions, five_streak_profit_floor_r,
                                 five_streak_signals, bryne_liquidity_signals,
+                                trend_continuation_signals,
                                 calendar_execution_allowed,
                                 early_thesis_failure_shadow,
                                 live_profit_protection_shadow, live_profit_exit_decision,
@@ -36,6 +37,22 @@ class Adapter:
 
 
 class ForexExecutorTests(unittest.TestCase):
+    def test_trend_continuation_is_independent_and_paper_only(self):
+        signals = trend_continuation_signals({
+            "symbol": "EUR_USD", "calendar_verified": True,
+            "economic_event_source": "https://official.example/calendar",
+            "market_veto": False, "high_impact_calendar_blackout": False,
+            "session_liquid": True, "tradable": True, "quote_age_seconds": 1,
+            "spread_bps": 1.0, "horizon_direction": 1, "horizon_agreement": .8,
+            "trend_strength": .08, "change_1h_pct": .08, "change_24h_pct": .2,
+            "atr_14": .001, "ask": 1.101, "bid": 1.1009, "liquidity_score": .8,
+            "five_streak_candles": [{"time": "2026-09-04T12:00:00Z"}],
+        })
+        self.assertEqual(1, len(signals))
+        self.assertEqual("FOREX_TREND_CONTINUATION_V1", signals[0]["strategy"])
+        self.assertEqual("BUY", signals[0]["side"])
+        self.assertGreater(signals[0]["target_price"], signals[0]["reference_price"])
+
     def test_calendar_execution_fails_closed_on_pair_blackout(self):
         base = {"calendar_verified": True,
                 "economic_event_source": "https://official.example/calendar",
