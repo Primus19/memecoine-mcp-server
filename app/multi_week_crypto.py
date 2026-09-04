@@ -128,7 +128,9 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
     # without pretending missing ownership/safety/trend history has passed.
     # Execution quality remains immutable even in this research cohort.
     research_failures = []
+    chain = str(candidate.get("chain") or "").strip().lower()
     research_checks = (
+        (chain == "coinbase-spot", "established CEX asset is outside emerging research cohort"),
         (any(not str(candidate.get(field) or "").strip() for field in required_identity),
          "identity incomplete"),
         (candidate.get("sell_route_ok") is not True, "full-position sell route unavailable"),

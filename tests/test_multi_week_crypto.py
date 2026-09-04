@@ -72,6 +72,17 @@ def test_executable_emerging_candidate_enters_research_cohort_before_full_histor
     assert result["decision"] == "RESEARCH_PAPER_HOLD"
 
 
+def test_established_cex_asset_does_not_consume_emerging_research_capacity():
+    result = evaluate_candidate(candidate(
+        chain="coinbase-spot", contract="BTC-USD", execution_evidence_mode="CEX_ORDER_BOOK",
+        venue_operational=True, confirmation_count=1, confirmation_span_hours=0,
+        controlled_pullback_or_consolidation=False,
+    ))
+    assert result["qualified"] is False
+    assert result["research_eligible"] is False
+    assert "established CEX asset is outside emerging research cohort" in result["research_failures"]
+
+
 def test_research_cohort_never_relaxes_execution_quality():
     result = evaluate_candidate(candidate(
         security_verified=False, top10_holder_fraction=None, creator_fraction=None,
