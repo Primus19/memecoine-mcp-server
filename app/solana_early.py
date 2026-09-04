@@ -19,6 +19,8 @@ from typing import Any
 from .intelligence import classify_cohort
 
 UTC = timezone.utc
+SOLANA_FORWARD_EVIDENCE_STARTED_AT = os.getenv(
+    "SOLANA_FORWARD_EVIDENCE_STARTED_AT", "2026-09-04T22:18:00+00:00")
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 LOCK = threading.RLock()
 GOPLUS_LOCK = threading.RLock()
@@ -406,7 +408,24 @@ class Ledger:
 
     def matched_control_summary(self, strategy: str) -> dict[str, Any]:
         """Summarize forward outcomes without pretending rejected rows were trades."""
-        rows = self.watchlist_snapshot(strategy, limit=500)
+        all_rows = self.watchlist_snapshot(strategy, limit=500)
+        # The forward ledger predates pool-epoch validation.  Those legacy rows
+        # can contain internally consistent but economically impossible returns
+        # when a mint's executable venue changed.  Do not let repaired reports
+        # inherit that contaminated evidence: current-version statistics begin
+        # at the first deployment containing pool resets and discontinuity flags.
+        evidence_started_at = os.getenv(
+            "SOLANA_FORWARD_EVIDENCE_STARTED_AT", SOLANA_FORWARD_EVIDENCE_STARTED_AT)
+        cutoff = datetime.fromisoformat(evidence_started_at.replace("Z", "+00:00"))
+        rows = []
+        for item in all_rows:
+            try:
+                first_seen = datetime.fromisoformat(
+                    str(item.get("first_seen_at") or "").replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if first_seen >= cutoff:
+                rows.append(item)
         eligible_statuses = {"PAPER_QUALIFIED", "RESEARCH_SHADOW", "NEAR_MISS_SHADOW"}
         horizons: dict[str, dict[str, Any]] = {}
         for minute in (5, 15, 30, 60, 120, 240):
@@ -439,6 +458,9 @@ class Ledger:
             }
         return {
             "strategy": strategy,
+            "scope": "CURRENT_FORWARD_METHOD_ONLY",
+            "started_at": cutoff.isoformat(),
+            "pre_cutoff_rows_excluded": len(all_rows) - len(rows),
             "tracked": len(rows),
             "paper_or_shadow_eligible": sum(item.get("first_status") in eligible_statuses
                                              for item in rows),
