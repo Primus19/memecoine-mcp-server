@@ -12,6 +12,7 @@ from typing import Any
 
 
 STRATEGY = "MULTI_WEEK_CRYPTO_MOMENTUM_V1"
+RESEARCH_COHORT = "EMERGING_FORWARD_PAPER_HOLD"
 CHECKPOINT_DAYS = (3, 7, 14, 21, 30, 60, 90)
 
 @dataclass(frozen=True)
@@ -122,6 +123,23 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
         failures.append(f"score {score:.1f} below {policy.minimum_score:.1f}")
 
     qualified = not failures
+    # A research paper hold is deliberately less restrictive than a qualified
+    # strategy entry.  It creates prospective evidence for emerging assets
+    # without pretending missing ownership/safety/trend history has passed.
+    # Execution quality remains immutable even in this research cohort.
+    research_failures = []
+    research_checks = (
+        (any(not str(candidate.get(field) or "").strip() for field in required_identity),
+         "identity incomplete"),
+        (candidate.get("sell_route_ok") is not True, "full-position sell route unavailable"),
+        (age < policy.minimum_age_days, "token is too new for research hold"),
+        (liquidity < policy.minimum_liquidity_usd, "liquidity below research floor"),
+        (volume < policy.minimum_volume_24h_usd, "volume below research floor"),
+        (recovery < policy.minimum_round_trip_recovery, "round-trip recovery below minimum"),
+        (impact > policy.maximum_sell_impact_bps, "sell impact above maximum"),
+    )
+    research_failures.extend(message for failed, message in research_checks if failed)
+    research_eligible = not research_failures
     if candidate.get("catalyst_verified") is not True:
         warnings.append("no verified catalyst; trend evidence must stand on its own")
 
@@ -130,7 +148,11 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
         "strategy_version": "V1",
         "mode": "PAPER_ONLY",
         "qualified": qualified,
-        "decision": "PAPER_STAGE_1" if qualified else "FORWARD_TRACK",
+        "research_eligible": research_eligible,
+        "research_failures": research_failures,
+        "decision": ("PAPER_STAGE_1" if qualified else
+                     "RESEARCH_PAPER_HOLD" if research_eligible else "FORWARD_TRACK"),
+        "cohort": "QUALIFIED" if qualified else RESEARCH_COHORT if research_eligible else "TRACK_ONLY",
         "score": round(score, 2),
         "hard_gate_failures": failures,
         "warnings": warnings,
@@ -158,14 +180,15 @@ def manage_position(position: dict[str, Any], market: dict[str, Any]) -> dict[st
     peak_r = (peak - entry) / risk
     giveback = (peak - price) / max(peak - entry, risk)
 
+    research_only = position.get("research_only") is True
     hard_exit = (
         market.get("sell_route_ok") is not True or
         _number(market.get("round_trip_recovery"), -1) < 0.95 or
-        (market.get("security_verified") is not True and not (
+        (not research_only and market.get("security_verified") is not True and not (
             market.get("execution_evidence_mode") == "CEX_ORDER_BOOK" and
             market.get("venue_operational") is True))
     )
-    trend_break = sum((
+    trend_break = (not research_only or int(_number(market.get("daily_candle_count"))) >= 20) and sum((
         market.get("price_above_20d_average") is not True,
         market.get("daily_higher_lows") is not True,
         _number(market.get("relative_strength_7d_pct")) <= 0,
@@ -195,4 +218,5 @@ def manage_position(position: dict[str, Any], market: dict[str, Any]) -> dict[st
         "peak_r_multiple": round(peak_r, 4),
         "profit_giveback_fraction": round(max(0.0, giveback), 4),
         "executable_price": price,
+        "research_only": research_only,
     }

@@ -84,19 +84,25 @@ def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int 
             continue
         if position.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY and snapshot:
             stage = int(position.get("entry_stage") or 1)
-            if (stage == 1 and int(snapshot.get("confirmation_count") or 0) >= 3 and
+            if (position.get("research_only") is not True and stage == 1 and
+                    int(snapshot.get("confirmation_count") or 0) >= 3 and
                     snapshot.get("daily_higher_lows") is True and
                     float(snapshot.get("volume_7d_vs_prior_ratio") or 0) >= 1.10):
                 closes.append(ledger.add_stage(str(position["proposal_id"]), price, 2))
                 position = next(item for item in ledger.positions()
                                 if item.get("proposal_id") == position.get("proposal_id"))
                 stage = 2
-            if (stage == 2 and snapshot.get("breakout_confirmed") is True and
+            if (position.get("research_only") is not True and stage == 2 and
+                    snapshot.get("breakout_confirmed") is True and
                     snapshot.get("sell_route_ok") is True and
                     float(snapshot.get("round_trip_recovery") or 0) >= .97):
                 closes.append(ledger.add_stage(str(position["proposal_id"]), price, 3))
                 position = next(item for item in ledger.positions()
                                 if item.get("proposal_id") == position.get("proposal_id"))
+            if expired:
+                closes.append(ledger.close(str(position["proposal_id"]), price,
+                                           "MAX_MULTI_WEEK_HOLD", price_source=price_source))
+                continue
             management = manage_position(position, {**snapshot, "executable_price": price})
             if management["action"] == "EXIT":
                 closes.append(ledger.close(str(position["proposal_id"]), price,
@@ -174,7 +180,9 @@ def main() -> None:
                              item.get("type") in {"PAPER_FILL", "PAPER_ADD", "PAPER_PARTIAL_CLOSE", "PAPER_CLOSE"}]
             crypto_bucket.update(open=len(crypto_positions), open_positions=crypto_positions,
                                  realized_pnl_usd=crypto_bucket.get("net_pnl_usd", 0),
-                                 recent_actions=crypto_events[:25])
+                                 recent_actions=crypto_events[:25],
+                                 research_open=sum(item.get("research_only") is True for item in crypto_positions),
+                                 qualified_open=sum(item.get("research_only") is not True for item in crypto_positions))
             feed_health = dict(payload.get("crypto_health") or {})
             feed_health.setdefault("universe_count", len(payload.get("crypto_universe") or []))
             feed_health.setdefault("status", "READY" if feed_health["universe_count"] else "DEGRADED")

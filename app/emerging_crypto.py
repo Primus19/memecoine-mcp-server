@@ -233,9 +233,12 @@ def emerging_crypto_universe() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             sources = [str(pair.get("url") or "")]
             if security["security_source_url"]:
                 sources.append(security["security_source_url"])
+            execution = _execution(liquidity, probe, fee_bps)
+            one_way_cost = execution["estimated_slippage_bps"] / 10_000 + fee_bps / 10_000
             rows.append({"chain": chain, "contract": address, "symbol": str(token.get("symbol") or "").upper(),
                          "name": str(token.get("name") or token.get("symbol") or ""), "price": price,
-                         "executable_sell_price": price * (1 - _execution(liquidity, probe, fee_bps)["estimated_slippage_bps"] / 10_000),
+                         "executable_buy_price": price * (1 + one_way_cost),
+                         "executable_sell_price": price * (1 - one_way_cost),
                          "market_cap_usd": _number(pair.get("marketCap") or pair.get("fdv")),
                          "liquidity_usd": liquidity, "volume_24h_usd": volume, "daily_candles": candles,
                          "token_age_days": age, "benchmark_return_7d_pct": 0.0,
@@ -243,7 +246,7 @@ def emerging_crypto_universe() -> tuple[list[dict[str, Any]], dict[str, Any]]:
                          "quote_age_seconds": 0.0, "initial_stop_fraction": .12,
                          "observed_at": datetime.now(UTC).isoformat(), "source_urls": [url for url in sources if url.startswith("https://")],
                          "pair_address": pair.get("pairAddress"), "evidence_status": "DEX_DISCOVERY_PAPER_ONLY",
-                         **security, **_execution(liquidity, probe, fee_bps)})
+                         **security, **execution})
             if len(rows) >= limit:
                 break
         except Exception as exc:

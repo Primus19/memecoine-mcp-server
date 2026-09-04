@@ -141,6 +141,21 @@ class MultiAssetTests(unittest.TestCase):
         self.assertEqual(.625, result["maximum_loss_usd"])
         self.assertEqual("0xabc", result["contract"])
 
+    def test_emerging_research_candidate_opens_cost_stressed_paper_hold(self):
+        snapshot = {**self.base("CRYPTO", "EARLY"), "chain": "robinhood", "contract": "0xearly",
+                    "price": 1.0, "executable_buy_price": 1.01, "initial_stop_fraction": .12,
+                    "token_age_days": 20, "liquidity_usd": 1_000_000,
+                    "volume_24h_usd": 2_000_000, "round_trip_recovery": .98,
+                    "sell_impact_bps": 50, "sell_route_ok": True,
+                    "security_verified": False, "top10_holder_fraction": None,
+                    "creator_fraction": None, "confirmation_count": 1,
+                    "confirmation_span_hours": 0, "expected_holding_days": 21}
+        with patch.dict(os.environ, {"CRYPTO_ENGINE_ENABLED": "true"}):
+            result = MultiAssetEngine(self.ledger, self.policy).process(snapshot)
+        self.assertTrue(result["research_only"])
+        self.assertEqual("EMERGING_FORWARD_PAPER_HOLD", result["research_cohort"])
+        self.assertEqual(1.01, result["fill_price"])
+
     def test_partial_close_preserves_residual_position(self):
         position = self.ledger.append({"type": "PAPER_FILL", "mode": "PAPER_ONLY",
             "proposal_id": "crypto-1", "asset_class": "CRYPTO",

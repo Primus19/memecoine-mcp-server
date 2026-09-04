@@ -78,6 +78,9 @@ class Proposal:
     expected_holding_days: float = 0.0
     entry_stage: int = 1
     planned_full_quantity: float = 0.0
+    research_only: bool = False
+    research_cohort: str = ""
+    qualification_failures: tuple[str, ...] = ()
 
 
 class MultiAssetRejected(ValueError):
@@ -274,7 +277,9 @@ class MultiWeekCryptoEngine(StrategyEngine):
             "sell_impact_bps": snapshot.get("sell_impact_bps", snapshot.get("spread_bps")),
         }
         decision = evaluate_candidate(normalized)
-        failures.extend(decision["hard_gate_failures"])
+        research_only = not decision["qualified"] and decision["research_eligible"]
+        if not research_only:
+            failures.extend(decision["hard_gate_failures"])
         stop_fraction = float(snapshot.get("initial_stop_fraction") or 0)
         if not .05 <= stop_fraction <= .25:
             failures.append("verified volatility stop must be between 5% and 25%")
@@ -282,6 +287,7 @@ class MultiWeekCryptoEngine(StrategyEngine):
             raise MultiAssetRejected("; ".join(dict.fromkeys(failures)))
         prepared = {
             **snapshot,
+            "price": float(snapshot.get("executable_buy_price") or snapshot["price"]),
             "stop_distance": float(snapshot["price"]) * stop_fraction,
             "reward_multiple": max(3.0, float(snapshot.get("reward_multiple") or 3.0)),
             "expected_holding_days": max(21.0, float(snapshot.get("expected_holding_days") or 21)),
@@ -293,6 +299,9 @@ class MultiWeekCryptoEngine(StrategyEngine):
             proposal, quantity=proposal.quantity * .25,
             maximum_loss_usd=proposal.maximum_loss_usd * .25,
             entry_stage=1,
+            research_only=research_only,
+            research_cohort=str(decision.get("cohort") or ""),
+            qualification_failures=tuple(decision["hard_gate_failures"] if research_only else ()),
         )
 
 
@@ -493,6 +502,9 @@ class PaperLedger:
                 "last_mark_at": mark.get("recorded_at"),
                 "mfe_usd": round(max([0.0, *pnls]), 8),
                 "mae_usd": round(min([0.0, *pnls]), 8),
+                "research_only": position.get("research_only") is True,
+                "research_cohort": position.get("research_cohort") or "",
+                "qualification_failures": position.get("qualification_failures") or [],
                 "blocks_new_symbol": True,
             })
         return diagnostics
@@ -597,13 +609,16 @@ class MultiAssetEngine:
             raise MultiAssetRejected(
                 f"qualified signal blocked: {snapshot.get('symbol')} already has an open paper position")
         open_count = self.ledger.open_positions(asset_class)
-        if open_count >= self.policy.max_open_positions_per_sleeve:
+        capacity = self.policy.max_open_positions_per_sleeve
+        if asset_class == "CRYPTO" and proposal.research_only:
+            capacity = max(capacity, int(os.getenv("MULTI_WEEK_RESEARCH_MAX_OPEN_POSITIONS", "10")))
+        if open_count >= capacity:
             blockers = ", ".join(str(item.get("symbol") or "UNKNOWN")
                                  for item in self.ledger.position_diagnostics()
                                  if str(item.get("asset_class") or "").upper() == asset_class)
             raise MultiAssetRejected(
                 f"qualified signal blocked: paper sleeve capacity {open_count}/"
-                f"{self.policy.max_open_positions_per_sleeve}; open positions: {blockers or 'UNKNOWN'}")
+                f"{capacity}; open positions: {blockers or 'UNKNOWN'}")
         frozen = asdict(proposal)
         self.ledger.append({"type": "PROPOSAL", **frozen, "mode": "PAPER_ONLY"})
         return self.ledger.append({"type": "PAPER_FILL", **frozen, "mode": "PAPER_ONLY", "fill_price": proposal.reference_price})

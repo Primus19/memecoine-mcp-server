@@ -59,6 +59,28 @@ def test_requires_temporal_confirmation_not_repeated_same_scan():
     assert "requires two confirmations at least 12 hours apart" in result["hard_gate_failures"]
 
 
+def test_executable_emerging_candidate_enters_research_cohort_before_full_history():
+    result = evaluate_candidate(candidate(
+        security_verified=False, top10_holder_fraction=None, creator_fraction=None,
+        confirmation_count=1, confirmation_span_hours=0,
+        price_above_20d_average=False, daily_higher_highs=False, daily_higher_lows=False,
+        relative_strength_7d_pct=0, volume_7d_vs_prior_ratio=0,
+        holder_growth_7d_pct=0, controlled_pullback_or_consolidation=False,
+    ))
+    assert result["qualified"] is False
+    assert result["research_eligible"] is True
+    assert result["decision"] == "RESEARCH_PAPER_HOLD"
+
+
+def test_research_cohort_never_relaxes_execution_quality():
+    result = evaluate_candidate(candidate(
+        security_verified=False, top10_holder_fraction=None, creator_fraction=None,
+        sell_route_ok=False, round_trip_recovery=.5, sell_impact_bps=5000,
+    ))
+    assert result["research_eligible"] is False
+    assert "full-position sell route unavailable" in result["research_failures"]
+
+
 def test_profit_manager_takes_partial_at_two_r():
     result = manage_position(
         {"entry_price": 100, "initial_stop_price": 90, "peak_executable_price": 121},
@@ -89,3 +111,13 @@ def test_execution_failure_always_forces_exit():
     )
     assert result["action"] == "EXIT"
     assert result["fraction"] == 1
+
+
+def test_research_hold_does_not_exit_only_because_history_is_incomplete():
+    result = manage_position(
+        {"entry_price": 100, "initial_stop_price": 88, "peak_executable_price": 100,
+         "research_only": True},
+        {"executable_price": 99, "sell_route_ok": True, "round_trip_recovery": .98,
+         "security_verified": False, "daily_candle_count": 1},
+    )
+    assert result["action"] == "HOLD"

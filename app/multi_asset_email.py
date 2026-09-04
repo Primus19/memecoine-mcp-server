@@ -113,7 +113,8 @@ class MultiWeekCryptoEmailer:
         positions = crypto.get("open_positions") or []
         rows = "".join(
             "<tr>" + "".join(f"<td style='padding:7px;border-bottom:1px solid #ddd'>{html.escape(str(v))}</td>" for v in (
-                p.get("symbol"), p.get("entry_price"), p.get("current_mark_price"),
+                (f"{p.get('symbol')} (RESEARCH)" if p.get("research_only") else p.get("symbol")),
+                p.get("entry_price"), p.get("current_mark_price"),
                 p.get("current_unrealized_pnl_usd"), p.get("mfe_usd"), p.get("mae_usd"),
                 round(float(p.get("age_minutes") or 0) / 1440, 2))) + "</tr>"
             for p in positions
