@@ -307,6 +307,28 @@ class SolanaEarlyTests(unittest.TestCase):
         self.assertEqual("SHADOW_ONLY", result["mode"])
         self.assertEqual("MICROCAP_SUB_1M_SHADOW_V1", result["strategy_version"])
 
+    def test_sub_million_shadow_tracks_when_ownership_provider_is_unavailable(self):
+        item = candidate(market_cap_usd=450_000, volume_24h_usd=300_000,
+                         liquidity_usd=90_000, sell_simulation_ok=True,
+                         sell_price_impact_bps=65, top10_holder_fraction=None,
+                         creator_fraction=None)
+        result = score_microcap_sub_million_shadow(item, MicrocapLaunchPolicy())
+        self.assertTrue(result["shadow_qualified"])
+        self.assertTrue(result["zero_capital_research_only"])
+        self.assertFalse(result["paper_qualified"])
+        self.assertIn("shadow top-10 concentration unavailable", result["evidence_warnings"])
+
+    def test_matched_control_summary_keeps_rejections_separate_from_trades(self):
+        first = candidate(mint="control", pool="pool-control", price_usd=1,
+                          observed_at="2026-09-01T00:00:00+00:00")
+        later = {**first, "price_usd": 1.1, "observed_at": "2026-09-01T00:15:00+00:00"}
+        self.ledger.upsert_watch_candidate(first, "TEST", "REJECTED")
+        self.ledger.upsert_watch_candidate(later, "TEST", "REJECTED")
+        summary = self.ledger.matched_control_summary("TEST")
+        self.assertEqual(1, summary["rejected_controls"])
+        self.assertEqual(1, summary["horizons_minutes"]["15"]["sample"])
+        self.assertEqual(10.0, summary["horizons_minutes"]["15"]["mean_return_pct"])
+
     def test_sub_million_microcap_shadow_keeps_sellability_and_safety_hard(self):
         result = score_microcap_sub_million_shadow(
             candidate(market_cap_usd=450_000, volume_24h_usd=300_000,
