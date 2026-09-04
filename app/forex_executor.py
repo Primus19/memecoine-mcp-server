@@ -1268,7 +1268,9 @@ class Executor:
         limits = self.risk_limits(float(summary["nav"]))
         if len(trades) > self.max_positions():
             raise BrokerError("broker position count exceeds two-position safety ceiling")
-        if live_armed(self.adapter) or practice_armed(self.adapter):
+        armed = live_armed(self.adapter) or practice_armed(self.adapter)
+        existing_managed_positions = self.ledger.broker_positions()
+        if armed:
             history_version = "tagged-closed-v1"
             if self.ledger.setting("historical_reconciliation_version") != history_version:
                 history = self.adapter.transactions_since("1").get("transactions", [])
@@ -1283,6 +1285,11 @@ class Executor:
                 self.ledger.set_setting("historical_reconciliation_version", history_version)
                 self.ledger.event("BROKER_HISTORY_RECONCILED", {"imported": imported,
                                   "tagged_closed_trade_count": len(imported)})
+        # A profitability lock blocks new orders; it must not freeze the ledger.
+        # Reconcile any pre-existing managed intent (or broker position) against
+        # OANDA even while execution is PAPER_ONLY, otherwise phantom exposure
+        # consumes risk indefinitely after the broker has already closed it.
+        if armed or existing_managed_positions or trades:
             broker_positions = self.ledger.broker_positions()
             expected = {str(item.get("broker_trade_id") or "") for item in broker_positions if item.get("broker_trade_id")}
             actual = {str(item.get("id") or "") for item in trades}
@@ -1300,7 +1307,8 @@ class Executor:
                 if not existing:
                     if self.ledger.has_intent(intent_id):
                         continue
-                    self.ledger.add_intent(recovered, "LIVE" if live_armed(self.adapter) else "PRACTICE", "OPEN")
+                    recovered_mode = "LIVE" if self.adapter.environment == "live" else "PRACTICE"
+                    self.ledger.add_intent(recovered, recovered_mode, "OPEN")
                 self.ledger.update_intent(intent_id, "OPEN", trade_id=trade_id)
                 self.ledger.event("BROKER_TRADE_RECOVERED", {"intent_id": intent_id,
                                   "trade_id": trade_id, "symbol": recovered["symbol"]})
@@ -1341,7 +1349,6 @@ class Executor:
             self.ledger.event("WEEKLY_BASELINE_RESET", {"week": week_key, "nav": summary["nav"]})
         daily_nav = float(self.ledger.setting("daily_baseline_nav", str(summary["nav"])))
         weekly_nav = float(self.ledger.setting("weekly_baseline_nav", str(summary["nav"])))
-        armed = live_armed(self.adapter) or practice_armed(self.adapter)
         if armed and daily_nav - float(summary["nav"]) >= limits["daily_loss_usd"]:
             raise BrokerError("3% daily NAV loss circuit breaker active")
         if armed and weekly_nav - float(summary["nav"]) >= limits["weekly_loss_usd"]:
