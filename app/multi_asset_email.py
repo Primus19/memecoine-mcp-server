@@ -133,7 +133,7 @@ class MultiWeekCryptoEmailer:
 <b>Feed detail:</b> {html.escape(str(feed.get('last_error') or 'none'))}</p>
 <table width='100%' cellspacing='0'><tr style='background:#e8eef5'><th>Coin</th><th>Entry</th><th>Mark</th><th>Open P&amp;L</th><th>MFE</th><th>MAE</th><th>Days</th></tr>{rows}</table>
 <h3>Emerging on-chain research</h3>
-<table width='100%' cellspacing='0'><tr style='background:#e8eef5'><th>Chain</th><th>Coin</th><th>Score</th><th>Confirmations</th><th>Safety</th><th>Why not entered</th></tr>{emerging_rows}</table>
+<table width='100%' cellspacing='0'><tr style='background:#e8eef5'><th>Chain</th><th>Coin</th><th>Score</th><th>Confirmations</th><th>Safety</th><th>Qualification gaps</th></tr>{emerging_rows}</table>
 <p style='color:#64748b;font-size:12px'>Research portfolio only. No live cryptocurrency purchase is authorized by this report.</p></div></div></body></html>"""
         return {"subject": subject, "text": detail, "html": body}
 

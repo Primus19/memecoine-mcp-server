@@ -20,6 +20,10 @@ class MultiWeekPolicy:
     minimum_age_days: float = 7.0
     minimum_liquidity_usd: float = 250_000.0
     minimum_volume_24h_usd: float = 500_000.0
+    minimum_research_market_cap_usd: float = 100_000.0
+    maximum_research_market_cap_usd: float = 25_000_000.0
+    minimum_research_liquidity_to_cap: float = 0.03
+    minimum_research_volume_to_cap: float = 0.05
     minimum_round_trip_recovery: float = 0.97
     maximum_sell_impact_bps: float = 150.0
     maximum_top10_fraction: float = 0.65
@@ -53,6 +57,7 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
     age = _number(candidate.get("token_age_days"), -1)
     liquidity = _number(candidate.get("liquidity_usd"))
     volume = _number(candidate.get("volume_24h_usd"))
+    market_cap = _number(candidate.get("market_cap_usd"))
     recovery = _number(candidate.get("round_trip_recovery"), -1)
     impact = _number(candidate.get("sell_impact_bps"), 10_000)
     top10 = candidate.get("top10_holder_fraction")
@@ -137,6 +142,12 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
         (age < policy.minimum_age_days, "token is too new for research hold"),
         (liquidity < policy.minimum_liquidity_usd, "liquidity below research floor"),
         (volume < policy.minimum_volume_24h_usd, "volume below research floor"),
+        (market_cap < policy.minimum_research_market_cap_usd, "market cap below research floor or unavailable"),
+        (market_cap > policy.maximum_research_market_cap_usd, "market cap too large for emerging upside cohort"),
+        (market_cap > 0 and liquidity / market_cap < policy.minimum_research_liquidity_to_cap,
+         "liquidity is too shallow relative to market cap"),
+        (market_cap > 0 and volume / market_cap < policy.minimum_research_volume_to_cap,
+         "volume is too weak relative to market cap"),
         (recovery < policy.minimum_round_trip_recovery, "round-trip recovery below minimum"),
         (impact > policy.maximum_sell_impact_bps, "sell impact above maximum"),
     )

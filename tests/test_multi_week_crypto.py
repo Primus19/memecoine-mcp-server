@@ -5,6 +5,7 @@ def candidate(**changes):
     base = {
         "chain": "base", "contract": "0xabc", "symbol": "TEST", "observed_at": "2026-09-03T00:00:00Z",
         "token_age_days": 20, "liquidity_usd": 2_000_000, "volume_24h_usd": 3_000_000,
+        "market_cap_usd": 5_000_000,
         "round_trip_recovery": .995, "sell_impact_bps": 40, "sell_route_ok": True,
         "security_verified": True, "top10_holder_fraction": .35, "creator_fraction": .02,
         "confirmation_count": 2, "confirmation_span_hours": 24,
@@ -90,6 +91,15 @@ def test_research_cohort_never_relaxes_execution_quality():
     ))
     assert result["research_eligible"] is False
     assert "full-position sell route unavailable" in result["research_failures"]
+
+
+def test_research_cohort_requires_asymmetric_market_cap_headroom():
+    result = evaluate_candidate(candidate(
+        market_cap_usd=150_000_000, security_verified=False,
+        top10_holder_fraction=None, creator_fraction=None,
+    ))
+    assert result["research_eligible"] is False
+    assert "market cap too large for emerging upside cohort" in result["research_failures"]
 
 
 def test_profit_manager_takes_partial_at_two_r():

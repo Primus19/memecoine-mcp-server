@@ -144,6 +144,7 @@ class MultiAssetTests(unittest.TestCase):
     def test_emerging_research_candidate_opens_cost_stressed_paper_hold(self):
         snapshot = {**self.base("CRYPTO", "EARLY"), "chain": "robinhood", "contract": "0xearly",
                     "price": 1.0, "executable_buy_price": 1.01, "initial_stop_fraction": .12,
+                    "market_cap_usd": 5_000_000,
                     "token_age_days": 20, "liquidity_usd": 1_000_000,
                     "volume_24h_usd": 2_000_000, "round_trip_recovery": .98,
                     "sell_impact_bps": 50, "sell_route_ok": True,
