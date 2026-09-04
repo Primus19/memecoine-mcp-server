@@ -50,6 +50,7 @@ def test_email_content_contains_position_and_paper_warning():
         "emerging_discovery": {"candidate_count": 1, "qualified_count": 0,
             "candidates": [{"chain": "robinhood", "symbol": "RUN", "score": 55,
                             "research_score": 82,
+                            "research_eligible": True,
                             "confirmation_count": 1, "security_verified": False,
                             "failures": ["chain safety adapter unavailable"]}]},
     }, True)
@@ -60,4 +61,4 @@ def test_email_content_contains_position_and_paper_warning():
     assert "chain safety adapter unavailable" in content["html"]
     assert "Budget" in content["html"]
     assert "+4.00%" in content["html"]
-    assert "Top 3 emerging candidates" in content["html"]
+    assert "Selected emerging research candidates" in content["html"]

@@ -153,6 +153,7 @@ def main() -> None:
                     "chain": item.get("chain"), "symbol": item.get("symbol"),
                     "contract": item.get("contract"), "score": decision["score"],
                     "research_score": decision.get("research_score"),
+                    "research_eligible": decision.get("research_eligible"),
                     "qualified": decision["qualified"], "liquidity_usd": item.get("liquidity_usd"),
                     "volume_24h_usd": item.get("volume_24h_usd"),
                     "confirmation_count": item.get("confirmation_count"),
@@ -196,6 +197,8 @@ def main() -> None:
                        "multi_week_crypto": crypto_bucket, "feed_health": feed_health,
                        "emerging_discovery": {"candidate_count": len(emerging_candidates),
                            "qualified_count": sum(bool(item["qualified"]) for item in emerging_candidates),
+                           "research_eligible_count": sum(bool(item["research_eligible"])
+                                                          for item in emerging_candidates),
                            "candidates": emerging_candidates[:20]}}
             runtime["email_delivery"] = emailer.maybe_send(events, {**report, "multi_week_crypto": crypto_bucket}, runtime)
             HealthHandler.runtime = runtime

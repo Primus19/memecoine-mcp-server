@@ -143,8 +143,9 @@ class MultiWeekCryptoEmailer:
                 item.get("chain"), item.get("symbol"), item.get("research_score"), item.get("confirmation_count"),
                 "YES" if item.get("security_verified") else "NO",
                 "; ".join(item.get("failures") or [])[:240])) + "</tr>"
-            for item in (emerging.get("candidates") or [])[:3]
-        ) or "<tr><td colspan='6' style='padding:10px'>No emerging candidates met the discovery floors.</td></tr>"
+            for item in [candidate for candidate in (emerging.get("candidates") or [])
+                         if candidate.get("research_eligible")][:3]
+        ) or "<tr><td colspan='6' style='padding:10px'>No candidate currently passes the research portfolio gates.</td></tr>"
         body = f"""<!doctype html><html><body style='font-family:Arial;color:#172033;background:#f1f5f9;padding:16px;margin:0'>
 <div style='max-width:760px;margin:auto;background:white;border-radius:14px;overflow:hidden;box-shadow:0 8px 24px #cbd5e1'>
 <div style='padding:22px;background:#0f5b62;color:white'><small>MULTI-WEEK CRYPTO - PAPER ONLY</small><h2 style='margin:8px 0 0'>{html.escape(heading)}</h2></div>
@@ -154,7 +155,7 @@ class MultiWeekCryptoEmailer:
 <span style='background:{'#dcfce7' if open_pnl >= 0 else '#fee2e2'};padding:8px 12px;border-radius:18px'>Open P&amp;L <b>${open_pnl:+.2f} ({portfolio_return:+.2f}%)</b></span></div>
 <p style='color:#475569'>{html.escape(detail)}</p><p style='font-size:12px;color:#64748b'><b>Last scan:</b> {html.escape(str(runtime.get('last_scan') or 'not available'))} | <b>Feed:</b> {html.escape(str(feed.get('status') or 'UNKNOWN'))}</p>
 <div style='overflow-x:auto'><table width='100%' cellspacing='0' style='font-size:13px'><tr style='background:#dbeafe'><th>Coin</th><th>Invested</th><th>Entry</th><th>Mark</th><th>Value</th><th>P&amp;L</th><th>Return</th><th>Days</th></tr>{rows}</table></div>
-<h3 style='color:#0f5b62'>Top 3 emerging candidates</h3>
+<h3 style='color:#0f5b62'>Selected emerging research candidates</h3>
 <div style='overflow-x:auto'><table width='100%' cellspacing='0' style='font-size:12px'><tr style='background:#e2e8f0'><th>Chain</th><th>Coin</th><th>Research score</th><th>Checks</th><th>Safety</th><th>Qualification gaps</th></tr>{emerging_rows}</table></div>
 <p style='color:#64748b;font-size:12px'>Research portfolio only. No live cryptocurrency purchase is authorized by this report.</p></div></div></body></html>"""
         return {"subject": subject, "text": detail, "html": body}
