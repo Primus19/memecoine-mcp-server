@@ -93,6 +93,7 @@ class MultiWeekCryptoEmailer:
         now = datetime.now(UTC).astimezone(cls._timezone())
         crypto = report.get("multi_week_crypto") or {}
         feed = runtime.get("feed_health") or {}
+        monitor = runtime.get("held_position_monitor") or {}
         emerging = runtime.get("emerging_discovery") or {}
         if summary:
             subject = f"[PAPER] Multi-Week Crypto Status | {now:%Y-%m-%d %H:%M} ET"
@@ -106,7 +107,13 @@ class MultiWeekCryptoEmailer:
             batch = list((event or {}).get("batch_actions") or [])
             kind = str((event or {}).get("type") or "ACTION").replace("PAPER_", "")
             symbol = str((event or {}).get("symbol") or "CRYPTO")
-            if batch:
+            if kind == "MONITOR_ALERT":
+                subject = f"[CRITICAL] Multi-Week Crypto Monitoring Degraded | {now:%Y-%m-%d %H:%M} ET"
+                heading = "HELD-POSITION MONITORING DEGRADED"
+                detail = str((event or {}).get("reason") or
+                             "One or more open positions lacks a fresh executable mark.")
+                event_price = event_quantity = None
+            elif batch:
                 action_labels = [f"{str(item.get('type') or '').replace('PAPER_', '')}: {item.get('symbol')}"
                                  for item in batch]
                 subject = f"[PAPER TRADE] Multi-Week Crypto | {len(batch)} ACTIONS | {now:%Y-%m-%d %H:%M} ET"
@@ -124,6 +131,7 @@ class MultiWeekCryptoEmailer:
                           f"reason: {(event or {}).get('reason') or (event or {}).get('thesis') or 'ranked research entry'}; "
                           f"realized P&L: ${float((event or {}).get('realized_pnl_usd') or 0):+.4f}.")
         positions = crypto.get("open_positions") or []
+        robinhood = crypto.get("robinhood_chain") or {}
         budget = max(100.0, float(os.getenv("MULTI_WEEK_PAPER_BUDGET_USD", "1000")))
         exposure = sum(float(p.get("entry_value_usd") or 0) for p in positions)
         open_pnl = sum(float(p.get("current_unrealized_pnl_usd") or 0) for p in positions)
@@ -187,7 +195,18 @@ class MultiWeekCryptoEmailer:
 <span style='background:#ede9fe;padding:8px 12px;border-radius:18px'>Exposure <b>${exposure:,.2f} ({exposure/budget*100:.1f}%)</b></span>
 <span style='background:{'#dcfce7' if open_pnl >= 0 else '#fee2e2'};padding:8px 12px;border-radius:18px'>Open P&amp;L <b>${open_pnl:+.2f} ({portfolio_return:+.2f}%)</b></span></div>
 <p style='color:#475569'>{html.escape(detail)}</p><p style='font-size:12px;color:#64748b'><b>Last scan:</b> {html.escape(str(runtime.get('last_scan') or 'not available'))} | <b>Feed:</b> {html.escape(str(feed.get('status') or 'UNKNOWN'))}</p>
+<div style='padding:10px 12px;margin:12px 0;background:{'#ecfdf5' if monitor.get('status') == 'READY' else '#fee2e2'};border-radius:8px'>
+<b>Held-position monitor:</b> {html.escape(str(monitor.get('status') or 'UNKNOWN'))} | Fresh executable marks: {int(monitor.get('fresh_quote_count') or 0)} | Refresh: {int(monitor.get('refresh_interval_seconds') or 0) // 60} minutes
+</div>
 {position_cards}
+<div style='padding:12px;margin:14px 0;background:#ecfeff;border-left:4px solid #0891b2;border-radius:7px'>
+<b>Robinhood-chain research cohort</b><br>
+Opened: {int(robinhood.get('opened') or 0)} | Open: {int(robinhood.get('open') or 0)} | Closed: {int(robinhood.get('closed') or 0)} |
+Wins/Losses: {int(robinhood.get('wins') or 0)}/{int(robinhood.get('losses') or 0)}<br>
+Realized P&amp;L: ${float(robinhood.get('realized_pnl_usd') or 0):+.2f} |
+Open P&amp;L: ${float(robinhood.get('unrealized_pnl_usd') or 0):+.2f} |
+Horizon checkpoints: {int(robinhood.get('checkpoint_count') or 0)}
+</div>
 <h3 style='color:#0f5b62'>Selected emerging research candidates</h3>
 {candidate_cards}
 <p style='color:#64748b;font-size:12px'>Research portfolio only. No live cryptocurrency purchase is authorized by this report.</p></div></div></body></html>"""
@@ -234,7 +253,11 @@ class MultiWeekCryptoEmailer:
         actions = [item for item in events if item.get("strategy") == STRATEGY and item.get("event_id") not in sent]
         interval = max(86400, int(os.getenv("MULTI_WEEK_SUMMARY_INTERVAL_SECONDS", "86400")))
         summary_due = time.time() - float(self.state.get("last_summary_epoch") or 0) >= interval
-        if not actions and not summary_due:
+        monitor = runtime.get("held_position_monitor") or {}
+        monitor_status = str(monitor.get("status") or "UNKNOWN")
+        monitor_alert = (monitor_status == "DEGRADED" and
+                         self.state.get("last_monitor_status") != "DEGRADED")
+        if not actions and not summary_due and not monitor_alert:
             return self.status("NO_NEW_ACTION")
         with self.lock:
             if self.inflight:
@@ -242,7 +265,15 @@ class MultiWeekCryptoEmailer:
             self.inflight = True
         def deliver() -> None:
             try:
-                if actions:
+                if monitor_alert:
+                    errors = "; ".join(str(item.get("error") or item)
+                                       for item in monitor.get("errors") or [])
+                    result = self._send(self._content({
+                        "type": "PAPER_MONITOR_ALERT", "symbol": "PORTFOLIO",
+                        "reason": errors or "An open position lacks a fresh executable quote.",
+                    }, report, runtime, False))
+                    self.state["last_subject"] = result["subject"]
+                elif actions:
                     digest = {"type": "PAPER_ACTION_DIGEST", "symbol": f"{len(actions)} ACTIONS",
                               "batch_actions": actions}
                     result = self._send(self._content(digest, report, runtime, False))
@@ -253,7 +284,9 @@ class MultiWeekCryptoEmailer:
                 elif summary_due:
                     result = self._send(self._content(None, report, runtime, True))
                     self.state["last_summary_epoch"] = time.time(); self.state["last_subject"] = result["subject"]
-                self.state.update(sent_event_ids=list(sent)[-1000:], last_error="", last_sent_at=datetime.now(UTC).isoformat())
+                self.state.update(sent_event_ids=list(sent)[-1000:], last_error="",
+                                  last_monitor_status=monitor_status,
+                                  last_sent_at=datetime.now(UTC).isoformat())
                 self._save()
             except Exception as exc:
                 self.state["last_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"; self._save()

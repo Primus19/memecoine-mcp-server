@@ -438,18 +438,111 @@ class PaperLedger:
                 positions.pop(proposal_id, None)
         return list(positions.values())
 
-    def mark(self, position: dict[str, Any], price: float, source: str = "CURRENT_EXECUTABLE_MARK") -> dict[str, Any]:
+    def mark(self, position: dict[str, Any], price: float, source: str = "CURRENT_EXECUTABLE_MARK",
+             market: dict[str, Any] | None = None) -> dict[str, Any]:
         if price <= 0:
             raise MultiAssetRejected("paper mark price is not positive")
         side = str(position["side"])
         quantity = float(position["quantity"])
         entry = float(position["fill_price"])
         pnl = (price - entry) * quantity * (1 if side == "BUY" else -1)
+        market = market or {}
         return self.append({"type": "PAPER_MARK", "mode": "PAPER_ONLY",
                             "asset_class": position["asset_class"], "strategy": position["strategy"],
                             "symbol": position["symbol"], "proposal_id": position["proposal_id"],
+                            "chain": position.get("chain") or "",
+                            "contract": position.get("contract") or "",
+                            "research_cohort": position.get("research_cohort") or "",
                             "mark_price": price, "unrealized_pnl_usd": round(pnl, 8),
-                            "price_source": source})
+                            "price_source": source,
+                            "source_observed_at": market.get("observed_at"),
+                            "sell_route_ok": market.get("sell_route_ok"),
+                            "round_trip_recovery": market.get("round_trip_recovery"),
+                            "liquidity_usd": market.get("liquidity_usd"),
+                            "volume_24h_usd": market.get("volume_24h_usd"),
+                            "source_urls": market.get("source_urls") or []})
+
+    def record_intraday_checkpoints(self, position: dict[str, Any], price: float,
+                                    market: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """Retain executable 15/30/60/120/240-minute counterfactual marks."""
+        if position.get("strategy") != MULTI_WEEK_CRYPTO_STRATEGY or price <= 0:
+            return []
+        try:
+            opened = datetime.fromisoformat(str(position.get("recorded_at") or "").replace("Z", "+00:00"))
+            age_minutes = max(0.0, (now_utc() - opened.astimezone(UTC)).total_seconds() / 60)
+        except (TypeError, ValueError):
+            return []
+        proposal_id = str(position.get("proposal_id") or "")
+        existing = {int(item.get("checkpoint_minutes") or 0) for item in self.records()
+                    if item.get("type") == "PAPER_INTRADAY_CHECKPOINT" and
+                    str(item.get("proposal_id") or "") == proposal_id}
+        entry, quantity = float(position.get("fill_price") or 0), float(position.get("quantity") or 0)
+        market, added = market or {}, []
+        for horizon in (15, 30, 60, 120, 240):
+            if horizon > age_minutes or horizon in existing:
+                continue
+            pnl = (price - entry) * quantity
+            added.append(self.append({
+                "type": "PAPER_INTRADAY_CHECKPOINT", "mode": "PAPER_ONLY",
+                "asset_class": "CRYPTO", "strategy": MULTI_WEEK_CRYPTO_STRATEGY,
+                "symbol": position.get("symbol"), "proposal_id": proposal_id,
+                "chain": position.get("chain") or market.get("chain") or "",
+                "contract": position.get("contract") or market.get("contract") or "",
+                "checkpoint_minutes": horizon, "age_minutes": round(age_minutes, 2),
+                "entry_price": entry, "executable_price": price,
+                "executable_value_usd": round(price * quantity, 8),
+                "executable_pnl_usd": round(pnl, 8),
+                "return_pct": round((price / entry - 1) * 100, 6) if entry > 0 else None,
+                "sell_route_ok": market.get("sell_route_ok"),
+                "round_trip_recovery": market.get("round_trip_recovery"),
+                "liquidity_usd": market.get("liquidity_usd"),
+                "source_observed_at": market.get("observed_at"),
+                "price_source": market.get("price_source") or "CURRENT_EXECUTABLE_MARK",
+            }))
+        return added
+
+    def record_due_horizon_checkpoints(self, position: dict[str, Any], price: float,
+                                       market: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """Persist the first executable observation after each multi-week horizon."""
+        if position.get("strategy") != MULTI_WEEK_CRYPTO_STRATEGY or price <= 0:
+            return []
+        try:
+            opened = datetime.fromisoformat(str(position.get("recorded_at") or "").replace("Z", "+00:00"))
+            age_days = max(0.0, (now_utc() - opened.astimezone(UTC)).total_seconds() / 86400)
+        except (TypeError, ValueError):
+            return []
+        proposal_id = str(position.get("proposal_id") or "")
+        existing = {int(item.get("checkpoint_days") or 0) for item in self.records()
+                    if item.get("type") == "PAPER_HORIZON_CHECKPOINT" and
+                    str(item.get("proposal_id") or "") == proposal_id}
+        entry = float(position.get("fill_price") or 0)
+        quantity = float(position.get("quantity") or 0)
+        market = market or {}
+        added = []
+        for horizon in (1, 3, 7, 14, 21, 30, 60, 90):
+            if horizon > age_days or horizon in existing:
+                continue
+            pnl = (price - entry) * quantity
+            added.append(self.append({
+                "type": "PAPER_HORIZON_CHECKPOINT", "mode": "PAPER_ONLY",
+                "asset_class": "CRYPTO", "strategy": MULTI_WEEK_CRYPTO_STRATEGY,
+                "symbol": position.get("symbol"), "proposal_id": proposal_id,
+                "chain": position.get("chain") or market.get("chain") or "",
+                "contract": position.get("contract") or market.get("contract") or "",
+                "research_cohort": position.get("research_cohort") or "",
+                "checkpoint_days": horizon, "age_days": round(age_days, 4),
+                "entry_price": entry, "executable_price": price,
+                "executable_value_usd": round(price * quantity, 8),
+                "executable_pnl_usd": round(pnl, 8),
+                "return_pct": round((price / entry - 1) * 100, 6) if entry > 0 else None,
+                "sell_route_ok": market.get("sell_route_ok"),
+                "round_trip_recovery": market.get("round_trip_recovery"),
+                "liquidity_usd": market.get("liquidity_usd"),
+                "volume_24h_usd": market.get("volume_24h_usd"),
+                "source_observed_at": market.get("observed_at"),
+                "source_urls": market.get("source_urls") or [],
+            }))
+        return added
 
     def add_stage(self, proposal_id: str, price: float, stage: int) -> dict[str, Any]:
         position = next((item for item in self.positions() if item.get("proposal_id") == proposal_id), None)
@@ -495,12 +588,22 @@ class PaperLedger:
                               if item.get("type") == "PAPER_MARK" and
                               str(item.get("proposal_id") or "") == proposal_id]
             pnls = [float(item.get("unrealized_pnl_usd") or 0) for item in position_marks]
+            mfe_mark = max(position_marks, key=lambda item: float(item.get("unrealized_pnl_usd") or 0), default={})
+            mae_mark = min(position_marks, key=lambda item: float(item.get("unrealized_pnl_usd") or 0), default={})
             entry_price = float(position.get("fill_price") or 0)
             quantity = float(position.get("quantity") or 0)
             entry_value = entry_price * quantity
             mark_price = mark.get("mark_price")
             current_value = float(mark_price) * quantity if mark_price is not None else None
             current_pnl = mark.get("unrealized_pnl_usd")
+            try:
+                mark_time = datetime.fromisoformat(str(mark.get("source_observed_at") or
+                                                        mark.get("recorded_at") or "").replace("Z", "+00:00"))
+                mark_age_seconds = max(0.0, (current - mark_time.astimezone(UTC)).total_seconds())
+            except (TypeError, ValueError):
+                mark_age_seconds = None
+            mark_sla = max(300, min(1800, int(os.getenv(
+                "MULTI_WEEK_MARK_SLA_SECONDS", "900"))))
             diagnostics.append({
                 "proposal_id": proposal_id,
                 "asset_class": position.get("asset_class"),
@@ -522,8 +625,14 @@ class PaperLedger:
                 "return_pct": round(float(current_pnl) / entry_value * 100, 3)
                               if current_pnl is not None and entry_value > 0 else None,
                 "last_mark_at": mark.get("recorded_at"),
+                "last_source_observed_at": mark.get("source_observed_at"),
+                "mark_age_seconds": round(mark_age_seconds, 1) if mark_age_seconds is not None else None,
+                "monitoring_status": ("NO_EXECUTABLE_MARK" if mark_age_seconds is None else
+                                      "STALE_EXECUTABLE_MARK" if mark_age_seconds > mark_sla else "FRESH"),
                 "mfe_usd": round(max([0.0, *pnls]), 8),
                 "mae_usd": round(min([0.0, *pnls]), 8),
+                "mfe_at": mfe_mark.get("recorded_at"),
+                "mae_at": mae_mark.get("recorded_at"),
                 "research_only": position.get("research_only") is True,
                 "research_cohort": position.get("research_cohort") or "",
                 "qualification_failures": position.get("qualification_failures") or [],
@@ -543,6 +652,8 @@ class PaperLedger:
         return self.append({"type": "PAPER_CLOSE", "mode": "PAPER_ONLY", "asset_class": position["asset_class"],
                             "strategy": position["strategy"], "symbol": position["symbol"],
                             "proposal_id": proposal_id, "entry_price": entry, "fill_price": price,
+                            "chain": position.get("chain") or "", "contract": position.get("contract") or "",
+                            "research_cohort": position.get("research_cohort") or "",
                             "quantity": quantity, "reason": reason, "realized_pnl_usd": round(pnl, 8),
                             "price_source": price_source})
 
@@ -562,6 +673,8 @@ class PaperLedger:
             "type": "PAPER_PARTIAL_CLOSE", "mode": "PAPER_ONLY",
             "asset_class": position["asset_class"], "strategy": position["strategy"],
             "symbol": position["symbol"], "proposal_id": proposal_id,
+            "chain": position.get("chain") or "", "contract": position.get("contract") or "",
+            "research_cohort": position.get("research_cohort") or "",
             "entry_price": position["fill_price"], "fill_price": price,
             "closed_quantity": closed_quantity, "remaining_quantity": quantity - closed_quantity,
             "fraction": fraction, "reason": reason, "realized_pnl_usd": round(pnl, 8),
@@ -605,6 +718,43 @@ class PaperLedger:
             elif item.get("type") == "PAPER_PARTIAL_CLOSE":
                 bucket["net_pnl_usd"] = round(
                     bucket["net_pnl_usd"] + float(item.get("realized_pnl_usd") or 0), 8)
+        fills = {str(item.get("proposal_id") or ""): item for item in records
+                 if item.get("type") == "PAPER_FILL" and
+                 item.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY}
+        latest_marks = self.latest_marks()
+        chain_performance: dict[str, dict[str, Any]] = {}
+        for proposal_id, fill in fills.items():
+            chain = str(fill.get("chain") or "unknown").lower()
+            bucket = chain_performance.setdefault(chain, {
+                "opened": 0, "open": 0, "closed": 0, "wins": 0, "losses": 0,
+                "realized_pnl_usd": 0.0, "unrealized_pnl_usd": 0.0,
+                "contracts": [], "checkpoint_count": 0,
+            })
+            bucket["opened"] += 1
+            contract = str(fill.get("contract") or "")
+            if contract and contract not in bucket["contracts"]:
+                bucket["contracts"].append(contract)
+            close = next((item for item in reversed(records)
+                          if item.get("type") == "PAPER_CLOSE" and
+                          str(item.get("proposal_id") or "") == proposal_id), None)
+            if close:
+                result = float(close.get("realized_pnl_usd") or 0)
+                bucket["closed"] += 1
+                bucket["wins" if result > 0 else "losses"] += 1
+                bucket["realized_pnl_usd"] += result
+            else:
+                bucket["open"] += 1
+                bucket["unrealized_pnl_usd"] += float(
+                    (latest_marks.get(proposal_id) or {}).get("unrealized_pnl_usd") or 0)
+            bucket["checkpoint_count"] += sum(
+                item.get("type") == "PAPER_HORIZON_CHECKPOINT" and
+                str(item.get("proposal_id") or "") == proposal_id for item in records)
+        for bucket in chain_performance.values():
+            bucket["realized_pnl_usd"] = round(bucket["realized_pnl_usd"], 8)
+            bucket["unrealized_pnl_usd"] = round(bucket["unrealized_pnl_usd"], 8)
+            bucket["win_rate_pct"] = round(bucket["wins"] / bucket["closed"] * 100, 2) if bucket["closed"] else None
+        checkpoints = [item for item in records if item.get("type") == "PAPER_HORIZON_CHECKPOINT"]
+        intraday = [item for item in records if item.get("type") == "PAPER_INTRADAY_CHECKPOINT"]
         return {
             "paper_only": True,
             "open_positions": self.position_diagnostics(),
@@ -616,6 +766,9 @@ class PaperLedger:
             "partial_profit_actions": len(partials),
             "by_strategy": by_strategy,
             "recent_closes": list(reversed(closes[-25:])),
+            "multi_week_chain_performance": chain_performance,
+            "multi_week_horizon_checkpoints": list(reversed(checkpoints[-250:])),
+            "multi_week_intraday_checkpoints": list(reversed(intraday[-250:])),
         }
 
 

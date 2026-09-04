@@ -14,6 +14,11 @@ from .evidence_worker import evaluate_goplus, evaluate_goplus_solana
 
 UTC = timezone.utc
 SUPPORTED_CHAINS = {"base": "base", "solana": "solana", "robinhood": "robinhood"}
+DEFAULT_RESEARCH_SEEDS = (
+    ("robinhood", "0x39dbed3a2bd333467115de45665cc57f813c4571"),
+    ("robinhood", "0xb2000000000000000000004c27f6523082f41d01"),
+    ("robinhood", "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18"),
+)
 
 
 def fetch_json(url: str) -> Any:
@@ -34,7 +39,9 @@ def _number(value: Any, default: float = 0.0) -> float:
 def _addresses() -> list[tuple[str, str]]:
     base = os.getenv("DEXSCREENER_BASE_URL", "https://api.dexscreener.com").rstrip("/")
     endpoints = ("/token-profiles/latest/v1", "/token-profiles/recent-updates/v1", "/token-boosts/top/v1")
-    discovered: list[tuple[str, str]] = []
+    # User-observed contracts are permanent research controls. Inclusion here
+    # means "always evaluate", never "assume profitable" or "buy live".
+    discovered: list[tuple[str, str]] = list(DEFAULT_RESEARCH_SEEDS)
     for endpoint in endpoints:
         try:
             payload = fetch_json(base + endpoint)
@@ -146,6 +153,60 @@ def _execution(liquidity_usd: float, probe_usd: float, fee_bps: float) -> dict[s
             "execution_evidence_mode": "DEX_AMM_STRESS_MODEL"}
 
 
+def refresh_held_position_quotes(positions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Refresh only held on-chain assets for paper risk monitoring.
+
+    Full-universe discovery is intentionally slow and expensive.  Open-position
+    risk is different: it must not reuse a six-hour-old discovery snapshot.
+    DexScreener supplies a fresh pool observation and we apply the same
+    conservative full-position AMM/fee stress model used at admission.
+    """
+    wanted = [(str(item.get("chain") or "").lower(), str(item.get("contract") or ""),
+               str(item.get("symbol") or "")) for item in positions]
+    wanted = list(dict.fromkeys(item for item in wanted if item[0] in SUPPORTED_CHAINS and item[1]))
+    if not wanted:
+        return [], []
+    probe_default = max(10.0, float(os.getenv("EMERGING_CRYPTO_EXECUTION_PROBE_USD", "100")))
+    fee_bps = max(0.0, float(os.getenv("EMERGING_CRYPTO_MODELED_FEE_BPS_PER_SIDE", "60")))
+    rows = _best_pairs(_pairs([(chain, contract) for chain, contract, _ in wanted]))
+    by_identity = {(str(row.get("chainId") or "").lower(),
+                    str((row.get("baseToken") or {}).get("address") or "").lower()): row for row in rows}
+    refreshed, errors = [], []
+    observed_at = datetime.now(UTC).isoformat()
+    for chain, contract, symbol in wanted:
+        pair = by_identity.get((chain, contract.lower()))
+        if not pair:
+            errors.append({"chain": chain, "contract": contract, "symbol": symbol,
+                           "error": "held-position quote unavailable"})
+            continue
+        price = _number(pair.get("priceUsd"))
+        liquidity = _number((pair.get("liquidity") or {}).get("usd"))
+        if price <= 0 or liquidity <= 0:
+            errors.append({"chain": chain, "contract": contract, "symbol": symbol,
+                           "error": "held-position price or liquidity unavailable"})
+            continue
+        position = next(item for item in positions
+                        if str(item.get("chain") or "").lower() == chain and
+                        str(item.get("contract") or "").lower() == contract.lower())
+        entry_value = float(position.get("fill_price") or 0) * float(position.get("quantity") or 0)
+        execution = _execution(liquidity, max(probe_default, entry_value), fee_bps)
+        one_way_cost = execution["estimated_slippage_bps"] / 10_000 + fee_bps / 10_000
+        refreshed.append({
+            "asset_class": "CRYPTO", "chain": chain, "contract": contract,
+            "symbol": symbol, "price": price,
+            "executable_sell_price": price * (1 - one_way_cost),
+            "market_cap_usd": _number(pair.get("marketCap") or pair.get("fdv")),
+            "liquidity_usd": liquidity,
+            "volume_24h_usd": _number((pair.get("volume") or {}).get("h24")),
+            "observed_at": observed_at, "quote_age_seconds": 0.0,
+            "tradable": True, "market_veto": False,
+            "source_urls": [str(pair.get("url") or "")],
+            "price_source": "DEXSCREENER_HELD_POSITION_AMM_STRESS_MARK",
+            **execution,
+        })
+    return refreshed, errors
+
+
 def _retained_candles(chain: str, address: str, price: float, volume: float) -> list[dict[str, Any]]:
     """Retain one honest daily observation when an upstream OHLCV API lacks a chain."""
     path = Path(os.getenv("EMERGING_CRYPTO_HISTORY_PATH", "/app/data/emerging_crypto_history.json"))
@@ -195,7 +256,8 @@ def emerging_crypto_universe() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     addresses = _addresses()
     ranked = sorted(_best_pairs(_pairs(addresses)),
                     key=lambda row: _number((row.get("volume") or {}).get("h24")), reverse=True)
-    quota = max(1, limit // 5)
+    quota = max(3, min(limit, int(os.getenv(
+        "EMERGING_CRYPTO_ROBINHOOD_MIN_CANDIDATES", str(max(3, limit // 3))))))
     robinhood = [row for row in ranked if str(row.get("chainId") or "").lower() == "robinhood"][:quota]
     supported = [row for row in ranked if str(row.get("chainId") or "").lower() in {"base", "solana"}]
     selected = supported[:max(0, limit - len(robinhood))] + robinhood
@@ -252,5 +314,10 @@ def emerging_crypto_universe() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         except Exception as exc:
             errors.append({"chain": chain, "contract": address, "error": f"{type(exc).__name__}: {str(exc)[:180]}"})
         time.sleep(max(0.0, float(os.getenv("EMERGING_CRYPTO_REQUEST_SPACING_SECONDS", ".25"))))
+    chain_counts: dict[str, int] = {}
+    for item in rows:
+        chain_counts[str(item.get("chain") or "unknown")] = chain_counts.get(
+            str(item.get("chain") or "unknown"), 0) + 1
     return rows, {"status": "READY" if rows else "DEGRADED", "candidate_count": len(rows),
-                  "source_count": len(addresses), "errors": errors[-20:]}
+                  "source_count": len(addresses), "chain_counts": chain_counts,
+                  "robinhood_minimum_scan_quota": quota, "errors": errors[-20:]}

@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -173,6 +174,57 @@ class MultiAssetTests(unittest.TestCase):
         self.assertEqual(0, report["closed"])
         self.assertEqual(1, report["partial_profit_actions"])
         self.assertEqual(5, report["realized_pnl_usd"])
+
+    def test_robinhood_cohort_records_daily_checkpoint_and_performance(self):
+        opened = self.ledger.append({
+            "type": "PAPER_FILL", "mode": "PAPER_ONLY", "proposal_id": "rh-1",
+            "asset_class": "CRYPTO", "strategy": "MULTI_WEEK_CRYPTO_MOMENTUM_V1",
+            "symbol": "PONS", "chain": "robinhood", "contract": "0xpons",
+            "research_cohort": "EMERGING_FORWARD_PAPER_HOLD", "side": "BUY",
+            "fill_price": 1.0, "quantity": 50, "stop_price": .88,
+            "target_price": 4.0, "maximum_loss_usd": 6,
+        })
+        old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        records = self.ledger.records()
+        records[0]["recorded_at"] = old
+        self.ledger.path.write_text("\n".join(json.dumps(item) for item in records) + "\n")
+        position = self.ledger.positions()[0]
+        added = self.ledger.record_due_horizon_checkpoints(position, 1.2, {
+            "chain": "robinhood", "contract": "0xpons", "sell_route_ok": True,
+            "round_trip_recovery": .98, "liquidity_usd": 500000,
+            "volume_24h_usd": 1000000, "observed_at": datetime.now(timezone.utc).isoformat(),
+            "source_urls": ["https://example.com/pool"],
+        })
+        self.assertEqual([1], [item["checkpoint_days"] for item in added])
+        self.ledger.mark(position, 1.2)
+        report = self.ledger.report()
+        cohort = report["multi_week_chain_performance"]["robinhood"]
+        self.assertEqual(1, cohort["open"])
+        self.assertEqual(1, cohort["checkpoint_count"])
+        self.assertAlmostEqual(10, cohort["unrealized_pnl_usd"])
+
+    def test_multi_week_records_intraday_checkpoints_and_mfe_timestamps(self):
+        self.ledger.append({
+            "type": "PAPER_FILL", "mode": "PAPER_ONLY", "proposal_id": "fast-1",
+            "asset_class": "CRYPTO", "strategy": "MULTI_WEEK_CRYPTO_MOMENTUM_V1",
+            "symbol": "FAST", "chain": "robinhood", "contract": "0xfast",
+            "side": "BUY", "fill_price": 1.0, "quantity": 50, "stop_price": .88,
+            "target_price": 4.0, "maximum_loss_usd": 6,
+        })
+        rows = self.ledger.records()
+        rows[0]["recorded_at"] = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+        self.ledger.path.write_text("\n".join(json.dumps(item) for item in rows) + "\n")
+        position = self.ledger.positions()[0]
+        market = {"observed_at": datetime.now(timezone.utc).isoformat(), "sell_route_ok": True,
+                  "round_trip_recovery": .98, "price_source": "MODELED_EXECUTABLE"}
+        added = self.ledger.record_intraday_checkpoints(position, 1.2, market)
+        self.assertEqual([15, 30, 60, 120, 240], [item["checkpoint_minutes"] for item in added])
+        self.ledger.mark(position, 1.2, "MODELED_EXECUTABLE", market)
+        self.ledger.mark(position, .9, "MODELED_EXECUTABLE", market)
+        diagnostic = self.ledger.position_diagnostics()[0]
+        self.assertIsNotNone(diagnostic["mfe_at"])
+        self.assertIsNotNone(diagnostic["mae_at"])
+        self.assertEqual("FRESH", diagnostic["monitoring_status"])
 
     def test_multi_week_position_adds_in_order(self):
         position = self.ledger.append({"type": "PAPER_FILL", "mode": "PAPER_ONLY",

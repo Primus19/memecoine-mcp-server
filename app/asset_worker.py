@@ -13,6 +13,7 @@ from .multi_week_crypto import (STRATEGY as MULTI_WEEK_CRYPTO_STRATEGY,
                                 evaluate_candidate, manage_position)
 from .multi_week_discovery import ConfirmationLedger, discover
 from .multi_asset_email import MultiWeekCryptoEmailer
+from .emerging_crypto import refresh_held_position_quotes
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -73,9 +74,11 @@ def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int 
             expired = (now - opened).total_seconds() >= position_max_hold * 60
         except (KeyError, ValueError):
             expired = False
-        price_source = "CURRENT_EXECUTABLE_MARK"
+        price_source = str((snapshot or {}).get("price_source") or "CURRENT_EXECUTABLE_MARK")
         if price:
-            ledger.mark(position, price, price_source)
+            ledger.mark(position, price, price_source, snapshot)
+            ledger.record_intraday_checkpoints(position, price, snapshot)
+            ledger.record_due_horizon_checkpoints(position, price, snapshot)
         elif expired:
             retained = ledger.latest_marks().get(str(position.get("proposal_id") or ""), {})
             price = float(retained.get("mark_price") or position.get("fill_price") or 0)
@@ -166,6 +169,12 @@ def main() -> None:
     confirmations = ConfirmationLedger(os.getenv(
         "MULTI_WEEK_CONFIRMATION_PATH", "/app/data/multi_week_confirmations.json"))
     engine = MultiAssetEngine(ledger)
+    held_quote_interval = max(300, min(900, int(os.getenv(
+        "MULTI_WEEK_HELD_QUOTE_INTERVAL_SECONDS", "300"))))
+    last_held_quote_refresh = 0.0
+    last_held_quote_refresh_at = ""
+    held_quotes: list[dict] = []
+    held_quote_errors: list[dict] = []
     HealthHandler.ledger = ledger
     server = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -174,6 +183,18 @@ def main() -> None:
             payload = fetch(feed_url, token)
             snapshots = list(payload.get("snapshots", []))
             crypto_snapshots = discover(payload, confirmations)
+            if time.monotonic() - last_held_quote_refresh >= held_quote_interval:
+                held_quotes, held_quote_errors = refresh_held_position_quotes(ledger.positions())
+                last_held_quote_refresh = time.monotonic()
+                last_held_quote_refresh_at = datetime.now(timezone.utc).isoformat()
+            held_by_identity = {(str(item.get("chain") or "").lower(),
+                                 str(item.get("contract") or "").lower()): item for item in held_quotes}
+            crypto_snapshots = [held_by_identity.get((str(item.get("chain") or "").lower(),
+                                                      str(item.get("contract") or "").lower()), item)
+                                for item in crypto_snapshots]
+            known = {(str(item.get("chain") or "").lower(), str(item.get("contract") or "").lower())
+                     for item in crypto_snapshots}
+            crypto_snapshots.extend(item for key, item in held_by_identity.items() if key not in known)
             emerging_candidates = []
             for item in crypto_snapshots:
                 if str(item.get("chain") or "") == "coinbase-spot":
@@ -222,6 +243,13 @@ def main() -> None:
                                  recent_actions=crypto_events[:25],
                                  research_open=sum(item.get("research_only") is True for item in crypto_positions),
                                  qualified_open=sum(item.get("research_only") is not True for item in crypto_positions))
+            crypto_bucket["chain_performance"] = report.get("multi_week_chain_performance") or {}
+            crypto_bucket["horizon_checkpoints"] = report.get("multi_week_horizon_checkpoints") or []
+            crypto_bucket["intraday_checkpoints"] = report.get("multi_week_intraday_checkpoints") or []
+            crypto_bucket["robinhood_chain"] = (report.get("multi_week_chain_performance") or {}).get(
+                "robinhood", {"opened": 0, "open": 0, "closed": 0, "wins": 0,
+                              "losses": 0, "realized_pnl_usd": 0, "unrealized_pnl_usd": 0,
+                              "checkpoint_count": 0, "win_rate_pct": None})
             feed_health = dict(payload.get("crypto_health") or {})
             feed_health.setdefault("universe_count", len(payload.get("crypto_universe") or []))
             feed_health.setdefault("status", "READY" if feed_health["universe_count"] else "DEGRADED")
@@ -230,6 +258,14 @@ def main() -> None:
             runtime = {"last_scan": datetime.now(timezone.utc).isoformat(), "last_error": "",
                        "last_outcomes": outcomes[-25:], "last_closes": closes[-25:],
                        "multi_week_crypto": crypto_bucket, "feed_health": feed_health,
+                       "held_position_monitor": {
+                           "status": "READY" if not held_quote_errors and len(held_quotes) >= len([
+                               item for item in ledger.positions()
+                               if item.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY]) else "DEGRADED",
+                           "refresh_interval_seconds": held_quote_interval,
+                           "last_refresh_at": last_held_quote_refresh_at,
+                           "fresh_quote_count": len(held_quotes), "errors": held_quote_errors[-10:],
+                       },
                        "emerging_discovery": {"candidate_count": len(emerging_candidates),
                            "qualified_count": sum(bool(item["qualified"]) for item in emerging_candidates),
                            "research_eligible_count": sum(bool(item["research_eligible"])

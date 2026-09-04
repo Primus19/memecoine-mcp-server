@@ -1,7 +1,14 @@
 from unittest.mock import patch
 
-from app.emerging_crypto import (_best_pairs, _execution, _retained_candles,
-                                 emerging_crypto_universe)
+from app.emerging_crypto import (DEFAULT_RESEARCH_SEEDS, _addresses, _best_pairs, _execution, _retained_candles,
+                                 emerging_crypto_universe, refresh_held_position_quotes)
+
+
+def test_default_research_seeds_always_include_user_observed_robinhood_contracts():
+    with patch("app.emerging_crypto.fetch_json", return_value=[]), patch.dict(
+            "os.environ", {"EMERGING_CRYPTO_SEED_CONTRACTS": ""}):
+        addresses = _addresses()
+    assert all(item in addresses for item in DEFAULT_RESEARCH_SEEDS)
 
 
 def test_selects_deepest_pair_per_contract():
@@ -19,6 +26,22 @@ def test_amm_execution_model_is_cost_stressed():
     assert result["sell_route_ok"] is True
     assert .97 < result["round_trip_recovery"] < 1
     assert result["execution_evidence_mode"] == "DEX_AMM_STRESS_MODEL"
+
+
+def test_held_position_refresh_returns_cost_stressed_sell_mark():
+    pair = {"chainId": "robinhood", "pairAddress": "0xpool",
+            "baseToken": {"address": "0xtoken", "symbol": "RUN"},
+            "priceUsd": "1", "liquidity": {"usd": 500_000},
+            "volume": {"h24": 1_000_000}, "marketCap": 5_000_000,
+            "url": "https://dexscreener.com/robinhood/0xpool"}
+    position = {"chain": "robinhood", "contract": "0xtoken", "symbol": "RUN",
+                "fill_price": 1.0, "quantity": 50}
+    with patch("app.emerging_crypto._pairs", return_value=[pair]):
+        rows, errors = refresh_held_position_quotes([position])
+    assert errors == []
+    assert len(rows) == 1
+    assert 0 < rows[0]["executable_sell_price"] < rows[0]["price"]
+    assert rows[0]["price_source"] == "DEXSCREENER_HELD_POSITION_AMM_STRESS_MARK"
 
 
 def test_dynamic_emerging_candidate_preserves_unsupported_chain_safety_failure():

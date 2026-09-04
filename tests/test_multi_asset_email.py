@@ -63,3 +63,22 @@ def test_email_content_contains_position_and_paper_warning():
     assert "Budget" in content["html"]
     assert "+4.00%" in content["html"]
     assert "Selected emerging research candidates" in content["html"]
+
+
+def test_monitor_degradation_sends_one_critical_alert_per_incident():
+    report = {"multi_week_crypto": {"open": 1, "open_positions": []}}
+    runtime = {"held_position_monitor": {"status": "DEGRADED", "errors": [
+        {"symbol": "RUN", "error": "held-position quote unavailable"}]}}
+    with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "MULTI_WEEK_EMAIL_ENABLED": "true", "MULTI_WEEK_SUMMARY_INTERVAL_SECONDS": "86400"}):
+        emailer = MultiWeekCryptoEmailer(directory + "/state.json")
+        emailer.state["last_summary_epoch"] = time.time()
+        sent = []
+        with patch.object(emailer, "_send", side_effect=lambda content: sent.append(content) or {"subject": content["subject"]}):
+            assert emailer.maybe_send([], report, runtime)["status"] == "QUEUED"
+            for _ in range(100):
+                if not emailer.inflight:
+                    break
+                time.sleep(.01)
+            assert "[CRITICAL]" in sent[0]["subject"]
+            assert emailer.maybe_send([], report, runtime)["status"] == "NO_NEW_ACTION"
