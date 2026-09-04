@@ -96,23 +96,33 @@ class MultiWeekCryptoEmailer:
         emerging = runtime.get("emerging_discovery") or {}
         if summary:
             subject = f"[PAPER] Multi-Week Crypto Status | {now:%Y-%m-%d %H:%M} ET"
-            heading = "FOUR-HOUR STRATEGY STATUS"
+            heading = "DAILY STRATEGY STATUS"
             detail = (f"Universe: {feed.get('universe_count', 0)}; open: {crypto.get('open', 0)}; "
-                      f"closed: {crypto.get('closed', 0)}; realized P&L: ${float(crypto.get('realized_pnl_usd') or 0):+.4f}; "
+                      f"closed: {crypto.get('closed', 0)}; 24-hour realized P&L (USD): "
+                      f"${float(crypto.get('daily_realized_pnl_usd') or 0):+.2f}; "
                       f"feed: {feed.get('status', 'UNKNOWN')}; emerging tracked: {emerging.get('candidate_count', 0)}; "
                       f"emerging qualified: {emerging.get('qualified_count', 0)}.")
         else:
+            batch = list((event or {}).get("batch_actions") or [])
             kind = str((event or {}).get("type") or "ACTION").replace("PAPER_", "")
             symbol = str((event or {}).get("symbol") or "CRYPTO")
-            subject = f"[PAPER TRADE] Multi-Week Crypto {kind} | {symbol} | {now:%Y-%m-%d %H:%M} ET"
-            heading = f"NEW {kind}: {symbol}"
-            event_price = (event or {}).get("fill_price") or (event or {}).get("mark_price")
-            event_quantity = ((event or {}).get("quantity") or (event or {}).get("added_quantity") or
-                              (event or {}).get("closed_quantity"))
-            detail = (f"Strategy: {STRATEGY}; cohort: {(event or {}).get('research_cohort') or 'QUALIFIED'}; "
-                      f"price: {float(event_price):.8g}; quantity: {float(event_quantity):.6g}; "
-                      f"reason: {(event or {}).get('reason') or (event or {}).get('thesis') or 'ranked research entry'}; "
-                      f"realized P&L: ${float((event or {}).get('realized_pnl_usd') or 0):+.4f}.")
+            if batch:
+                action_labels = [f"{str(item.get('type') or '').replace('PAPER_', '')}: {item.get('symbol')}"
+                                 for item in batch]
+                subject = f"[PAPER TRADE] Multi-Week Crypto | {len(batch)} ACTIONS | {now:%Y-%m-%d %H:%M} ET"
+                heading = f"{len(batch)} PORTFOLIO ACTIONS"
+                detail = "Actions: " + ", ".join(action_labels) + ". See the USD portfolio below."
+                event_price = event_quantity = None
+            else:
+                subject = f"[PAPER TRADE] Multi-Week Crypto {kind} | {symbol} | {now:%Y-%m-%d %H:%M} ET"
+                heading = f"NEW {kind}: {symbol}"
+                event_price = (event or {}).get("fill_price") or (event or {}).get("mark_price")
+                event_quantity = ((event or {}).get("quantity") or (event or {}).get("added_quantity") or
+                                  (event or {}).get("closed_quantity"))
+                detail = (f"Strategy: {STRATEGY}; cohort: {(event or {}).get('research_cohort') or 'QUALIFIED'}; "
+                          f"price: {float(event_price):.8g}; quantity: {float(event_quantity):.6g}; "
+                          f"reason: {(event or {}).get('reason') or (event or {}).get('thesis') or 'ranked research entry'}; "
+                          f"realized P&L: ${float((event or {}).get('realized_pnl_usd') or 0):+.4f}.")
         positions = crypto.get("open_positions") or []
         budget = max(100.0, float(os.getenv("MULTI_WEEK_PAPER_BUDGET_USD", "1000")))
         exposure = sum(float(p.get("entry_value_usd") or 0) for p in positions)
@@ -138,6 +148,18 @@ class MultiWeekCryptoEmailer:
                 round(float(p.get("age_minutes") or 0) / 1440, 2))) + "</tr>"
             for p in positions
         ) or "<tr><td colspan='8' style='padding:14px'>No open multi-week positions.</td></tr>"
+        position_cards = "".join(
+            f"<div style='margin:12px 0;border:1px solid #cbd5e1;border-radius:10px;overflow:hidden'>"
+            f"<div style='padding:10px 12px;background:{'#dcfce7' if float(p.get('current_unrealized_pnl_usd') or 0) > 0 else '#fee2e2' if p.get('current_unrealized_pnl_usd') is not None else '#e2e8f0'}'><b>{html.escape(str(p.get('symbol')))} - RESEARCH HOLD</b></div>"
+            f"<table width='100%' cellspacing='0' style='font-size:13px'>"
+            f"<tr><td style='padding:7px'>Invested (USD)</td><td style='padding:7px;text-align:right'><b>{money(p.get('entry_value_usd'))}</b></td></tr>"
+            f"<tr><td style='padding:7px'>Entry / Current</td><td style='padding:7px;text-align:right'>{price(p.get('entry_price'))} / {price(p.get('current_mark_price'))}</td></tr>"
+            f"<tr><td style='padding:7px'>Current value (USD)</td><td style='padding:7px;text-align:right'>{money(p.get('current_value_usd'))}</td></tr>"
+            f"<tr><td style='padding:7px'>Profit or loss (USD)</td><td style='padding:7px;text-align:right'><b>{money(p.get('current_unrealized_pnl_usd'))}</b></td></tr>"
+            f"<tr><td style='padding:7px'>Return</td><td style='padding:7px;text-align:right'><b>{'Pending' if p.get('return_pct') is None else f'{float(p.get("return_pct")):+.2f}%'}</b></td></tr>"
+            f"<tr><td style='padding:7px'>Held</td><td style='padding:7px;text-align:right'>{round(float(p.get('age_minutes') or 0) / 1440, 2)} days</td></tr>"
+            f"</table></div>" for p in positions
+        ) or "<div style='padding:14px;background:#f8fafc;border-radius:10px'>No open multi-week positions.</div>"
         emerging_rows = "".join(
             "<tr>" + "".join(f"<td style='padding:7px;border-bottom:1px solid #ddd'>{html.escape(str(v))}</td>" for v in (
                 item.get("chain"), item.get("symbol"), item.get("research_score"), item.get("confirmation_count"),
@@ -146,6 +168,17 @@ class MultiWeekCryptoEmailer:
             for item in [candidate for candidate in (emerging.get("candidates") or [])
                          if candidate.get("research_eligible")][:3]
         ) or "<tr><td colspan='6' style='padding:10px'>No candidate currently passes the research portfolio gates.</td></tr>"
+        selected = [candidate for candidate in (emerging.get("candidates") or [])
+                    if candidate.get("research_eligible")][:3]
+        candidate_cards = "".join(
+            f"<div style='padding:10px 12px;margin:8px 0;background:#f8fafc;border-left:4px solid #0f766e;border-radius:6px'>"
+            f"<b>{html.escape(str(item.get('symbol')))}</b> on {html.escape(str(item.get('chain')))} - "
+            f"research score <b>{html.escape(str(item.get('research_score')))}</b>; "
+            f"{html.escape(str(item.get('confirmation_count') or 0))} confirmations; "
+            f"safety {'verified' if item.get('security_verified') else 'not yet verified'}. "
+            f"Primary qualification gap: {html.escape(str((item.get('failures') or ['none'])[0]))}.</div>"
+            for item in selected
+        ) or "<div style='padding:12px;background:#f8fafc;border-radius:8px'>No candidate currently passes every research portfolio gate.</div>"
         body = f"""<!doctype html><html><body style='font-family:Arial;color:#172033;background:#f1f5f9;padding:16px;margin:0'>
 <div style='max-width:760px;margin:auto;background:white;border-radius:14px;overflow:hidden;box-shadow:0 8px 24px #cbd5e1'>
 <div style='padding:22px;background:#0f5b62;color:white'><small>MULTI-WEEK CRYPTO - PAPER ONLY</small><h2 style='margin:8px 0 0'>{html.escape(heading)}</h2></div>
@@ -154,9 +187,9 @@ class MultiWeekCryptoEmailer:
 <span style='background:#ede9fe;padding:8px 12px;border-radius:18px'>Exposure <b>${exposure:,.2f} ({exposure/budget*100:.1f}%)</b></span>
 <span style='background:{'#dcfce7' if open_pnl >= 0 else '#fee2e2'};padding:8px 12px;border-radius:18px'>Open P&amp;L <b>${open_pnl:+.2f} ({portfolio_return:+.2f}%)</b></span></div>
 <p style='color:#475569'>{html.escape(detail)}</p><p style='font-size:12px;color:#64748b'><b>Last scan:</b> {html.escape(str(runtime.get('last_scan') or 'not available'))} | <b>Feed:</b> {html.escape(str(feed.get('status') or 'UNKNOWN'))}</p>
-<div style='overflow-x:auto'><table width='100%' cellspacing='0' style='font-size:13px'><tr style='background:#dbeafe'><th>Coin</th><th>Invested</th><th>Entry</th><th>Mark</th><th>Value</th><th>P&amp;L</th><th>Return</th><th>Days</th></tr>{rows}</table></div>
+{position_cards}
 <h3 style='color:#0f5b62'>Selected emerging research candidates</h3>
-<div style='overflow-x:auto'><table width='100%' cellspacing='0' style='font-size:12px'><tr style='background:#e2e8f0'><th>Chain</th><th>Coin</th><th>Research score</th><th>Checks</th><th>Safety</th><th>Qualification gaps</th></tr>{emerging_rows}</table></div>
+{candidate_cards}
 <p style='color:#64748b;font-size:12px'>Research portfolio only. No live cryptocurrency purchase is authorized by this report.</p></div></div></body></html>"""
         return {"subject": subject, "text": detail, "html": body}
 
@@ -199,7 +232,7 @@ class MultiWeekCryptoEmailer:
             return {"enabled": False, "status": "DISABLED", "pending": 0}
         sent = set(self.state.get("sent_event_ids") or [])
         actions = [item for item in events if item.get("strategy") == STRATEGY and item.get("event_id") not in sent]
-        interval = max(3600, int(os.getenv("MULTI_WEEK_SUMMARY_INTERVAL_SECONDS", "14400")))
+        interval = max(86400, int(os.getenv("MULTI_WEEK_SUMMARY_INTERVAL_SECONDS", "86400")))
         summary_due = time.time() - float(self.state.get("last_summary_epoch") or 0) >= interval
         if not actions and not summary_due:
             return self.status("NO_NEW_ACTION")
@@ -209,10 +242,15 @@ class MultiWeekCryptoEmailer:
             self.inflight = True
         def deliver() -> None:
             try:
-                for action in actions:
-                    result = self._send(self._content(action, report, runtime, False))
-                    sent.add(str(action["event_id"])); self.state["last_subject"] = result["subject"]
-                if summary_due:
+                if actions:
+                    digest = {"type": "PAPER_ACTION_DIGEST", "symbol": f"{len(actions)} ACTIONS",
+                              "batch_actions": actions}
+                    result = self._send(self._content(digest, report, runtime, False))
+                    for action in actions:
+                        sent.add(str(action["event_id"]))
+                    self.state["last_subject"] = result["subject"]
+                    self.state["last_summary_epoch"] = time.time()
+                elif summary_due:
                     result = self._send(self._content(None, report, runtime, True))
                     self.state["last_summary_epoch"] = time.time(); self.state["last_subject"] = result["subject"]
                 self.state.update(sent_event_ids=list(sent)[-1000:], last_error="", last_sent_at=datetime.now(UTC).isoformat())

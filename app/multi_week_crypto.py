@@ -235,10 +235,14 @@ def manage_position(position: dict[str, Any], market: dict[str, Any]) -> dict[st
         action, fraction, reason = "EXIT", 1.0, "execution, safety, or asymmetry gate failed"
     elif trend_break:
         action, fraction, reason = "EXIT", 1.0, "multi-factor trend deterioration"
-    elif peak_r >= 3 and giveback >= 0.25 and not position.get("took_3r_profit"):
-        action, fraction, reason = "TAKE_PROFIT", 0.25, "3R tier retraced 25% of favorable excursion"
+    elif peak_r >= 10 and not position.get("took_10r_profit"):
+        action, fraction, reason = "TAKE_PROFIT", 0.20, "10R moonshot profit tier"
+    elif peak_r >= 5 and not position.get("took_5r_profit"):
+        action, fraction, reason = "TAKE_PROFIT", 0.20, "5R runner profit tier"
     elif peak_r >= 2 and not position.get("took_2r_profit"):
-        action, fraction, reason = "TAKE_PROFIT", 0.25, "first 2R profit tier"
+        action, fraction, reason = "TAKE_PROFIT", 0.20, "first 2R profit tier"
+    elif peak_r >= 5 and giveback >= 0.35:
+        action, fraction, reason = "EXIT", 1.0, "runner surrendered 35% of favorable excursion"
     elif peak_r >= 1 and r_multiple <= 0.10:
         action, fraction, reason = "EXIT", 1.0, "1R winner returned to cost-aware breakeven"
     elif price <= stop:

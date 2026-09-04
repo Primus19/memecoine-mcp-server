@@ -110,7 +110,9 @@ def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int 
             elif management["action"] == "TAKE_PROFIT":
                 closes.append(ledger.partial_close(
                     str(position["proposal_id"]), price, float(management["fraction"]),
-                    management["reason"], price_source=price_source))
+                    management["reason"], price_source=price_source,
+                    profit_tier=("10R" if management["peak_r_multiple"] >= 10 else
+                                 "5R" if management["peak_r_multiple"] >= 5 else "2R")))
             continue
         side = str(position["side"])
         stop, target = float(position["stop_price"]), float(position["target_price"])
@@ -122,6 +124,34 @@ def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int 
             closes.append(ledger.close(str(position["proposal_id"]), price, reason,
                                        price_source=price_source))
     return closes
+
+
+def rotate_for_stronger_research_candidate(ledger: PaperLedger,
+                                            crypto_snapshots: list[dict]) -> tuple[list[dict], set[str]]:
+    """At most one daily paper rotation; never displace a profitable runner."""
+    capacity = max(1, int(os.getenv("MULTI_WEEK_RESEARCH_MAX_OPEN_POSITIONS", "3")))
+    positions = [item for item in ledger.position_diagnostics()
+                 if item.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY and item.get("research_only")]
+    if len(positions) < capacity:
+        return [], set()
+    open_symbols = {str(item.get("symbol") or "").upper() for item in positions}
+    candidates = [(evaluate_candidate(item), item) for item in crypto_snapshots
+                  if str(item.get("symbol") or "").upper() not in open_symbols]
+    candidates = [(decision, item) for decision, item in candidates if decision.get("research_eligible")]
+    if not candidates:
+        return [], set()
+    best_decision, _ = max(candidates, key=lambda pair: float(pair[0].get("research_score") or 0))
+    weakest = min(positions, key=lambda item: float(item.get("score") or 0))
+    if (float(weakest.get("age_minutes") or 0) < 1440 or
+            float(weakest.get("current_unrealized_pnl_usd") or 0) > 0 or
+            float(best_decision.get("research_score") or 0) < float(weakest.get("score") or 0) + 15):
+        return [], set()
+    mark = float(weakest.get("current_mark_price") or 0)
+    if mark <= 0:
+        return [], set()
+    event = ledger.close(str(weakest["proposal_id"]), mark,
+                         "DAILY_OPPORTUNITY_ROTATION: stronger candidate by at least 15 points")
+    return [event], {str(weakest.get("symbol") or "").upper()}
 
 
 def main() -> None:
@@ -166,9 +196,13 @@ def main() -> None:
                 key=lambda item: float(evaluate_candidate(item).get("research_score") or 0), reverse=True)
             snapshots.extend(crypto_snapshots)
             closes = supervise(ledger, snapshots, max(15, int(os.getenv("ASSET_MAX_HOLD_MINUTES", "240"))))
+            rotations, rotation_exclusions = rotate_for_stronger_research_candidate(ledger, crypto_snapshots)
+            closes.extend(rotations)
             outcomes = []
             events = list(closes)
             for snapshot in snapshots:
+                if str(snapshot.get("symbol") or "").upper() in rotation_exclusions:
+                    continue
                 try:
                     result = engine.process(snapshot)
                     events.append(result)
@@ -184,6 +218,7 @@ def main() -> None:
                              item.get("type") in {"PAPER_FILL", "PAPER_ADD", "PAPER_PARTIAL_CLOSE", "PAPER_CLOSE"}]
             crypto_bucket.update(open=len(crypto_positions), open_positions=crypto_positions,
                                  realized_pnl_usd=crypto_bucket.get("net_pnl_usd", 0),
+                                 daily_realized_pnl_usd=report.get("daily_realized_pnl_usd", 0),
                                  recent_actions=crypto_events[:25],
                                  research_open=sum(item.get("research_only") is True for item in crypto_positions),
                                  qualified_open=sum(item.get("research_only") is not True for item in crypto_positions))

@@ -429,8 +429,10 @@ class PaperLedger:
                     "quantity": float(record.get("remaining_quantity") or 0),
                     "took_2r_profit": (positions[proposal_id].get("took_2r_profit") is True or
                                        record.get("profit_tier") == "2R"),
-                    "took_3r_profit": (positions[proposal_id].get("took_3r_profit") is True or
-                                       record.get("profit_tier") == "3R_GIVEBACK"),
+                    "took_5r_profit": (positions[proposal_id].get("took_5r_profit") is True or
+                                       record.get("profit_tier") == "5R"),
+                    "took_10r_profit": (positions[proposal_id].get("took_10r_profit") is True or
+                                        record.get("profit_tier") == "10R"),
                 }
             elif record.get("type") == "PAPER_CLOSE":
                 positions.pop(proposal_id, None)
@@ -503,6 +505,7 @@ class PaperLedger:
                 "proposal_id": proposal_id,
                 "asset_class": position.get("asset_class"),
                 "strategy": position.get("strategy"),
+                "score": position.get("score"),
                 "symbol": position.get("symbol"),
                 "side": position.get("side"),
                 "entry_price": position.get("fill_price"),
@@ -544,7 +547,8 @@ class PaperLedger:
                             "price_source": price_source})
 
     def partial_close(self, proposal_id: str, price: float, fraction: float, reason: str,
-                      *, price_source: str = "CURRENT_EXECUTABLE_MARK") -> dict[str, Any]:
+                      *, price_source: str = "CURRENT_EXECUTABLE_MARK",
+                      profit_tier: str | None = None) -> dict[str, Any]:
         position = next((item for item in self.positions() if item.get("proposal_id") == proposal_id), None)
         if not position:
             raise MultiAssetRejected("paper position is not open")
@@ -561,7 +565,9 @@ class PaperLedger:
             "entry_price": position["fill_price"], "fill_price": price,
             "closed_quantity": closed_quantity, "remaining_quantity": quantity - closed_quantity,
             "fraction": fraction, "reason": reason, "realized_pnl_usd": round(pnl, 8),
-            "profit_tier": ("3R_GIVEBACK" if "3R" in reason else "2R" if "2R" in reason else "OTHER"),
+            "profit_tier": profit_tier or ("10R" if "10R" in reason else
+                                             "5R" if "5R" in reason else
+                                             "2R" if "2R" in reason else "OTHER"),
             "price_source": price_source,
         })
 
@@ -571,6 +577,15 @@ class PaperLedger:
         partials = [item for item in records if item.get("type") == "PAPER_PARTIAL_CLOSE"]
         pnls = [float(item.get("realized_pnl_usd") or 0) for item in closes]
         all_realized = [float(item.get("realized_pnl_usd") or 0) for item in [*closes, *partials]]
+        daily_cutoff = now_utc().timestamp() - 86400
+        daily_realized = []
+        for item in [*closes, *partials]:
+            try:
+                recorded = datetime.fromisoformat(str(item.get("recorded_at") or "").replace("Z", "+00:00"))
+                if recorded.timestamp() >= daily_cutoff:
+                    daily_realized.append(float(item.get("realized_pnl_usd") or 0))
+            except ValueError:
+                continue
         by_strategy: dict[str, dict[str, Any]] = {}
         for item in records:
             if item.get("type") not in {"PAPER_FILL", "PAPER_ADD", "PAPER_CLOSE", "PAPER_PARTIAL_CLOSE"}:
@@ -597,6 +612,7 @@ class PaperLedger:
             "wins": sum(value > 0 for value in pnls),
             "losses": sum(value <= 0 for value in pnls),
             "realized_pnl_usd": round(sum(all_realized), 8),
+            "daily_realized_pnl_usd": round(sum(daily_realized), 8),
             "partial_profit_actions": len(partials),
             "by_strategy": by_strategy,
             "recent_closes": list(reversed(closes[-25:])),

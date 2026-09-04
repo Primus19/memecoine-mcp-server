@@ -110,7 +110,7 @@ def test_profit_manager_takes_partial_at_two_r():
          "relative_strength_7d_pct": 5, "volume_7d_vs_prior_ratio": 1.1},
     )
     assert result["action"] == "TAKE_PROFIT"
-    assert result["fraction"] == .25
+    assert result["fraction"] == .20
 
 
 def test_profit_manager_exits_on_multi_factor_deterioration():

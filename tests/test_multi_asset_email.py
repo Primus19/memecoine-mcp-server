@@ -21,7 +21,7 @@ def test_trade_event_and_summary_are_restart_safe():
                                      "open_positions": []}}
     runtime = {"last_scan": "2026-09-03T20:00:00Z", "feed_health": {"status": "READY", "universe_count": 20}}
     with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
-            "MULTI_WEEK_EMAIL_ENABLED": "true", "MULTI_WEEK_SUMMARY_INTERVAL_SECONDS": "3600"}):
+            "MULTI_WEEK_EMAIL_ENABLED": "true", "MULTI_WEEK_SUMMARY_INTERVAL_SECONDS": "86400"}):
         emailer = MultiWeekCryptoEmailer(directory + "/state.json")
         sent = []
         with patch.object(emailer, "_send", side_effect=lambda content: sent.append(content) or {"subject": content["subject"]}):
@@ -30,7 +30,8 @@ def test_trade_event_and_summary_are_restart_safe():
                 if not emailer.inflight:
                     break
                 time.sleep(.01)
-        assert len(sent) == 2
+        assert len(sent) == 1
+        assert "1 ACTIONS" in sent[0]["subject"]
         state = json.loads(open(directory + "/state.json", encoding="utf-8").read())
         assert state["sent_event_ids"] == ["event-1"]
         restarted = MultiWeekCryptoEmailer(directory + "/state.json")
