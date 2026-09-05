@@ -99,7 +99,7 @@ class MultiWeekCryptoEmailer:
             subject = f"[PAPER] Multi-Week Crypto Status | {now:%Y-%m-%d %H:%M} ET"
             heading = "DAILY STRATEGY STATUS"
             detail = (f"Universe: {feed.get('universe_count', 0)}; open: {crypto.get('open', 0)}; "
-                      f"closed: {crypto.get('closed', 0)}; 24-hour realized P&L (USD): "
+                      f"closed: {crypto.get('closed', 0)}; realized P&L today (UTC, USD): "
                       f"${float(crypto.get('daily_realized_pnl_usd') or 0):+.2f}; "
                       f"feed: {feed.get('status', 'UNKNOWN')}; emerging tracked: {emerging.get('candidate_count', 0)}; "
                       f"emerging qualified: {emerging.get('qualified_count', 0)}.")
@@ -114,7 +114,14 @@ class MultiWeekCryptoEmailer:
                              "One or more open positions lacks a fresh executable mark.")
                 event_price = event_quantity = None
             elif batch:
-                action_labels = [f"{str(item.get('type') or '').replace('PAPER_', '')}: {item.get('symbol')}"
+                action_labels = [f"{str(item.get('type') or '').replace('PAPER_', '')}: {item.get('symbol')}; "
+                                 f"chain/contract: {item.get('chain', 'unknown')}/{item.get('contract', 'unknown')}; "
+                                 f"time: {item.get('recorded_at', 'unknown')}; "
+                                 f"price USD: {item.get('fill_price', item.get('mark_price', 'unknown'))}; "
+                                 f"quantity: {item.get('closed_quantity', item.get('quantity', 'unknown'))}; "
+                                 f"realized USD: {item.get('realized_pnl_usd', 'not applicable')}; "
+                                 f"reason: {item.get('reason', 'entry')}; "
+                                 f"price source: {item.get('price_source', 'paper model')}"
                                  for item in batch]
                 subject = f"[PAPER TRADE] Multi-Week Crypto | {len(batch)} ACTIONS | {now:%Y-%m-%d %H:%M} ET"
                 heading = f"{len(batch)} PORTFOLIO ACTIONS"

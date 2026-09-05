@@ -19,6 +19,25 @@ UTC = timezone.utc
 SUPPORTED_ASSET_CLASSES = {"FOREX", "EQUITY", "OPTION", "CRYPTO"}
 
 
+def checkpoint_view(item: dict[str, Any]) -> dict[str, Any]:
+    """Never present a late observation as an earlier counterfactual exit."""
+    row = dict(item)
+    intraday = "checkpoint_minutes" in row
+    age = float(row.get("age_minutes" if intraday else "age_days") or 0)
+    horizon = float(row.get("checkpoint_minutes" if intraday else "checkpoint_days") or 0)
+    tolerance = 5.0 if intraday else 1 / 24
+    valid = horizon > 0 and horizon <= age <= horizon + tolerance
+    row["timing_status"] = "ON_TIME" if valid else "MISSED_HORIZON"
+    row["counterfactual_valid"] = valid
+    row["timing_tolerance_minutes"] = 5 if intraday else 60
+    if not valid:
+        row["late_observation"] = row.get("late_observation") or {key: row.get(key) for key in (
+            "executable_price", "executable_value_usd", "executable_pnl_usd", "return_pct")}
+        for key in row["late_observation"]:
+            row[key] = None
+    return row
+
+
 def now_utc() -> datetime:
     return datetime.now(UTC)
 
@@ -501,7 +520,7 @@ class PaperLedger:
             if horizon > age_minutes or horizon in existing:
                 continue
             pnl = (price - entry) * quantity
-            added.append(self.append({
+            added.append(self.append(checkpoint_view({
                 "type": "PAPER_INTRADAY_CHECKPOINT", "mode": "PAPER_ONLY",
                 "asset_class": "CRYPTO", "strategy": MULTI_WEEK_CRYPTO_STRATEGY,
                 "symbol": position.get("symbol"), "proposal_id": proposal_id,
@@ -517,7 +536,7 @@ class PaperLedger:
                 "liquidity_usd": market.get("liquidity_usd"),
                 "source_observed_at": market.get("observed_at"),
                 "price_source": market.get("price_source") or "CURRENT_EXECUTABLE_MARK",
-            }))
+            })))
         return added
 
     def record_due_horizon_checkpoints(self, position: dict[str, Any], price: float,
@@ -542,7 +561,7 @@ class PaperLedger:
             if horizon > age_days or horizon in existing:
                 continue
             pnl = (price - entry) * quantity
-            added.append(self.append({
+            added.append(self.append(checkpoint_view({
                 "type": "PAPER_HORIZON_CHECKPOINT", "mode": "PAPER_ONLY",
                 "asset_class": "CRYPTO", "strategy": MULTI_WEEK_CRYPTO_STRATEGY,
                 "symbol": position.get("symbol"), "proposal_id": proposal_id,
@@ -560,7 +579,7 @@ class PaperLedger:
                 "volume_24h_usd": market.get("volume_24h_usd"),
                 "source_observed_at": market.get("observed_at"),
                 "source_urls": market.get("source_urls") or [],
-            }))
+            })))
         return added
 
     def add_stage(self, proposal_id: str, price: float, stage: int) -> dict[str, Any]:
@@ -709,13 +728,16 @@ class PaperLedger:
         partials = [item for item in records if item.get("type") == "PAPER_PARTIAL_CLOSE"]
         pnls = [float(item.get("realized_pnl_usd") or 0) for item in closes]
         all_realized = [float(item.get("realized_pnl_usd") or 0) for item in [*closes, *partials]]
-        daily_cutoff = now_utc().timestamp() - 86400
+        daily_cutoff = now_utc().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         daily_realized = []
+        daily_by_strategy = {}
         for item in [*closes, *partials]:
             try:
                 recorded = datetime.fromisoformat(str(item.get("recorded_at") or "").replace("Z", "+00:00"))
                 if recorded.timestamp() >= daily_cutoff:
                     daily_realized.append(float(item.get("realized_pnl_usd") or 0))
+                    strategy = str(item.get("strategy") or "UNKNOWN")
+                    daily_by_strategy[strategy] = daily_by_strategy.get(strategy, 0.0) + float(item.get("realized_pnl_usd") or 0)
             except ValueError:
                 continue
         by_strategy: dict[str, dict[str, Any]] = {}
@@ -740,6 +762,8 @@ class PaperLedger:
         fills = {str(item.get("proposal_id") or ""): item for item in records
                  if item.get("type") == "PAPER_FILL" and
                  item.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY}
+        for strategy, bucket in by_strategy.items():
+            bucket["daily_realized_pnl_usd"] = round(daily_by_strategy.get(strategy, 0.0), 8)
         latest_marks = self.latest_marks()
         chain_performance: dict[str, dict[str, Any]] = {}
         for proposal_id, fill in fills.items():
@@ -812,8 +836,9 @@ class PaperLedger:
             "recent_closes": list(reversed(closes[-25:])),
             "multi_week_chain_performance": chain_performance,
             "multi_week_cohort_performance": cohort_performance,
-            "multi_week_horizon_checkpoints": list(reversed(checkpoints[-250:])),
-            "multi_week_intraday_checkpoints": list(reversed(intraday[-250:])),
+            "daily_pnl_timezone": "UTC",
+            "multi_week_horizon_checkpoints": [checkpoint_view(item) for item in reversed(checkpoints[-250:])],
+            "multi_week_intraday_checkpoints": [checkpoint_view(item) for item in reversed(intraday[-250:])],
         }
 
 

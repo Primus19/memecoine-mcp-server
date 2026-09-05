@@ -193,6 +193,9 @@ def main() -> None:
     last_held_quote_refresh = 0.0
     last_held_quote_refresh_at = ""
     held_quotes: list[dict] = []
+    candidate_quotes: list[dict] = []
+    candidate_quote_errors: list[dict] = []
+    last_candidate_refresh = 0.0
     held_quote_errors: list[dict] = []
     service_started_at = datetime.now(timezone.utc)
     restored_records = len(ledger.records())
@@ -213,14 +216,25 @@ def main() -> None:
                     "status": "DEGRADED", "last_error": type(feed_exc).__name__}}
             snapshots = list(payload.get("snapshots", []))
             crypto_snapshots = discover(payload, confirmations)
+            if time.monotonic() - last_candidate_refresh >= 300:
+                try:
+                    candidate_quotes, candidate_quote_errors = refresh_held_position_quotes(crypto_snapshots)
+                except Exception as exc:
+                    candidate_quotes, candidate_quote_errors = [], [{"error": type(exc).__name__}]
+                last_candidate_refresh = time.monotonic()
+            candidate_by_identity = {(str(item.get("chain") or "").lower(),
+                                      str(item.get("contract") or "").lower()): item for item in candidate_quotes}
+            crypto_snapshots = [{**item, **candidate_by_identity.get(
+                (str(item.get("chain") or "").lower(), str(item.get("contract") or "").lower()), {})}
+                for item in crypto_snapshots]
             if time.monotonic() - last_held_quote_refresh >= held_quote_interval:
                 held_quotes, held_quote_errors = refresh_held_position_quotes(ledger.positions())
                 last_held_quote_refresh = time.monotonic()
                 last_held_quote_refresh_at = datetime.now(timezone.utc).isoformat()
             held_by_identity = {(str(item.get("chain") or "").lower(),
                                  str(item.get("contract") or "").lower()): item for item in held_quotes}
-            crypto_snapshots = [held_by_identity.get((str(item.get("chain") or "").lower(),
-                                                      str(item.get("contract") or "").lower()), item)
+            crypto_snapshots = [{**item, **held_by_identity.get((str(item.get("chain") or "").lower(),
+                                                      str(item.get("contract") or "").lower()), {})}
                                 for item in crypto_snapshots]
             known = {(str(item.get("chain") or "").lower(), str(item.get("contract") or "").lower())
                      for item in crypto_snapshots}
@@ -282,7 +296,8 @@ def main() -> None:
                              item.get("type") in {"PAPER_FILL", "PAPER_ADD", "PAPER_PARTIAL_CLOSE", "PAPER_CLOSE"}]
             crypto_bucket.update(open=len(crypto_positions), open_positions=crypto_positions,
                                  realized_pnl_usd=crypto_bucket.get("net_pnl_usd", 0),
-                                 daily_realized_pnl_usd=report.get("daily_realized_pnl_usd", 0),
+                                 daily_realized_pnl_usd=crypto_bucket.get("daily_realized_pnl_usd", 0),
+                                 daily_pnl_timezone="UTC",
                                  recent_actions=crypto_events[:25],
                                  research_open=sum(item.get("research_only") is True for item in crypto_positions),
                                  qualified_open=sum(item.get("research_only") is not True for item in crypto_positions))
@@ -303,6 +318,8 @@ def main() -> None:
             runtime = {"last_scan": datetime.now(timezone.utc).isoformat(), "last_error": "",
                        "decision_funnel": decision_funnel(outcomes),
                        "last_outcomes": outcomes[-25:], "last_closes": closes[-25:],
+                       "candidate_quote_refresh": {"interval_seconds": 300,
+                           "quote_count": len(candidate_quotes), "errors": candidate_quote_errors},
                        "worker_state": {
                            "service_started_at": service_started_at.isoformat(),
                            "uptime_seconds": round((datetime.now(timezone.utc) - service_started_at).total_seconds(), 1),
