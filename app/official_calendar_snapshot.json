@@ -12,7 +12,7 @@
       "currency": "USD",
       "event": "Employment Situation",
       "impact": "HIGH",
-      "minutes_until": -235,
+      "minutes_until": -965,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-09-04T12:30:00+00:00"
     },
@@ -22,7 +22,7 @@
       "currency": "EUR",
       "event": "ECB monetary policy decision and press conference",
       "impact": "HIGH",
-      "minutes_until": 8390,
+      "minutes_until": 7660,
       "source_url": "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html",
       "time": "2026-09-10T12:15:00+00:00"
     },
@@ -32,7 +32,7 @@
       "currency": "USD",
       "event": "Producer Price Index",
       "impact": "HIGH",
-      "minutes_until": 8405,
+      "minutes_until": 7675,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-09-10T12:30:00+00:00"
     },
@@ -42,7 +42,7 @@
       "currency": "USD",
       "event": "Consumer Price Index",
       "impact": "HIGH",
-      "minutes_until": 9845,
+      "minutes_until": 9115,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-09-11T12:30:00+00:00"
     },
@@ -52,7 +52,7 @@
       "currency": "USD",
       "event": "FOMC monetary policy decision",
       "impact": "HIGH",
-      "minutes_until": 17375,
+      "minutes_until": 16645,
       "source_url": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
       "time": "2026-09-16T18:00:00+00:00"
     },
@@ -62,7 +62,7 @@
       "currency": "JPY",
       "event": "Bank of Japan monetary policy decision window",
       "impact": "HIGH",
-      "minutes_until": 17915,
+      "minutes_until": 17185,
       "source_url": "https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm",
       "time": "2026-09-17T03:00:00+00:00"
     },
@@ -72,7 +72,7 @@
       "currency": "GBP",
       "event": "Bank of England MPC decision",
       "impact": "HIGH",
-      "minutes_until": 18395,
+      "minutes_until": 17665,
       "source_url": "https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates",
       "time": "2026-09-17T11:00:00+00:00"
     },
@@ -82,7 +82,7 @@
       "currency": "USD",
       "event": "GDP (Third Estimate), Industries, Corporate Profits, State GDP, and State Personal Income, 2nd Quarter 2026; State PCE, 2025",
       "impact": "HIGH",
-      "minutes_until": 37205,
+      "minutes_until": 36475,
       "source_url": "https://www.bea.gov/news/schedule",
       "time": "2026-09-30T12:30:00+00:00"
     },
@@ -92,7 +92,7 @@
       "currency": "USD",
       "event": "Personal Income and Outlays, August 2026",
       "impact": "HIGH",
-      "minutes_until": 37205,
+      "minutes_until": 36475,
       "source_url": "https://www.bea.gov/news/schedule",
       "time": "2026-09-30T12:30:00+00:00"
     },
@@ -102,14 +102,14 @@
       "currency": "USD",
       "event": "Employment Situation",
       "impact": "HIGH",
-      "minutes_until": 40085,
+      "minutes_until": 39355,
       "source_url": "https://fred.stlouisfed.org/releases/calendar",
       "time": "2026-10-02T12:30:00+00:00"
     }
   ],
-  "observed_at": "2026-09-04T16:25:14.996591+00:00",
+  "observed_at": "2026-09-05T04:35:02.821188+00:00",
   "provider": "official_composite",
-  "snapshot_generated_at": "2026-09-04T16:25:17.507485+00:00",
+  "snapshot_generated_at": "2026-09-05T04:35:06.488488+00:00",
   "source_url": "https://fred.stlouisfed.org/releases/calendar",
   "sources": [
     {
@@ -117,21 +117,21 @@
       "event_count": 2,
       "name": "fred_employment",
       "ok": true,
-      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=50&ve=2026-10-19&view=month&vs=2026-09-03"
+      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=50&ve=2026-10-20&view=month&vs=2026-09-04"
     },
     {
       "currency": "USD",
       "event_count": 2,
       "name": "fred_cpi",
       "ok": true,
-      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=10&ve=2026-10-19&view=month&vs=2026-09-03"
+      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=10&ve=2026-10-20&view=month&vs=2026-09-04"
     },
     {
       "currency": "USD",
       "event_count": 2,
       "name": "fred_ppi",
       "ok": true,
-      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=46&ve=2026-10-19&view=month&vs=2026-09-03"
+      "url": "https://fred.stlouisfed.org/releases/calendar?od=asc&rid=46&ve=2026-10-20&view=month&vs=2026-09-04"
     },
     {
       "currency": "USD",
