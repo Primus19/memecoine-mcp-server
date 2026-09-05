@@ -366,7 +366,9 @@ def issue_model_3_1_recommendation(candidate:dict)->dict:
     """Score and freeze a recommendation. When preauthorized mode is enabled, immediately run the same validated fast execution path; this may spend real money if live trading is armed."""
     return auto_process(candidate) if PREAUTHORIZED_AUTO_EXECUTION else issue(candidate)
 @mcp.tool(annotations={"readOnlyHint":True,"openWorldHint":True})
-def pilot_status(since_event_seq:int=0)->dict:return hourly_snapshot(since_event_seq)
+def pilot_status(since_event_seq:int=0)->dict:
+    from .worker_observability import worker_evidence
+    return {**hourly_snapshot(since_event_seq), "multi_asset_worker": worker_evidence()}
 @mcp.tool(annotations={"destructiveHint":True,"openWorldHint":True,"idempotentHint":True})
 def execute_issued_ticket(ticket_id:str,recommendation_hash:str)->dict:
     """Execute only an unmodified, unexpired server-issued recommendation. This can spend real money."""

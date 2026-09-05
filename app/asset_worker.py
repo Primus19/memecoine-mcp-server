@@ -15,6 +15,8 @@ from .multi_week_crypto import (STRATEGY as MULTI_WEEK_CRYPTO_STRATEGY,
 from .multi_week_discovery import ConfirmationLedger, discover
 from .multi_asset_email import MultiWeekCryptoEmailer
 from .emerging_crypto import refresh_held_position_quotes
+from .worker_observability import monitoring_health, decision_funnel
+from .version import deployment_info
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -28,8 +30,8 @@ class HealthHandler(BaseHTTPRequestHandler):
         if self.path != "/health" and token and self.headers.get("Authorization") != f"Bearer {token}":
             self.send_error(401); return
         report = self.ledger.report() if self.ledger else {}
-        payload = {"ok": True, "service": "multi-asset-paper-worker", "paper_only": True,
-                   **self.runtime}
+        payload = {"service": "multi-asset-paper-worker", "paper_only": True,
+                   **self.runtime, **monitoring_health(self.runtime), "deployment": deployment_info()}
         if self.path != "/health":
             payload.update(report)
         else:
@@ -203,7 +205,12 @@ def main() -> None:
     while True:
         cycle_started_at = datetime.now(timezone.utc)
         try:
-            payload = fetch(feed_url, token)
+            # Continue held-position management when discovery is unavailable.
+            try:
+                payload = fetch(feed_url, token)
+            except Exception as feed_exc:
+                payload = {"snapshots": [], "crypto_universe": [], "crypto_health": {
+                    "status": "DEGRADED", "last_error": type(feed_exc).__name__}}
             snapshots = list(payload.get("snapshots", []))
             crypto_snapshots = discover(payload, confirmations)
             if time.monotonic() - last_held_quote_refresh >= held_quote_interval:
@@ -254,6 +261,10 @@ def main() -> None:
             outcomes = []
             events = list(closes)
             for snapshot in snapshots:
+                if payload.get("crypto_health", {}).get("status") == "DEGRADED":
+                    outcomes.append({"symbol": snapshot.get("symbol"), "status": "REJECTED",
+                                     "reason": "discovery feed degraded; entries blocked"})
+                    continue
                 if str(snapshot.get("symbol") or "").upper() in rotation_exclusions:
                     continue
                 try:
@@ -290,6 +301,7 @@ def main() -> None:
                 feed_health.setdefault("last_error", "crypto universe is empty")
             cycle_count += 1
             runtime = {"last_scan": datetime.now(timezone.utc).isoformat(), "last_error": "",
+                       "decision_funnel": decision_funnel(outcomes),
                        "last_outcomes": outcomes[-25:], "last_closes": closes[-25:],
                        "worker_state": {
                            "service_started_at": service_started_at.isoformat(),
@@ -318,8 +330,8 @@ def main() -> None:
                            "research_eligible_count": sum(bool(item["research_eligible"])
                                                           for item in emerging_candidates),
                            "candidates": emerging_candidates[:20]}}
-            runtime["email_delivery"] = emailer.maybe_send(events, {**report, "multi_week_crypto": crypto_bucket}, runtime)
             HealthHandler.runtime = runtime
+            runtime["email_delivery"] = emailer.maybe_send(events, {**report, "multi_week_crypto": crypto_bucket}, runtime)
             print(json.dumps({"event": "MULTI_ASSET_SCAN", "paper_only": True,
                               "closes": closes, "outcomes": outcomes}), flush=True)
         except Exception as exc:
