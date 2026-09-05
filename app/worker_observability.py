@@ -2,7 +2,18 @@
 from datetime import datetime, timezone
 import json
 import os
+import socket
+from http.server import ThreadingHTTPServer
 from urllib.request import Request, urlopen
+
+
+class DualStackHTTPServer(ThreadingHTTPServer):
+    """Serve public IPv4 checks and Railway private IPv6 clients."""
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
 
 
 def monitoring_health(runtime, now=None):
@@ -35,7 +46,10 @@ def worker_evidence():
     except Exception as exc:
         return {"verification": "UNVERIFIED", "ok": False,
                 "open_positions": None, "realized_pnl_usd": None,
-                "error": type(exc).__name__}
+                "error": type(exc).__name__,
+                "connection_error_type": type(getattr(exc, "reason", exc)).__name__,
+                "connection_errno": getattr(getattr(exc, "reason", exc), "errno", None),
+                "http_status": getattr(exc, "code", None)}
 
 
 def decision_funnel(outcomes):
