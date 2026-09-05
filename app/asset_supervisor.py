@@ -6,6 +6,7 @@ import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from .worker_observability import monitoring_health
 
 class Handler(BaseHTTPRequestHandler):
     state={"ok":False,"last_check":"","last_error":"not checked","worker":{}}
@@ -18,7 +19,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def fetch(url: str) -> dict:
-    with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept":"application/json"}), timeout=20) as response: return json.loads(response.read())
+    headers = {"Accept": "application/json"}
+    token = os.getenv("MULTI_ASSET_REPORT_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as response: return json.loads(response.read())
 
 
 def main():
@@ -32,7 +37,7 @@ def main():
     while True:
         try:
             payload=fetch(url)
-            Handler.state={"ok":bool(payload.get("ok")),"last_check":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+            Handler.state={"ok":bool(payload.get("ok")) and monitoring_health(payload)["ok"],"last_check":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
                            "last_error":"","worker":{"open_position_count":len(payload.get("open_positions") or []),
                            "open_positions":payload.get("open_positions") or [],
                            "closed":payload.get("closed",0),"realized_pnl_usd":payload.get("realized_pnl_usd",0),

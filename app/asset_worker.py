@@ -15,7 +15,7 @@ from .multi_week_crypto import (STRATEGY as MULTI_WEEK_CRYPTO_STRATEGY,
 from .multi_week_discovery import ConfirmationLedger, discover
 from .multi_asset_email import MultiWeekCryptoEmailer
 from .emerging_crypto import refresh_held_position_quotes
-from .worker_observability import monitoring_health, decision_funnel
+from .worker_observability import monitoring_health, decision_funnel, DualStackHTTPServer
 from .version import deployment_info
 
 
@@ -200,7 +200,7 @@ def main() -> None:
     cycle_count = 0
     failed_cycle_count = 0
     HealthHandler.ledger = ledger
-    server = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), HealthHandler)
+    server = DualStackHTTPServer(("::", int(os.getenv("PORT", "8080"))), HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     while True:
         cycle_started_at = datetime.now(timezone.utc)
