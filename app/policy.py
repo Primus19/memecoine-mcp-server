@@ -33,6 +33,14 @@ class OpportunityPolicy:
     emerging_max_slippage_bps: float = 30.0
     estimated_fee_bps_per_side: float = 120.0
     minimum_net_edge_bps: float = 50.0
+    # Execution-cost controls. Coinbase Advanced charges roughly half as much for
+    # maker (post-only limit) fills as for taker fills at every tier; on a 120 bps
+    # taker venue that is the single largest lever on net expectancy.
+    maker_fee_bps_per_side: float = 60.0
+    entry_post_only: bool = False
+    # Momentum-gate shape. Replay evidence (docs/research) shows the 1h>0 filter
+    # mostly adds churn; keep it on by default for continuity, switch off via env.
+    require_positive_1h: bool = True
 
     @classmethod
     def from_env(cls) -> "OpportunityPolicy":
@@ -54,7 +62,20 @@ class OpportunityPolicy:
             emerging_max_slippage_bps=float(os.getenv("LIVE_EMERGING_MAX_SLIPPAGE_BPS", "30")),
             estimated_fee_bps_per_side=float(os.getenv("LIVE_ESTIMATED_FEE_BPS_PER_SIDE", "120")),
             minimum_net_edge_bps=float(os.getenv("LIVE_MIN_NET_EDGE_BPS", "50")),
+            maker_fee_bps_per_side=float(os.getenv("LIVE_MAKER_FEE_BPS_PER_SIDE", "60")),
+            entry_post_only=_truthy("LIVE_ENTRY_POST_ONLY", False),
+            require_positive_1h=_truthy("LIVE_REQUIRE_POSITIVE_1H", True),
         )
+
+    @property
+    def entry_fee_bps_per_side(self) -> float:
+        """Fee actually paid on entry: maker when post-only, taker otherwise."""
+        return self.maker_fee_bps_per_side if self.entry_post_only else self.estimated_fee_bps_per_side
+
+    @property
+    def round_trip_fee_bps(self) -> float:
+        """Entry fee plus exit fee. Exits are market/bracket (taker) in this pilot."""
+        return self.entry_fee_bps_per_side + self.estimated_fee_bps_per_side
 
     def tier(self, market_cap_usd: Any, volume_24h_usd: Any) -> str:
         cap, volume = float(market_cap_usd or 0), float(volume_24h_usd or 0)

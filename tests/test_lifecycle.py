@@ -1,4 +1,6 @@
+import os
 import unittest
+from unittest.mock import patch
 
 from app.lifecycle import profit_protection_challenger,supervision_levels
 
@@ -43,10 +45,26 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual("",result["exit_reason"])
 
     def test_fee_aware_break_even_protects_after_costs_clear(self):
+        # Entry is already the fee-inclusive broker cost basis.  The remaining
+        # modeled exit cost is 120 bps fee + 10 bps half-spread + 20 bps slippage.
         result=supervision_levels(self.ticket,entry=100,mark=100,high_water=104)
         self.assertTrue(result["break_even_active"])
-        self.assertEqual(100,result["effective_stop_price"])
+        self.assertTrue(result["break_even_includes_costs"])
+        self.assertAlmostEqual(100 / .985,result["break_even_price"])
+        self.assertAlmostEqual(100 / .985,result["effective_stop_price"])
         self.assertEqual("TRAILING_STOP",result["exit_reason"])
+
+    def test_break_even_stop_is_not_a_hidden_loss(self):
+        # A mark above the cost-covered price but below the legacy trigger keeps the trade open.
+        result=supervision_levels(self.ticket,entry=100,mark=102,high_water=104)
+        self.assertEqual("",result["exit_reason"])
+        self.assertGreater(result["effective_stop_price"],100)
+
+    def test_legacy_entry_price_break_even_can_be_restored(self):
+        with patch.dict(os.environ,{"LIFECYCLE_BREAK_EVEN_INCLUDES_COSTS":"false"}):
+            result=supervision_levels(self.ticket,entry=100,mark=100,high_water=104)
+        self.assertFalse(result["break_even_includes_costs"])
+        self.assertEqual(100,result["effective_stop_price"])
 
     def test_position_momentum_reversal_exits_before_broad_regime_falls(self):
         result=supervision_levels(self.ticket,entry=100,mark=102,high_water=105,momentum_1h_pct=-1.2)

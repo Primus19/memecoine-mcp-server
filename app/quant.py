@@ -103,3 +103,79 @@ def conservative_probability(score: float, agreement: float, *, floor: float = 0
     raw = 0.50 + (float(score) - 75.0) / 250.0 + (clamp(agreement, 0.0, 1.0) - 0.50) / 10.0
     return clamp(raw, floor, ceiling)
 
+
+
+def kelly_fraction(win_probability: float, reward_risk: float, *, cap: float = 0.25) -> float:
+    """Fractional Kelly for a stop/target trade: f* = p - (1-p)/b, scaled by `cap`.
+
+    Full Kelly is far too aggressive for estimated probabilities; the industry norm is
+    quarter Kelly (cap=0.25). Returns 0 when the edge is not positive."""
+    p = clamp(float(win_probability), 0.0, 1.0)
+    b = float(reward_risk)
+    if b <= 0:
+        return 0.0
+    full = p - (1.0 - p) / b
+    return max(0.0, full) * clamp(float(cap), 0.0, 1.0)
+
+
+def volatility_target_notional(equity: float, annual_volatility: float, *, target_annual_volatility: float = 0.15,
+                               max_notional_fraction: float = 1.0) -> float:
+    """Notional that scales exposure inversely with realized volatility (vol targeting).
+
+    Positions in a 90%-vol coin get a fraction of the notional a 10%-vol FX pair gets, so
+    every position contributes roughly the same risk. Bounded by `max_notional_fraction`
+    of equity."""
+    equity = max(0.0, float(equity))
+    vol = float(annual_volatility)
+    if equity <= 0 or vol <= 0 or target_annual_volatility <= 0:
+        return 0.0
+    fraction = min(max_notional_fraction, target_annual_volatility / vol)
+    return equity * max(0.0, fraction)
+
+
+def stop_distance_quantity(risk_budget: float, entry_price: float, stop_price: float) -> float:
+    """Quantity such that a stop-out loses exactly `risk_budget` (before costs)."""
+    distance = abs(float(entry_price) - float(stop_price))
+    if distance <= 0 or risk_budget <= 0:
+        return 0.0
+    return float(risk_budget) / distance
+
+
+def max_drawdown(equity_curve: Sequence[float]) -> float:
+    """Largest peak-to-trough decline as a positive fraction (0.25 = -25%)."""
+    peak, worst = float("-inf"), 0.0
+    for value in equity_curve:
+        value = float(value)
+        peak = max(peak, value)
+        if peak > 0:
+            worst = max(worst, (peak - value) / peak)
+    return worst
+
+
+def sharpe_ratio(period_returns: Sequence[float], periods_per_year: int = 365) -> float:
+    """Annualized Sharpe ratio of per-period returns (risk-free rate 0)."""
+    values = [float(v) for v in period_returns if math.isfinite(float(v))]
+    if len(values) < 2:
+        return 0.0
+    deviation = statistics.pstdev(values)
+    if deviation <= 0:
+        return 0.0
+    return statistics.mean(values) / deviation * math.sqrt(periods_per_year)
+
+
+def expectancy_r(r_multiples: Sequence[float]) -> dict:
+    """Trade-quality summary in R units: expectancy, win rate, payoff ratio, profit factor."""
+    values = [float(v) for v in r_multiples if math.isfinite(float(v))]
+    if not values:
+        return {"trades": 0, "expectancy_r": 0.0, "win_rate": 0.0, "payoff_ratio": 0.0, "profit_factor": 0.0}
+    wins = [v for v in values if v > 0]
+    losses = [v for v in values if v < 0]
+    average_win = statistics.mean(wins) if wins else 0.0
+    average_loss = abs(statistics.mean(losses)) if losses else 0.0
+    return {
+        "trades": len(values),
+        "expectancy_r": statistics.mean(values),
+        "win_rate": len(wins) / len(values),
+        "payoff_ratio": average_win / average_loss if average_loss else 0.0,
+        "profit_factor": sum(wins) / abs(sum(losses)) if losses else (float("inf") if wins else 0.0),
+    }

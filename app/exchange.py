@@ -6,6 +6,8 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
 from coinbase.rest import RESTClient
 
+from .policy import OpportunityPolicy
+
 
 class CoinbaseOrderRejected(RuntimeError):
     """Coinbase returned a structured rejection instead of an order id."""
@@ -93,7 +95,11 @@ class Exchange:
         base_size = self.normalize_base_size(product, float(ticket["notional_usdc"]) / float(limit_price))
         if float(base_size) < float(product.get("base_min_size") or 0):
             raise RuntimeError("derived base size is below Coinbase minimum")
-        return {"limit_limit_gtc": {"base_size": base_size, "limit_price": limit_price, "post_only": False}}
+        # post_only=True makes the venue reject (instead of fill as taker) an entry
+        # that would cross the book, so the order pays the maker fee or does not
+        # execute. The existing 45-second entry timeout then cancels it.
+        post_only = bool(ticket.get("entry_post_only", OpportunityPolicy.from_env().entry_post_only))
+        return {"limit_limit_gtc": {"base_size": base_size, "limit_price": limit_price, "post_only": post_only}}
 
     def attached_configuration(self, ticket: dict, product: dict) -> dict:
         # Both bracket legs must obey the product quote increment. Round the

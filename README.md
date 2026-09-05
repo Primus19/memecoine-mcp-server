@@ -131,6 +131,35 @@ The reporting agent must never invent a live ticket outside this flow.
 | `emergency_flatten` | Cancel the tracked entry and market-sell the tracked asset after explicit confirmation |
 | `resume_trading` | Resume only with the required explicit acknowledgement |
 
+## Historical research and backtesting (`app/research`)
+
+Production services only ever see a live snapshot, so until this release no rule in
+this repository had a measured historical expectancy; every rule had to earn 100
+forward paper closes first. `app/research` is an offline package (optional
+dependencies in `requirements-research.txt`, never imported by a deployed service)
+that pulls multi-year candles from Coinbase, Kraken, Yahoo and the ECB, and:
+
+- replays the production rules on that history (`replay-crypto` runs the Model 3.1
+  momentum gate with the research-feed geometry and `lifecycle.supervision_levels`
+  exits; `replay-forex` rebuilds `market_feed.forex_snapshot` and runs
+  `ForexEngine`, `trend_continuation_signals` and `bryne_liquidity_signals`);
+- backtests candidate per-trade rules with the same risk gates and the production
+  `promotion_gate`;
+- backtests allocation rules (multi-week time-series and cross-sectional momentum).
+
+```bash
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements-research.txt
+.venv/bin/python -m app.research.cli replay-crypto --fee 120
+.venv/bin/python -m app.research.cli replay-forex --spread 1.5
+.venv/bin/python -m app.research.cli portfolio --fee 26
+```
+
+Findings and the resulting recommendations are in `docs/PROFITABILITY_REVIEW.md`;
+raw results are in `docs/research/`. Execution-cost controls added alongside the
+research (`LIVE_ENTRY_POST_ONLY`, `LIVE_MAKER_FEE_BPS_PER_SIDE`,
+`LIVE_REQUIRE_POSITIVE_1H`, `LIFECYCLE_BREAK_EVEN_INCLUDES_COSTS`) are documented in
+`.env.example`.
+
 ## Capital and P&L
 
 - The first valid $5-$30 USDC balance is recorded as the initial baseline.

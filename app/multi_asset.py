@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from .quant import conservative_probability, expected_net_value, multi_horizon_consensus
-from .multi_week_crypto import STRATEGY as MULTI_WEEK_CRYPTO_STRATEGY, evaluate_candidate
+from .multi_week_crypto import (LIQUID_TREND_COHORT,
+                                STRATEGY as MULTI_WEEK_CRYPTO_STRATEGY,
+                                evaluate_candidate)
 
 UTC = timezone.utc
 SUPPORTED_ASSET_CLASSES = {"FOREX", "EQUITY", "OPTION", "CRYPTO"}
@@ -295,6 +297,23 @@ class MultiWeekCryptoEngine(StrategyEngine):
         proposal = self.proposal(
             prepared, strategy=MULTI_WEEK_CRYPTO_STRATEGY,
             score=float(decision["research_score"] if research_only else decision["score"]), side="BUY")
+        if str(decision.get("cohort") or "") == LIQUID_TREND_COHORT:
+            budget = max(100.0, float(os.getenv("MULTI_WEEK_PAPER_BUDGET_USD", "1000")))
+            capacity = max(1, int(os.getenv("MULTI_WEEK_LIQUID_MAX_OPEN_POSITIONS", "2")))
+            annual_vol = max(.01, float(snapshot.get("annualized_volatility_30d") or 1.0))
+            target_vol = min(.30, max(.05, float(os.getenv(
+                "MULTI_WEEK_LIQUID_TARGET_ANNUAL_VOL", ".20"))))
+            max_fraction = min(.10, max(.01, float(os.getenv(
+                "MULTI_WEEK_LIQUID_MAX_POSITION_FRACTION", ".05"))))
+            allocation_fraction = min(max_fraction, target_vol / annual_vol / capacity)
+            allocation = budget * allocation_fraction
+            quantity = allocation / proposal.reference_price
+            return replace(
+                proposal, quantity=quantity, planned_full_quantity=quantity,
+                maximum_loss_usd=allocation * stop_fraction, entry_stage=3,
+                research_only=False, research_cohort=LIQUID_TREND_COHORT,
+                qualification_failures=(),
+            )
         if research_only:
             budget = max(100.0, float(os.getenv("MULTI_WEEK_PAPER_BUDGET_USD", "1000")))
             allocation = budget * min(.10, max(.01, float(os.getenv(
@@ -753,6 +772,31 @@ class PaperLedger:
             bucket["realized_pnl_usd"] = round(bucket["realized_pnl_usd"], 8)
             bucket["unrealized_pnl_usd"] = round(bucket["unrealized_pnl_usd"], 8)
             bucket["win_rate_pct"] = round(bucket["wins"] / bucket["closed"] * 100, 2) if bucket["closed"] else None
+        cohort_performance: dict[str, dict[str, Any]] = {}
+        for proposal_id, fill in fills.items():
+            cohort = str(fill.get("research_cohort") or "QUALIFIED")
+            bucket = cohort_performance.setdefault(cohort, {
+                "opened": 0, "open": 0, "closed": 0, "wins": 0, "losses": 0,
+                "realized_pnl_usd": 0.0, "unrealized_pnl_usd": 0.0,
+            })
+            bucket["opened"] += 1
+            close = next((item for item in reversed(records)
+                          if item.get("type") == "PAPER_CLOSE" and
+                          str(item.get("proposal_id") or "") == proposal_id), None)
+            if close:
+                result = float(close.get("realized_pnl_usd") or 0)
+                bucket["closed"] += 1
+                bucket["wins" if result > 0 else "losses"] += 1
+                bucket["realized_pnl_usd"] += result
+            else:
+                bucket["open"] += 1
+                bucket["unrealized_pnl_usd"] += float(
+                    (latest_marks.get(proposal_id) or {}).get("unrealized_pnl_usd") or 0)
+        for bucket in cohort_performance.values():
+            bucket["realized_pnl_usd"] = round(bucket["realized_pnl_usd"], 8)
+            bucket["unrealized_pnl_usd"] = round(bucket["unrealized_pnl_usd"], 8)
+            bucket["win_rate_pct"] = (round(bucket["wins"] / bucket["closed"] * 100, 2)
+                                      if bucket["closed"] else None)
         checkpoints = [item for item in records if item.get("type") == "PAPER_HORIZON_CHECKPOINT"]
         intraday = [item for item in records if item.get("type") == "PAPER_INTRADAY_CHECKPOINT"]
         return {
@@ -767,6 +811,7 @@ class PaperLedger:
             "by_strategy": by_strategy,
             "recent_closes": list(reversed(closes[-25:])),
             "multi_week_chain_performance": chain_performance,
+            "multi_week_cohort_performance": cohort_performance,
             "multi_week_horizon_checkpoints": list(reversed(checkpoints[-250:])),
             "multi_week_intraday_checkpoints": list(reversed(intraday[-250:])),
         }
@@ -798,8 +843,22 @@ class MultiAssetEngine:
                 f"qualified signal blocked: {snapshot.get('symbol')} already has an open paper position")
         open_count = self.ledger.open_positions(asset_class)
         capacity = self.policy.max_open_positions_per_sleeve
-        if asset_class == "CRYPTO" and proposal.research_only:
-            capacity = max(1, int(os.getenv("MULTI_WEEK_RESEARCH_MAX_OPEN_POSITIONS", "3")))
+        if asset_class == "CRYPTO":
+            # One crypto service, two auditable cohorts, one hard portfolio cap.
+            # Cohort reserves prevent early-coin experiments from crowding out
+            # every slow-trend setup without allowing unbounded buying.
+            capacity = max(1, int(os.getenv("MULTI_WEEK_TOTAL_MAX_OPEN_POSITIONS", "3")))
+            cohort_capacity = max(1, int(os.getenv(
+                "MULTI_WEEK_RESEARCH_MAX_OPEN_POSITIONS" if proposal.research_only
+                else "MULTI_WEEK_LIQUID_MAX_OPEN_POSITIONS", "2")))
+            cohort_open = sum(
+                str(item.get("research_cohort") or "") == str(proposal.research_cohort or "")
+                for item in self.ledger.position_diagnostics()
+                if item.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY)
+            if cohort_open >= cohort_capacity:
+                raise MultiAssetRejected(
+                    f"crypto cohort capacity {cohort_open}/{cohort_capacity} for "
+                    f"{proposal.research_cohort or 'QUALIFIED'}")
             budget = max(100.0, float(os.getenv("MULTI_WEEK_PAPER_BUDGET_USD", "1000")))
             exposure_cap = budget * min(.50, max(.05, float(os.getenv(
                 "MULTI_WEEK_MAX_EXPOSURE_FRACTION", ".15"))))
@@ -809,7 +868,7 @@ class MultiAssetEngine:
             proposed_exposure = proposal.reference_price * proposal.quantity
             if open_exposure + proposed_exposure > exposure_cap + .01:
                 raise MultiAssetRejected(
-                    f"research budget cap: ${open_exposure:.2f} open + ${proposed_exposure:.2f} proposed "
+                    f"crypto paper budget cap: ${open_exposure:.2f} open + ${proposed_exposure:.2f} proposed "
                     f"exceeds ${exposure_cap:.2f}")
         if open_count >= capacity:
             blockers = ", ".join(str(item.get("symbol") or "UNKNOWN")

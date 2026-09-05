@@ -29,9 +29,13 @@ def test_cex_order_book_evidence_replaces_inapplicable_contract_concentration_ch
     result = evaluate_candidate(candidate(
         chain="coinbase-spot", contract="BTC-USD", execution_evidence_mode="CEX_ORDER_BOOK",
         venue_operational=True, security_verified=False, top10_holder_fraction=None,
-        creator_fraction=None, holder_growth_7d_pct=0,
+        creator_fraction=None, holder_growth_7d_pct=0, daily_candle_count=250,
+        price_above_200d_average=True, return_90d_pct=5, return_120d_pct=8,
+        return_180d_pct=12, return_270d_pct=None,
     ))
     assert result["qualified"] is True
+    assert result["cohort"] == "LIQUID_TSMOM_FORWARD_PAPER"
+    assert result["decision"] == "PAPER_ALLOCATION"
     assert "contract safety not verified" not in result["hard_gate_failures"]
 
 
@@ -42,6 +46,20 @@ def test_cex_candidate_fails_closed_when_venue_is_unavailable():
     ))
     assert result["qualified"] is False
     assert "execution venue unavailable" in result["hard_gate_failures"]
+
+
+def test_cex_candidate_requires_slow_trend_and_200_day_history():
+    result = evaluate_candidate(candidate(
+        chain="coinbase-spot", contract="BTC-USD", execution_evidence_mode="CEX_ORDER_BOOK",
+        venue_operational=True, security_verified=False, top10_holder_fraction=None,
+        creator_fraction=None, holder_growth_7d_pct=0, daily_candle_count=199,
+        price_above_200d_average=False, return_90d_pct=4, return_120d_pct=-2,
+        return_180d_pct=None, return_270d_pct=None,
+    ))
+    assert result["qualified"] is False
+    assert "fewer than 200 completed daily candles" in result["hard_gate_failures"]
+    assert "price is not above the 200-day average" in result["hard_gate_failures"]
+    assert "fewer than two positive slow-momentum windows" in result["hard_gate_failures"]
 
 
 def test_rejects_unsellable_vertical_runner_even_with_good_trend():
@@ -175,6 +193,32 @@ def test_profit_manager_exits_on_multi_factor_deterioration():
         {"executable_price": 108, "sell_route_ok": True, "round_trip_recovery": .99,
          "security_verified": True, "price_above_20d_average": False, "daily_higher_lows": False,
          "relative_strength_7d_pct": -2, "volume_7d_vs_prior_ratio": .7},
+    )
+    assert result["action"] == "EXIT"
+    assert result["reason"] == "multi-factor trend deterioration"
+
+
+def test_liquid_trend_position_uses_slow_exit_not_three_day_noise():
+    result = manage_position(
+        {"entry_price": 100, "initial_stop_price": 80, "peak_executable_price": 105,
+         "research_cohort": "LIQUID_TSMOM_FORWARD_PAPER"},
+        {"executable_price": 101, "sell_route_ok": True, "round_trip_recovery": .99,
+         "execution_evidence_mode": "CEX_ORDER_BOOK", "venue_operational": True,
+         "price_above_200d_average": True, "daily_higher_lows": False,
+         "relative_strength_7d_pct": -4, "volume_7d_vs_prior_ratio": .4,
+         "return_90d_pct": 4, "return_120d_pct": 8, "return_180d_pct": 12},
+    )
+    assert result["action"] == "HOLD"
+
+
+def test_liquid_trend_position_exits_only_when_slow_trend_breaks():
+    result = manage_position(
+        {"entry_price": 100, "initial_stop_price": 80, "peak_executable_price": 105,
+         "research_cohort": "LIQUID_TSMOM_FORWARD_PAPER"},
+        {"executable_price": 95, "sell_route_ok": True, "round_trip_recovery": .99,
+         "execution_evidence_mode": "CEX_ORDER_BOOK", "venue_operational": True,
+         "price_above_200d_average": False, "return_90d_pct": -4,
+         "return_120d_pct": -8, "return_180d_pct": 2},
     )
     assert result["action"] == "EXIT"
     assert result["reason"] == "multi-factor trend deterioration"

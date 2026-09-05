@@ -48,7 +48,12 @@ def _coinbase_candles(base: str, product_id: str) -> list[dict]:
             candles.append({"observed_at": datetime.fromtimestamp(float(stamp), timezone.utc).isoformat(),
                             "open": float(opening), "high": float(high), "low": float(low), "close": close,
                             "volume_usd": float(base_volume or 0) * close})
-    return sorted(candles, key=lambda item: item["observed_at"])[-90:]
+    # Coinbase returns at most 300 daily candles from this endpoint.  Retain the
+    # complete response: the slow allocation sleeve needs a real 200-day moving
+    # average and 90/120/180/270-day momentum, not a proxy built from 20 days.
+    history_days = max(200, min(300, int(os.getenv(
+        "MULTI_WEEK_CRYPTO_HISTORY_DAYS", "300"))))
+    return sorted(candles, key=lambda item: item["observed_at"])[-history_days:]
 
 
 def _walk_book(levels: list, amount: float, *, buying: bool) -> tuple[float, float]:
@@ -156,7 +161,7 @@ def coinbase_crypto_market_universe() -> list[dict]:
                            "creator_fraction": None, "holder_growth_7d_pct": 0.0,
                            "venue_operational": True, "execution_evidence_mode": "CEX_ORDER_BOOK",
                            "tradable": True, "market_veto": False, "quote_age_seconds": 0.0,
-                           "initial_stop_fraction": 0.10, "observed_at": now.isoformat(),
+                           "initial_stop_fraction": 0.15, "observed_at": now.isoformat(),
                            "source_urls": [f"https://exchange.coinbase.com/trade/{product_id}"],
                            "evidence_status": "PUBLIC_CEX_ORDER_BOOK_COST_STRESSED_PAPER_ONLY", **execution})
             if len(result) >= limit:

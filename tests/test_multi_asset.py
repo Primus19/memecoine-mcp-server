@@ -142,6 +142,36 @@ class MultiAssetTests(unittest.TestCase):
         self.assertEqual(.625, result["maximum_loss_usd"])
         self.assertEqual("0xabc", result["contract"])
 
+    def test_liquid_slow_trend_opens_full_volatility_aware_paper_allocation(self):
+        candles = []
+        start = datetime.now(timezone.utc) - timedelta(days=249)
+        for index in range(250):
+            close = 1 + index / 250
+            candles.append({"observed_at": (start + timedelta(days=index)).isoformat(),
+                            "open": close, "high": close * 1.01, "low": close * .99,
+                            "close": close, "volume_usd": 5_000_000})
+        from app.multi_week_discovery import ConfirmationLedger, derive_snapshot
+        confirmations = ConfirmationLedger(self.directory.name + "/confirmations.json")
+        asset = {**self.base("CRYPTO", "LIQUID"), "chain": "coinbase-spot",
+                 "contract": "LIQUID-USD", "daily_candles": candles,
+                 "price": candles[-1]["close"],
+                 "token_age_days": 249, "liquidity_usd": 2_000_000,
+                 "volume_24h_usd": 5_000_000, "round_trip_recovery": .995,
+                 "sell_impact_bps": 30, "sell_route_ok": True,
+                 "execution_evidence_mode": "CEX_ORDER_BOOK", "venue_operational": True,
+                 "executable_buy_price": candles[-1]["close"], "initial_stop_fraction": .15}
+        asset["observed_at"] = (datetime.now(timezone.utc) - timedelta(hours=13)).isoformat()
+        derive_snapshot(asset, confirmations)
+        asset["observed_at"] = datetime.now(timezone.utc).isoformat()
+        snapshot = derive_snapshot(asset, confirmations)
+        with patch.dict(os.environ, {"CRYPTO_ENGINE_ENABLED": "true",
+                                     "MULTI_WEEK_PAPER_BUDGET_USD": "1000"}):
+            result = MultiAssetEngine(self.ledger, self.policy).process(snapshot)
+        self.assertEqual("LIQUID_TSMOM_FORWARD_PAPER", result["research_cohort"])
+        self.assertEqual(3, result["entry_stage"])
+        self.assertLessEqual(result["fill_price"] * result["quantity"], 50.01)
+        self.assertFalse(result["research_only"])
+
     def test_emerging_research_candidate_opens_cost_stressed_paper_hold(self):
         snapshot = {**self.base("CRYPTO", "EARLY"), "chain": "robinhood", "contract": "0xearly",
                     "price": 1.0, "executable_buy_price": 1.01, "initial_stop_fraction": .12,
@@ -203,6 +233,9 @@ class MultiAssetTests(unittest.TestCase):
         self.assertEqual(1, cohort["open"])
         self.assertEqual(1, cohort["checkpoint_count"])
         self.assertAlmostEqual(10, cohort["unrealized_pnl_usd"])
+        strategy_cohort = report["multi_week_cohort_performance"]["EMERGING_FORWARD_PAPER_HOLD"]
+        self.assertEqual(1, strategy_cohort["open"])
+        self.assertAlmostEqual(10, strategy_cohort["unrealized_pnl_usd"])
 
     def test_multi_week_records_intraday_checkpoints_and_mfe_timestamps(self):
         self.ledger.append({
