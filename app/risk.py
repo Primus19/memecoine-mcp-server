@@ -77,8 +77,10 @@ def validate_ticket(
         errors.append(f"score below {required_score:g}")
     if not policy.news_allowed(t.get("news_score", 0), news_veto=t.get("news_veto") is True):
         errors.append("news policy gate failed")
-    if min(float(t.get("change_1h_pct", 0)), float(t.get("change_24h_pct", 0))) <= 0:
-        errors.append("1h/24h momentum gate failed")
+    if float(t.get("change_24h_pct", 0)) <= 0:
+        errors.append("24h momentum gate failed")
+    if policy.require_positive_1h and float(t.get("change_1h_pct", 0)) <= 0:
+        errors.append("1h momentum gate failed")
     if float(t.get("change_24h_pct", 99)) > policy.max_momentum_24h_pct:
         errors.append(f"24h move exceeds {policy.max_momentum_24h_pct:g}%")
     if actual_tier == "INELIGIBLE":
@@ -94,7 +96,7 @@ def validate_ticket(
     entry = float(t.get("limit_price", 0) or 0)
     target = float(t.get("target_price", 0) or 0)
     expected_gross_bps = ((target / entry) - 1) * 10_000 if entry > 0 and target > entry else 0
-    expected_round_trip_cost_bps = (2 * policy.estimated_fee_bps_per_side
+    expected_round_trip_cost_bps = (policy.round_trip_fee_bps
                                     + float(t.get("spread_bps", 9999))
                                     + 2 * float(t.get("slippage_bps", 9999)))
     if expected_gross_bps < expected_round_trip_cost_bps + policy.minimum_net_edge_bps:
@@ -106,7 +108,7 @@ def validate_ticket(
         win_probability=probability,
         expected_gain_bps=expected_gross_bps,
         expected_loss_bps=expected_loss_bps,
-        fee_bps=2 * policy.estimated_fee_bps_per_side,
+        fee_bps=policy.round_trip_fee_bps,
         spread_bps=float(t.get("spread_bps", 9999)),
         slippage_bps=2 * float(t.get("slippage_bps", 9999)),
     )

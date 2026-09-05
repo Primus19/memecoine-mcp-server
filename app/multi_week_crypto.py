@@ -14,6 +14,7 @@ from typing import Any
 
 STRATEGY = "MULTI_WEEK_CRYPTO_MOMENTUM_V1"
 RESEARCH_COHORT = "EMERGING_FORWARD_PAPER_HOLD"
+LIQUID_TREND_COHORT = "LIQUID_TSMOM_FORWARD_PAPER"
 CHECKPOINT_DAYS = (3, 7, 14, 21, 30, 60, 90)
 
 @dataclass(frozen=True)
@@ -35,6 +36,9 @@ class MultiWeekPolicy:
     maximum_entry_extension_from_20d: float = 0.20
     initial_risk_fraction: float = 0.0025
     maximum_portfolio_risk_fraction: float = 0.01
+    minimum_slow_history_days: int = 200
+    minimum_slow_positive_windows: int = 2
+    minimum_slow_trend_agreement: float = 0.67
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -69,6 +73,11 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
     confirmation_drawdown = candidate.get("confirmation_drawdown_pct")
 
     cex_mode = candidate.get("execution_evidence_mode") == "CEX_ORDER_BOOK"
+    slow_returns = [candidate.get(f"return_{days}d_pct") for days in (90, 120, 180, 270)]
+    available_slow_returns = [_number(value) for value in slow_returns if value is not None]
+    positive_slow_returns = [value for value in available_slow_returns if value > 0]
+    slow_agreement = (len(positive_slow_returns) / len(available_slow_returns)
+                      if available_slow_returns else 0.0)
     hard_checks = (
         (candidate.get("sell_route_ok") is not True, "full-position sell route unavailable"),
         (not cex_mode and candidate.get("security_verified") is not True, "contract safety not verified"),
@@ -84,6 +93,18 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
         (not cex_mode and creator is not None and _number(creator) > policy.maximum_creator_fraction, "creator concentration too high"),
     )
     failures.extend(message for failed, message in hard_checks if failed)
+    if cex_mode:
+        slow_checks = (
+            (int(_number(candidate.get("daily_candle_count"))) < policy.minimum_slow_history_days,
+             "fewer than 200 completed daily candles"),
+            (candidate.get("price_above_200d_average") is not True,
+             "price is not above the 200-day average"),
+            (len(positive_slow_returns) < policy.minimum_slow_positive_windows,
+             "fewer than two positive slow-momentum windows"),
+            (slow_agreement < policy.minimum_slow_trend_agreement,
+             "slow-momentum horizon agreement below 67%"),
+        )
+        failures.extend(message for failed, message in slow_checks if failed)
 
     trend_flags = {
         "above_20d_trend": candidate.get("price_above_20d_average") is True,
@@ -94,7 +115,11 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
         "holder_growth": _number(candidate.get("holder_growth_7d_pct")) > 0,
         "venue_liquidity_persistence": cex_mode and candidate.get("venue_operational") is True,
     }
-    trend_points = sum(trend_flags.values()) * 8.0
+    if cex_mode:
+        trend_points = min(44.0, len(positive_slow_returns) * 10.0 +
+                           (12.0 if candidate.get("price_above_200d_average") is True else 0.0))
+    else:
+        trend_points = sum(trend_flags.values()) * 8.0
     execution_points = 0.0
     if recovery >= 0.99:
         execution_points += 12
@@ -125,7 +150,7 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
         failures.append("entry is extended or lacks a controlled consolidation")
 
     score = min(100.0, trend_points + execution_points + confirmation_points + entry_quality_points)
-    if sum(trend_flags.values()) < 4:
+    if not cex_mode and sum(trend_flags.values()) < 4:
         failures.append("multi-week trend persistence is incomplete")
     if score < policy.minimum_score:
         failures.append(f"score {score:.1f} below {policy.minimum_score:.1f}")
@@ -190,13 +215,25 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
         "research_eligible": research_eligible,
         "research_failures": research_failures,
         "research_score": round(research_score, 2),
-        "decision": ("PAPER_STAGE_1" if qualified else
+        "decision": ("PAPER_ALLOCATION" if qualified and cex_mode else
+                     "PAPER_STAGE_1" if qualified else
                      "RESEARCH_PAPER_HOLD" if research_eligible else "FORWARD_TRACK"),
-        "cohort": "QUALIFIED" if qualified else RESEARCH_COHORT if research_eligible else "TRACK_ONLY",
+        "cohort": (LIQUID_TREND_COHORT if qualified and cex_mode else
+                   "QUALIFIED" if qualified else
+                   RESEARCH_COHORT if research_eligible else "TRACK_ONLY"),
         "score": round(score, 2),
         "hard_gate_failures": failures,
         "warnings": warnings,
         "trend_evidence": trend_flags,
+        "slow_trend_evidence": {
+            "daily_candle_count": int(_number(candidate.get("daily_candle_count"))),
+            "price_above_200d_average": candidate.get("price_above_200d_average") is True,
+            "positive_windows": len(positive_slow_returns),
+            "available_windows": len(available_slow_returns),
+            "agreement": round(slow_agreement, 4),
+            "returns_pct": {str(days): candidate.get(f"return_{days}d_pct")
+                            for days in (90, 120, 180, 270)},
+        },
         "checkpoint_days": list(CHECKPOINT_DAYS),
         "entry_plan": {
             "stage_1_fraction": 0.25,
@@ -222,6 +259,7 @@ def manage_position(position: dict[str, Any], market: dict[str, Any]) -> dict[st
     giveback = (peak - price) / max(peak - entry, risk)
 
     research_only = position.get("research_only") is True
+    liquid_trend = position.get("research_cohort") == LIQUID_TREND_COHORT
     market_cap = _number(market.get("market_cap_usd"))
     liquidity = _number(market.get("liquidity_usd"))
     volume = _number(market.get("volume_24h_usd"))
@@ -241,12 +279,18 @@ def manage_position(position: dict[str, Any], market: dict[str, Any]) -> dict[st
             market.get("execution_evidence_mode") == "CEX_ORDER_BOOK" and
             market.get("venue_operational") is True))
     )
-    trend_break = (not research_only or int(_number(market.get("daily_candle_count"))) >= 20) and sum((
-        market.get("price_above_20d_average") is not True,
-        market.get("daily_higher_lows") is not True,
-        _number(market.get("relative_strength_7d_pct")) <= 0,
-        _number(market.get("volume_7d_vs_prior_ratio")) < 0.8,
-    )) >= 3
+    if liquid_trend:
+        slow_values = [market.get(f"return_{days}d_pct") for days in (90, 120, 180, 270)]
+        slow_values = [_number(value) for value in slow_values if value is not None]
+        trend_break = (market.get("price_above_200d_average") is not True and
+                       sum(value > 0 for value in slow_values) < 2)
+    else:
+        trend_break = (not research_only or int(_number(market.get("daily_candle_count"))) >= 20) and sum((
+            market.get("price_above_20d_average") is not True,
+            market.get("daily_higher_lows") is not True,
+            _number(market.get("relative_strength_7d_pct")) <= 0,
+            _number(market.get("volume_7d_vs_prior_ratio")) < 0.8,
+        )) >= 3
 
     profit_tier = ""
     if hard_exit:

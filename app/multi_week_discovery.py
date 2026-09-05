@@ -22,6 +22,26 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _trailing_return(closes: list[float], days: int) -> float | None:
+    if len(closes) <= days or closes[-days - 1] <= 0:
+        return None
+    return (closes[-1] / closes[-days - 1] - 1) * 100
+
+
+def _annualized_volatility(closes: list[float], days: int = 30) -> float | None:
+    window = closes[-(days + 1):]
+    if len(window) < days + 1:
+        return None
+    returns = [math.log(window[index] / window[index - 1])
+               for index in range(1, len(window))
+               if window[index] > 0 and window[index - 1] > 0]
+    if len(returns) < days:
+        return None
+    mean = _mean(returns)
+    variance = _mean([(value - mean) ** 2 for value in returns])
+    return math.sqrt(variance) * math.sqrt(365)
+
+
 class ConfirmationLedger:
     """Durable evidence that a setup persisted; repeated minute scans do not count."""
 
@@ -96,6 +116,7 @@ def derive_snapshot(asset: dict[str, Any], ledger: ConfirmationLedger) -> dict[s
     volumes = [_number(row.get("volume_usd")) for row in candles]
     price = _number(asset.get("price"), closes[-1] if closes else 0)
     average20 = _mean(closes[-20:])
+    average200 = _mean(closes[-200:]) if len(closes) >= 200 else 0.0
     high20 = max(highs[-20:] or [price])
     relative7 = ((price / closes[-8] - 1) * 100 if len(closes) >= 8 else 0) - _number(
         asset.get("benchmark_return_7d_pct"))
@@ -108,12 +129,23 @@ def derive_snapshot(asset: dict[str, Any], ledger: ConfirmationLedger) -> dict[s
     pullback = 1 - price / high20 if high20 > 0 else 1
     range3 = (max(highs[-3:] or [price]) / max(min(lows[-3:] or [price]), 1e-30) - 1)
     consolidation = 0 <= pullback <= .15 and range3 <= .12 and extension <= .20
+    slow_returns = {days: _trailing_return(closes, days) for days in (90, 120, 180, 270)}
+    annualized_volatility = _annualized_volatility(closes)
+    available_slow_returns = [value for value in slow_returns.values() if value is not None]
+    positive_slow_returns = [value for value in available_slow_returns if value > 0]
+    slow_agreement = (len(positive_slow_returns) / len(available_slow_returns)
+                      if available_slow_returns else 0.0)
     observed_at = str(asset.get("observed_at") or datetime.now(UTC).isoformat())
     identity = f"{str(asset.get('chain') or '').lower()}:{str(asset.get('contract') or '').lower()}"
     cex_mode = asset.get("execution_evidence_mode") == "CEX_ORDER_BOOK"
+    slow_cex_preliminary = cex_mode and all((
+        len(closes) >= 200, price > average200 > 0,
+        len(positive_slow_returns) >= 2, slow_agreement >= .67,
+    ))
     fully_verified_preliminary = all((
-        len(closes) >= 20, price > average20 > 0, higher_highs, higher_lows,
-        relative7 > 0, volume_ratio >= 1.10,
+        (slow_cex_preliminary if cex_mode else
+         len(closes) >= 20 and price > average20 > 0 and higher_highs and higher_lows and
+         relative7 > 0 and volume_ratio >= 1.10),
         (_number(asset.get("holder_growth_7d_pct")) > 0 or cex_mode),
         asset.get("sell_route_ok") is True,
         (asset.get("security_verified") is True or
@@ -144,6 +176,17 @@ def derive_snapshot(asset: dict[str, Any], ledger: ConfirmationLedger) -> dict[s
         "extension_from_20d_fraction": round(extension, 6),
         "controlled_pullback_or_consolidation": consolidation,
         "derived_20d_average": round(average20, 12),
+        "derived_200d_average": round(average200, 12),
+        "price_above_200d_average": price > average200 > 0,
+        "return_90d_pct": slow_returns[90],
+        "return_120d_pct": slow_returns[120],
+        "return_180d_pct": slow_returns[180],
+        "return_270d_pct": slow_returns[270],
+        "slow_trend_positive_windows": len(positive_slow_returns),
+        "slow_trend_available_windows": len(available_slow_returns),
+        "slow_trend_agreement": round(slow_agreement, 6),
+        "annualized_volatility_30d": (round(annualized_volatility, 8)
+                                      if annualized_volatility is not None else None),
         "derived_20d_high": round(high20, 12),
         "derived_pullback_fraction": round(pullback, 6),
         "daily_candle_count": len(closes),

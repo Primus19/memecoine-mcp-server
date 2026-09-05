@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from app.market_feed import (Handler, LOCK, STATE, ThreadingHTTPServer,
                              calendar_evidence, configured_symbols,
-                             _coinbase_execution, coinbase_crypto_market_universe,
+                             _coinbase_candles, _coinbase_execution, coinbase_crypto_market_universe,
                              crypto_market_universe, scan_symbols)
 
 
@@ -39,6 +39,14 @@ class MarketFeedCalendarTests(unittest.TestCase):
         self.assertTrue(result["sell_route_ok"])
         self.assertGreater(result["round_trip_recovery"], .99)
         self.assertLess(result["spread_bps"], 20)
+
+    def test_coinbase_history_retains_enough_completed_days_for_slow_trend(self):
+        candles = [[1_700_000_000 + day * 86400, 90 + day, 101 + day,
+                    95 + day, 100 + day, 1000] for day in range(250)]
+        with patch.dict(os.environ, {"MULTI_WEEK_CRYPTO_HISTORY_DAYS": "300"}), \
+             patch("app.market_feed.fetch_json", return_value=candles):
+            rows = _coinbase_candles("https://exchange.example", "BTC-USD")
+        self.assertEqual(250, len(rows))
 
     def test_coinbase_universe_has_execution_evidence_without_claiming_contract_safety(self):
         products = [{"id": "BTC-USD", "base_currency": "BTC", "quote_currency": "USD",

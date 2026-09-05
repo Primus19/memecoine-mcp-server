@@ -1,0 +1,7 @@
+# Optional: offline research / backtesting only (app.research). Not needed by any
+# deployed service and deliberately excluded from the Dockerfiles.
+-r requirements.txt
+numpy>=1.26
+pandas>=2.2
+scikit-learn>=1.4
+pytest

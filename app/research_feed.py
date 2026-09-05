@@ -178,7 +178,7 @@ class ResearchFeed:
         tier = self.policy.tier(cap, volume)
         if tier == "INELIGIBLE": failures.append("market cap or volume below all policy tiers")
         if not self.policy.min_turnover <= turnover <= self.policy.max_turnover: failures.append("turnover outside policy range")
-        if one <= 0: failures.append("1h momentum not positive")
+        if self.policy.require_positive_1h and one <= 0: failures.append("1h momentum not positive")
         chase_cap = 2.0 if tier == "EMERGING" else 3.0
         if one > chase_cap: failures.append(f"1h momentum above {chase_cap:g}% anti-chase cap")
         if day <= 0 or day > self.policy.max_momentum_24h_pct: failures.append("24h momentum outside policy range")
@@ -229,7 +229,7 @@ class ResearchFeed:
             win_probability=probability,
             expected_gain_bps=target_pct * 100,
             expected_loss_bps=stop_pct * 100,
-            fee_bps=2 * self.policy.estimated_fee_bps_per_side,
+            fee_bps=self.policy.round_trip_fee_bps,
         )
         candidate = {
             "signal_id": signal_id, "product_id": product_id, "opportunity_tier": tier,

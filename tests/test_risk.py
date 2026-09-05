@@ -109,3 +109,29 @@ class RiskTests(unittest.TestCase):
             validate_ticket(candidate,available_usdc=25,permitted_capital=25,
                             open_positions=0,product=PRODUCT,allocation_fraction=.35,
                             minimum_score_boost=4)
+
+
+class ExecutionCostPolicyTests(unittest.TestCase):
+    def validate(self, value):
+        validate_ticket(value, available_usdc=25, permitted_capital=25, open_positions=0, product=PRODUCT)
+
+    def test_post_only_entry_lowers_required_edge(self):
+        # 620 bps gross target. Taker round trip (240 fee + 20 spread + 40 slippage) leaves
+        # negative expected value at the conservative 0.56 win probability; a post-only
+        # entry (60 maker + 120 taker) turns the same ticket positive.
+        t=ticket();t["target_price"]=.1062
+        with self.assertRaisesRegex(TicketRejected,"expected value is not positive"):
+            self.validate(t)
+        with patch.dict("os.environ",{"LIVE_ENTRY_POST_ONLY":"true","LIVE_MAKER_FEE_BPS_PER_SIDE":"60"}):
+            self.validate(t)
+
+    def test_positive_1h_gate_is_policy_controlled(self):
+        t=ticket();t["change_1h_pct"]=-.2
+        with self.assertRaisesRegex(TicketRejected,"1h momentum gate failed"):
+            self.validate(t)
+        with patch.dict("os.environ",{"LIVE_REQUIRE_POSITIVE_1H":"false"}):
+            self.validate(t)
+        t["change_24h_pct"]=-1
+        with patch.dict("os.environ",{"LIVE_REQUIRE_POSITIVE_1H":"false"}):
+            with self.assertRaisesRegex(TicketRejected,"24h momentum gate failed"):
+                self.validate(t)

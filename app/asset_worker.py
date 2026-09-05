@@ -132,22 +132,38 @@ def supervise(ledger: PaperLedger, snapshots: list[dict], max_hold_minutes: int 
 def rotate_for_stronger_research_candidate(ledger: PaperLedger,
                                             crypto_snapshots: list[dict]) -> tuple[list[dict], set[str]]:
     """At most one daily paper rotation; never displace a profitable runner."""
-    capacity = max(1, int(os.getenv("MULTI_WEEK_RESEARCH_MAX_OPEN_POSITIONS", "3")))
+    capacity = max(1, int(os.getenv("MULTI_WEEK_TOTAL_MAX_OPEN_POSITIONS", "3")))
+    today = datetime.now(timezone.utc).date()
+    for event in ledger.records():
+        if event.get("type") != "PAPER_CLOSE" or not str(event.get("reason") or "").startswith(
+                "DAILY_OPPORTUNITY_ROTATION"):
+            continue
+        try:
+            if datetime.fromisoformat(str(event.get("recorded_at") or "").replace(
+                    "Z", "+00:00")).date() == today:
+                return [], set()
+        except ValueError:
+            continue
     positions = [item for item in ledger.position_diagnostics()
-                 if item.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY and item.get("research_only")]
+                 if item.get("strategy") == MULTI_WEEK_CRYPTO_STRATEGY]
     if len(positions) < capacity:
         return [], set()
     open_symbols = {str(item.get("symbol") or "").upper() for item in positions}
     candidates = [(evaluate_candidate(item), item) for item in crypto_snapshots
                   if str(item.get("symbol") or "").upper() not in open_symbols]
-    candidates = [(decision, item) for decision, item in candidates if decision.get("research_eligible")]
+    candidates = [(decision, item) for decision, item in candidates
+                  if decision.get("qualified") or decision.get("research_eligible")]
     if not candidates:
         return [], set()
-    best_decision, _ = max(candidates, key=lambda pair: float(pair[0].get("research_score") or 0))
+    best_decision, _ = max(candidates, key=lambda pair: float(
+        pair[0].get("score") if pair[0].get("qualified") else
+        pair[0].get("research_score") or 0))
     weakest = min(positions, key=lambda item: float(item.get("score") or 0))
+    best_score = float(best_decision.get("score") if best_decision.get("qualified") else
+                       best_decision.get("research_score") or 0)
     if (float(weakest.get("age_minutes") or 0) < 1440 or
             float(weakest.get("current_unrealized_pnl_usd") or 0) > 0 or
-            float(best_decision.get("research_score") or 0) < float(weakest.get("score") or 0) + 15):
+            best_score < float(weakest.get("score") or 0) + 15):
         return [], set()
     mark = float(weakest.get("current_mark_price") or 0)
     if mark <= 0:
@@ -220,8 +236,17 @@ def main() -> None:
                     "source_urls": item.get("source_urls") or [],
                 })
             emerging_candidates.sort(key=lambda item: float(item.get("research_score") or 0), reverse=True)
-            crypto_snapshots.sort(
-                key=lambda item: float(evaluate_candidate(item).get("research_score") or 0), reverse=True)
+            def crypto_rank(item: dict) -> tuple[int, float]:
+                decision = evaluate_candidate(item)
+                if decision.get("qualified") and decision.get("cohort") == "LIQUID_TSMOM_FORWARD_PAPER":
+                    return 3, float(decision.get("score") or 0)
+                if decision.get("qualified"):
+                    return 2, float(decision.get("score") or 0)
+                if decision.get("research_eligible"):
+                    return 1, float(decision.get("research_score") or 0)
+                return 0, float(decision.get("research_score") or 0)
+
+            crypto_snapshots.sort(key=crypto_rank, reverse=True)
             snapshots.extend(crypto_snapshots)
             closes = supervise(ledger, snapshots, max(15, int(os.getenv("ASSET_MAX_HOLD_MINUTES", "240"))))
             rotations, rotation_exclusions = rotate_for_stronger_research_candidate(ledger, crypto_snapshots)
@@ -251,6 +276,7 @@ def main() -> None:
                                  research_open=sum(item.get("research_only") is True for item in crypto_positions),
                                  qualified_open=sum(item.get("research_only") is not True for item in crypto_positions))
             crypto_bucket["chain_performance"] = report.get("multi_week_chain_performance") or {}
+            crypto_bucket["cohort_performance"] = report.get("multi_week_cohort_performance") or {}
             crypto_bucket["horizon_checkpoints"] = report.get("multi_week_horizon_checkpoints") or []
             crypto_bucket["intraday_checkpoints"] = report.get("multi_week_intraday_checkpoints") or []
             crypto_bucket["robinhood_chain"] = (report.get("multi_week_chain_performance") or {}).get(

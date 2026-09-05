@@ -559,3 +559,19 @@ class ForexExecutorTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class TrendSleeveQuoteAgeTests(unittest.TestCase):
+    def test_zero_quote_age_is_fresh_not_stale(self):
+        from app.forex_executor import trend_continuation_signals
+        from app.multi_asset import MultiAssetRejected
+        snapshot = {"symbol": "EUR_USD", "session_liquid": True, "tradable": True, "quote_age_seconds": 0.0,
+                    "spread_bps": 1.0, "calendar_verified": True, "economic_event_source": "https://x",
+                    "high_impact_calendar_blackout": False, "market_veto": False}
+        try:
+            trend_continuation_signals(snapshot)
+        except MultiAssetRejected as exc:
+            self.assertNotIn("quote is stale", str(exc))
+        missing = dict(snapshot); missing.pop("quote_age_seconds")
+        with self.assertRaisesRegex(MultiAssetRejected, "quote is stale"):
+            trend_continuation_signals(missing)

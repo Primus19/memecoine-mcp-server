@@ -427,7 +427,8 @@ def trend_continuation_signals(snapshot: dict) -> list[dict]:
         raise MultiAssetRejected("Trend sleeve calendar or market veto is active")
     if snapshot.get("session_liquid") is not True or snapshot.get("tradable") is not True:
         raise MultiAssetRejected("Trend sleeve requires a liquid tradable session")
-    if float(snapshot.get("quote_age_seconds") or 999) > 10:
+    quote_age = snapshot.get("quote_age_seconds")
+    if quote_age is None or float(quote_age) > 10:
         raise MultiAssetRejected("Trend sleeve quote is stale")
     spread = float(snapshot.get("spread_bps") or 999)
     if spread > float(os.getenv("FOREX_TREND_MAX_SPREAD_BPS", "3")):
