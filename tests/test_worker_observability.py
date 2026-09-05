@@ -23,3 +23,14 @@ def test_funnel_accounts_for_each_evaluation():
                               {"status": "REJECTED", "reason": "budget"}])
     assert result == {"evaluated": 2, "filled": 1, "rejected": 1,
                       "rejection_reasons": {"budget": 1}}
+
+
+def test_restored_ledger_prices_trigger_stop_without_division_by_zero():
+    from app.multi_week_crypto import manage_position
+    result = manage_position(
+        {"fill_price": 100, "stop_price": 88, "research_only": True},
+        {"executable_price": 80, "sell_route_ok": True, "round_trip_recovery": .99,
+         "market_cap_usd": 2_000_000, "liquidity_usd": 500_000,
+         "volume_24h_usd": 1_000_000})
+    assert result["action"] == "EXIT"
+    assert "stop" in result["reason"]
