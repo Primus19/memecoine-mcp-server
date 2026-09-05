@@ -17,6 +17,7 @@ from .multi_asset_email import MultiWeekCryptoEmailer
 from .emerging_crypto import refresh_held_position_quotes
 from .worker_observability import monitoring_health, decision_funnel, DualStackHTTPServer
 from .version import deployment_info
+from .robinhood_rpc import RobinhoodConnection
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -188,6 +189,7 @@ def main() -> None:
     confirmations = ConfirmationLedger(os.getenv(
         "MULTI_WEEK_CONFIRMATION_PATH", "/app/data/multi_week_confirmations.json"))
     engine = MultiAssetEngine(ledger)
+    robinhood = RobinhoodConnection()
     held_quote_interval = max(300, min(900, int(os.getenv(
         "MULTI_WEEK_HELD_QUOTE_INTERVAL_SECONDS", "300"))))
     last_held_quote_refresh = 0.0
@@ -315,7 +317,7 @@ def main() -> None:
             if not feed_health["universe_count"]:
                 feed_health.setdefault("last_error", "crypto universe is empty")
             cycle_count += 1
-            runtime = {"last_scan": datetime.now(timezone.utc).isoformat(), "last_error": "",
+            runtime = {"robinhood_connection": robinhood.check(), "last_scan": datetime.now(timezone.utc).isoformat(), "last_error": "",
                        "decision_funnel": decision_funnel(outcomes),
                        "last_outcomes": outcomes[-25:], "last_closes": closes[-25:],
                        "candidate_quote_refresh": {"interval_seconds": 300,
