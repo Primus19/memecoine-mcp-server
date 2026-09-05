@@ -2,11 +2,15 @@
 import json
 import os
 import time
+import re
+from decimal import Decimal
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 CHAIN_ID = 4663
+# Public address supplied by the owner; never a signing credential.
+DEFAULT_WALLET = "0x6484a64a8766eb9e964ef38c559f295e11718b76"
 
 
 def rpc_call(endpoint, method, params):
@@ -56,5 +60,27 @@ class RobinhoodConnection:
             except Exception as exc:
                 # Provider errors often contain the complete credential-bearing URL.
                 report.update(status="RPC_ERROR", error_type=type(exc).__name__)
+        if report["status"] == "READY":
+            wallet = os.getenv("ROBINHOOD_WALLET_ADDRESS", DEFAULT_WALLET).strip()
+            report["wallet"] = {"status": "INVALID_ADDRESS"}
+            if re.fullmatch(r"0x[0-9a-fA-F]{40}", wallet):
+                report["wallet"] = {"address": wallet, "status": "UNVERIFIED"}
+                try:
+                    block_tag = hex(report["block_number"])
+                    balance = int(self.call(endpoint, "eth_getBalance", [wallet, block_tag]), 16)
+                    nonce = int(self.call(endpoint, "eth_getTransactionCount", [wallet, block_tag]), 16)
+                    if balance < 0 or nonce < 0:
+                        raise ValueError("invalid wallet response")
+                    report["wallet"].update(status="OBSERVED", balance_wei=str(balance),
+                        native_balance_eth=str(Decimal(balance) / Decimal(10**18)),
+                        transaction_count=nonce, block_number=report["block_number"],
+                        has_native_gas=balance > 0, ownership_verified=False)
+                    if not balance:
+                        report["execution_blockers"].append("NO_NATIVE_GAS")
+                except Exception as exc:
+                    report["wallet"].update(status="RPC_ERROR", error_type=type(exc).__name__)
+                    report["execution_blockers"].append("WALLET_BALANCE_UNVERIFIED")
+            else:
+                report["execution_blockers"].append("INVALID_WALLET_ADDRESS")
         self.last_check, self.report = clock, report
         return dict(report)
