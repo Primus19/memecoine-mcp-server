@@ -1,0 +1,2 @@
+# Optional offline signer; not loaded by the paper worker.
+eth-account==0.13.7
