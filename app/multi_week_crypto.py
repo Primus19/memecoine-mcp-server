@@ -249,9 +249,13 @@ def evaluate_candidate(candidate: dict[str, Any], policy: MultiWeekPolicy | None
 def manage_position(position: dict[str, Any], market: dict[str, Any]) -> dict[str, Any]:
     """Prospective profit management based only on information available now."""
     policy = MultiWeekPolicy()
-    entry = _number(position.get("entry_price"))
-    stop = _number(position.get("initial_stop_price"))
+    entry = _number(position.get("entry_price") or position.get("fill_price"))
+    stop = _number(position.get("initial_stop_price") or position.get("stop_price"))
     price = _number(market.get("executable_price"))
+    if entry <= 0 or stop <= 0 or price <= 0:
+        return {"action": "HOLD", "fraction": 0.0, "profit_tier": "",
+                "reason": "invalid entry, stop, or executable price; reconciliation required",
+                "monitoring_error": True}
     peak = max(_number(position.get("peak_executable_price"), entry), price)
     risk = max(entry - stop, entry * 0.001)
     r_multiple = (price - entry) / risk
